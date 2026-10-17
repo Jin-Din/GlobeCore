@@ -64,3 +64,6 @@ globecore-harmonyos/local.properties
 版本迭代.md
 
 .kotlin
+
+# 构建工具临时日志（aqtinstall 等）
+*.log
