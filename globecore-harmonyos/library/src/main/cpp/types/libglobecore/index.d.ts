@@ -31,6 +31,17 @@ interface GlobeCore {
   nativeAddTileLayer(handle: number, cacheDir: string, urlTemplate: string, maxLevel: number, overlay: boolean): void;
   nativeSetLayerVisible(handle: number, index: number, visible: boolean): void;
   nativeAddRasterLayer(handle: number, cacheDir: string, path: string): number;
+  /// 移除瓦片图源图层（含栅格层，墓碑；index 为 addTileLayer/addRasterLayer 加入次序）
+  nativeRemoveTileLayer(handle: number, index: number): void;
+  /// 最近一次 nativeAddRasterLayer 失败原因（中文）；成功或从未失败 null
+  nativeGetRasterAddError(handle: number): string | null;
+  /// 全幅加载栅格层（后台整幅直读，独立索引空间）；返回新图层索引，无效 -1
+  nativeAddRasterImageLayer(handle: number, cacheDir: string, path: string): number;
+  nativeSetRasterImageVisible(handle: number, index: number, visible: boolean): void;
+  /// 可见全幅栅格层是否仍有未完成的加载/纹理上传（纯查询不触发重绘）
+  nativeHasRasterLoading(handle: number): boolean;
+  /// 指定全幅栅格层的加载失败原因（中文）；未失败/越界/已成功 null
+  nativeGetRasterImageError(handle: number, index: number): string | null;
 
   // ── 矢量图层 ──
   nativeAddVectorLayer(handle: number, path: string,
@@ -76,6 +87,8 @@ interface GlobeCore {
   nativePickVector(handle: number, sxPx: number, syPx: number): Float64Array | null;
   /// 单击拾取回调（事件源 native 手势识别，坐标 vp）；传 null 反注册
   nativeSetTapCallback(handle: number, callback: ((x: number, y: number) => void) | null): void;
+  /// 长按拾取回调（单指保持按住未越过拖动阈值达长按时长，坐标 vp）；传 null 反注册
+  nativeSetLongPressCallback(handle: number, callback: ((x: number, y: number) => void) | null): void;
   /// [lon, lat]，视口未就绪 null
   nativeScreenToGeo(handle: number, sxPx: number, syPx: number): Float64Array | null;
   /// [ [type], ringCounts, ringsPerFeature, lonlat ]，未命中 null

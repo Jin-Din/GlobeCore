@@ -1,6 +1,6 @@
 // napi_globe_engine.cpp —— GlobeEngine 渲染引擎 NAPI 导出（对应 Android jni/GlobeEngineJni.cpp）。
 //
-// 移植口径：函数名、参数顺序、返回值语义与 NativeLib.kt 的 37 个 external fun 逐一对齐，
+// 移植口径：函数名、参数顺序、返回值语义与 NativeLib.kt 的 external fun 逐一对齐，
 // ArkTS 门面（NativeMapView.ets）与 Kotlin 门面同构；差异仅在 GL 宿主：
 //   - Android 的 surfaceCreated/Changed/drawFrame/releaseGl 由 Kotlin GLSurfaceView 转发，
 //     鸿蒙无对应视图宿主 → 不导出，改由 nativeAttach/nativeDetach + XComponentBridge/EGL 渲染线程管理；
@@ -43,20 +43,22 @@ inline GlobeEngine *toGlobeEngine(int64_t handle) {
 std::mutex g_bridgesMtx;
 std::unordered_map<int64_t, gcohos::XComponentBridge *> g_bridges;
 
-// ── 单击拾取：渲染线程→JS 主线程的 TSFN 投递（native 手势确认后回调 ArkTS）──
-// SURFACE 型 XComponent 触摸只进 native（ArkTS .onTouch 不触发），故单击事件源在渲染线程，
+// ── 单击/长按拾取：渲染线程→JS 主线程的 TSFN 投递（native 手势确认后回调 ArkTS）──
+// SURFACE 型 XComponent 触摸只进 native（ArkTS .onTouch 不触发），故单击/长按事件源在渲染线程，
 // 经 threadsafe function 转投 JS 线程触发用户回调（坐标 vp，与手势通路同口径）。
 struct TapPack {
     float x;
     float y;
 };
 
-struct TapListener {
+/// 手势确认回调注册表：单击与长按各持一条 tsfn（同一 JS 线程投递通路，互不干扰）
+struct GestureListener {
     napi_threadsafe_function tsfn = nullptr;
+    napi_threadsafe_function longPressTsfn = nullptr;
 };
 
 std::mutex g_tapMtx;
-std::unordered_map<int64_t, TapListener> g_tapListeners;
+std::unordered_map<int64_t, GestureListener> g_tapListeners;
 
 void TapCallJs(napi_env env, napi_value jsCb, void * /*context*/, void *data) {
     std::unique_ptr<TapPack> pack(static_cast<TapPack *>(data)); // 销毁广播时 data 为 null
@@ -69,30 +71,76 @@ void TapCallJs(napi_env env, napi_value jsCb, void * /*context*/, void *data) {
     napi_call_function(env, thisArg, jsCb, 2, args, nullptr);
 }
 
-/// 把 handle 对应的投递器装进指定桥（调用方须已持 g_bridgesMtx 之外的安全窗口）；
-/// 取 g_tapListeners 快照构造 std::function，桥不存在（尚未 attach）则留待 attach 时补装。
-std::function<void(float, float)> MakeTapDispatcher(int64_t handle) {
+/// 把 handle 对应注册表里的指定 tsfn 包成投递器（渲染线程调用、非阻塞入队转投 JS 主线程）；
+/// tsfn 未注册则返回空 function（桥侧留待注册后补装）。
+std::function<void(float, float)> MakeGestureDispatcher(int64_t handle, bool longPress) {
     std::lock_guard<std::mutex> lock(g_tapMtx);
     auto it = g_tapListeners.find(handle);
-    if (it == g_tapListeners.end() || it->second.tsfn == nullptr) return nullptr;
-    napi_threadsafe_function tsfn = it->second.tsfn;
+    if (it == g_tapListeners.end()) return nullptr;
+    napi_threadsafe_function tsfn = longPress ? it->second.longPressTsfn : it->second.tsfn;
+    if (tsfn == nullptr) return nullptr;
     return [tsfn](float x, float y) {
         auto *pack = new TapPack{x, y};
-        // 非阻塞入队：队列满/已销毁则丢弃本次单击（宁缺勿悬），转投 JS 主线程
+        // 非阻塞入队：队列满/已销毁则丢弃本次事件（宁缺勿悬），转投 JS 主线程
         if (napi_call_threadsafe_function(tsfn, pack, napi_tsfn_nonblocking) != napi_ok) {
             delete pack;
         }
     };
 }
 
+/// 反注册单击回调（仅拆 tsfn，长按注册保留）
 void ReleaseTapListener(int64_t handle) {
     std::lock_guard<std::mutex> lock(g_tapMtx);
     auto it = g_tapListeners.find(handle);
     if (it == g_tapListeners.end()) return;
     if (it->second.tsfn != nullptr) {
         napi_release_threadsafe_function(it->second.tsfn, napi_tsfn_release); // finalizer 在 JS 线程跑
+        it->second.tsfn = nullptr;
+    }
+}
+
+/// 反注册长按回调（仅拆 tsfn，单击注册保留）
+void ReleaseLongPressListener(int64_t handle) {
+    std::lock_guard<std::mutex> lock(g_tapMtx);
+    auto it = g_tapListeners.find(handle);
+    if (it == g_tapListeners.end()) return;
+    if (it->second.longPressTsfn != nullptr) {
+        napi_release_threadsafe_function(it->second.longPressTsfn, napi_tsfn_release);
+        it->second.longPressTsfn = nullptr;
+    }
+}
+
+/// detach/destroy 时清空 handle 的全部手势 tsfn（join 之后调用：渲染线程已停，不会再碰 tsfn）
+void ReleaseGestureListeners(int64_t handle) {
+    std::lock_guard<std::mutex> lock(g_tapMtx);
+    auto it = g_tapListeners.find(handle);
+    if (it == g_tapListeners.end()) return;
+    if (it->second.tsfn != nullptr) {
+        napi_release_threadsafe_function(it->second.tsfn, napi_tsfn_release);
+    }
+    if (it->second.longPressTsfn != nullptr) {
+        napi_release_threadsafe_function(it->second.longPressTsfn, napi_tsfn_release);
     }
     g_tapListeners.erase(it);
+}
+
+/// 在 JS 线程为指定回调建 tsfn 并返回；失败返回 nullptr（调用方负责写入注册表）。
+napi_threadsafe_function MakeGestureTsfn(napi_env env, napi_value cb, const char *name) {
+    napi_value asyncName = nullptr;
+    napi_create_string_utf8(env, name, NAPI_AUTO_LENGTH, &asyncName);
+    // JS 回调函数直接交给 tsfn（napi 内部持持久引用，CallJs 的 jsCb 参数即此函数）；
+    // 队列上限 16：单击/长按是低频事件，积压只出现在快速连点，满了丢弃新事件而非无限排队。
+    // 注意：OHOS 签名的 context 在 call_js_cb 之前，与 Node 参数序相反。
+    napi_threadsafe_function tsfn = nullptr;
+    const napi_status st = napi_create_threadsafe_function(
+        env, cb, nullptr, asyncName, 16 /*max_queue_size*/, 1 /*initial_thread_count*/,
+        nullptr /*thread_finalize_data*/, nullptr /*thread_finalize_cb*/, nullptr /*context*/,
+        TapCallJs, &tsfn);
+    if (st != napi_ok) {
+        LOGE("%s: create tsfn failed: %d", name, st);
+        return nullptr;
+    }
+    return tsfn;
 }
 
 /// #AARRGGBB 整型颜色拆为 [0,1] 浮点 RGBA（口径同 JNI unpackArgb）
@@ -214,7 +262,7 @@ napi_value NativeDestroy(napi_env env, napi_callback_info info) {
             g_bridges.erase(it);
         }
     }
-    ReleaseTapListener(handle); // join 之后：渲染线程已停，不会再碰 tsfn
+    ReleaseGestureListeners(handle); // join 之后：渲染线程已停，不会再碰 tsfn
     delete toGlobeEngine(handle);
     return nullptr;
 }
@@ -243,8 +291,9 @@ napi_value NativeAttach(napi_env env, napi_callback_info info) {
         delete it->second;
     }
     g_bridges[handle] = bridge;
-    // attach 前已注册的单击回调补装进桥（桥内部再转 host）
-    bridge->setSingleTapCallback(MakeTapDispatcher(handle));
+    // attach 前已注册的单击/长按回调补装进桥（桥内部再转 host）
+    bridge->setSingleTapCallback(MakeGestureDispatcher(handle, false));
+    bridge->setLongPressCallback(MakeGestureDispatcher(handle, true));
     return gcohos::NapiMakeBool(env, true);
 }
 
@@ -267,7 +316,7 @@ napi_value NativeDetach(napi_env env, napi_callback_info info) {
         bridge->shutdown();
         delete bridge;
     }
-    ReleaseTapListener(handle); // 与桥同生命周期：detach 后重 attach 需重设回调（或由上层重调）
+    ReleaseGestureListeners(handle); // 与桥同生命周期：detach 后重 attach 需重设回调（或由上层重调）
     return nullptr;
 }
 
@@ -285,29 +334,47 @@ napi_value NativeSetTapCallback(napi_env env, napi_callback_info info) {
     if (args[1] != nullptr) napi_typeof(env, args[1], &vt);
     if (vt != napi_function) return nullptr; // 传 null/undefined = 反注册
 
-    TapListener reg;
-    napi_value asyncName = nullptr;
-    napi_create_string_utf8(env, "globecore-tap", NAPI_AUTO_LENGTH, &asyncName);
-    // JS 回调函数直接交给 tsfn（napi 内部持持久引用，CallJs 的 jsCb 参数即此函数）；
-    // 队列上限 16：单击是低频事件，积压只出现在快速连点，满了丢弃新击而非无限排队。
-    // 注意：OHOS 签名的 context 在 call_js_cb 之前，与 Node 参数序相反。
-    const napi_status st = napi_create_threadsafe_function(
-        env, args[1], nullptr, asyncName, 16 /*max_queue_size*/, 1 /*initial_thread_count*/,
-        nullptr /*thread_finalize_data*/, nullptr /*thread_finalize_cb*/, nullptr /*context*/,
-        TapCallJs, &reg.tsfn);
-    if (st != napi_ok) {
-        LOGE("nativeSetTapCallback: create tsfn failed: %d", st);
-        return nullptr;
-    }
+    napi_threadsafe_function tsfn = MakeGestureTsfn(env, args[1], "globecore-tap");
+    if (tsfn == nullptr) return nullptr;
     {
         std::lock_guard<std::mutex> lock(g_tapMtx);
-        g_tapListeners[handle] = reg;
+        g_tapListeners[handle].tsfn = tsfn;
     }
     // 装进当前桥（若已 attach）；未 attach 则 NativeAttach 末尾补装
     {
         std::lock_guard<std::mutex> lock(g_bridgesMtx);
         auto it = g_bridges.find(handle);
-        if (it != g_bridges.end()) it->second->setSingleTapCallback(MakeTapDispatcher(handle));
+        if (it != g_bridges.end()) it->second->setSingleTapCallback(MakeGestureDispatcher(handle, false));
+    }
+    return nullptr;
+}
+
+/// nativeSetLongPressCallback(handle, cb)：注册/更新（cb=null 反注册）长按拾取回调。
+/// 事件源：native 手势识别确认的长按（单指保持按住、未越过拖动阈值达长按时长，对齐 Android
+/// GestureDetector.onLongPress），坐标 vp；供宿主弹落点操作菜单等。口径同 nativeSetTapCallback。
+napi_value NativeSetLongPressCallback(napi_env env, napi_callback_info info) {
+    napi_value args[2];
+    gcohos::NapiGetArgs(env, info, 2, args);
+    int64_t handle = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return nullptr;
+
+    ReleaseLongPressListener(handle); // 替换语义：先拆旧投递器
+
+    napi_valuetype vt = napi_undefined;
+    if (args[1] != nullptr) napi_typeof(env, args[1], &vt);
+    if (vt != napi_function) return nullptr; // 传 null/undefined = 反注册
+
+    napi_threadsafe_function tsfn = MakeGestureTsfn(env, args[1], "globecore-long-press");
+    if (tsfn == nullptr) return nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_tapMtx);
+        g_tapListeners[handle].longPressTsfn = tsfn;
+    }
+    // 装进当前桥（若已 attach）；未 attach 则 NativeAttach 末尾补装
+    {
+        std::lock_guard<std::mutex> lock(g_bridgesMtx);
+        auto it = g_bridges.find(handle);
+        if (it != g_bridges.end()) it->second->setLongPressCallback(MakeGestureDispatcher(handle, true));
     }
     return nullptr;
 }
@@ -477,6 +544,81 @@ napi_value NativeAddRasterLayer(napi_env env, napi_callback_info info) {
     const std::string path = gcohos::NapiGetString(env, args[2]);
     if (cacheDir.empty() || path.empty()) return gcohos::NapiMakeInt32(env, -1);
     return gcohos::NapiMakeInt32(env, toGlobeEngine(handle)->addRasterLayer(cacheDir, path));
+}
+
+// 移除一个瓦片图源图层（含栅格层）：墓碑—置 removed + 隐藏，不 erase 以保持其它层 index 稳定；
+// 其纹理由 Renderer 下一帧在 GL 线程释放，后台加载队列即时清空。index 越界/句柄无效忽略。
+// 用于宿主删除栅格图层时就地换层，免整界面 recreate（避免 GL 上下文销毁导致的底图重载闪动）。
+napi_value NativeRemoveTileLayer(napi_env env, napi_callback_info info) {
+    napi_value args[2];
+    gcohos::NapiGetArgs(env, info, 2, args);
+    int64_t handle = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return nullptr;
+    int32_t index = -1;
+    gcohos::NapiGetInt32(env, args[1], index);
+    toGlobeEngine(handle)->removeTileLayer(index);
+    return nullptr;
+}
+
+// 最近一次 nativeAddRasterLayer 失败原因（中文，含文件线索）；成功或从未失败返回 null。供宿主 Toast 展示。
+napi_value NativeGetRasterAddError(napi_env env, napi_callback_info info) {
+    napi_value args[1];
+    gcohos::NapiGetArgs(env, info, 1, args);
+    int64_t handle = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return gcohos::NapiMakeNull(env);
+    const std::string err = toGlobeEngine(handle)->rasterAddError();
+    if (err.empty()) return gcohos::NapiMakeNull(env);
+    return gcohos::NapiMakeString(env, err);
+}
+
+// 添加一个「全幅加载」栅格图层：后台线程整幅直读 tif 为单张贴图，按其 WGS84 四至贴面（UI 线程零 GDAL）。
+// cacheDir 非空时启用全幅 sidecar 磁盘缓存（与 nativeAddRasterLayer 共用同一目录）；空串禁用。
+// 返回新图层索引（0 起，独立于栅格瓦片路的索引空间）；句柄/路径无效返回 -1。
+napi_value NativeAddRasterImageLayer(napi_env env, napi_callback_info info) {
+    napi_value args[3];
+    gcohos::NapiGetArgs(env, info, 3, args);
+    int64_t handle = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return gcohos::NapiMakeInt32(env, -1);
+    const std::string cacheDir = gcohos::NapiGetString(env, args[1]);
+    const std::string path = gcohos::NapiGetString(env, args[2]);
+    if (path.empty()) return gcohos::NapiMakeInt32(env, -1);
+    return gcohos::NapiMakeInt32(env, toGlobeEngine(handle)->addRasterImageLayer(cacheDir, path));
+}
+
+// 设置指定全幅栅格图层可见性（index 为 nativeAddRasterImageLayer 加入次序，0 起）：越界忽略
+napi_value NativeSetRasterImageVisible(napi_env env, napi_callback_info info) {
+    napi_value args[3];
+    gcohos::NapiGetArgs(env, info, 3, args);
+    int64_t handle = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return nullptr;
+    int32_t index = -1;
+    bool visible = false;
+    gcohos::NapiGetInt32(env, args[1], index);
+    gcohos::NapiGetBool(env, args[2], visible);
+    toGlobeEngine(handle)->setRasterImageVisible(index, visible);
+    return nullptr;
+}
+
+// 可见全幅栅格层是否仍有未完成的整幅加载/纹理上传：纯查询不触发重绘，供「加载中」提示轮询。
+napi_value NativeHasRasterLoading(napi_env env, napi_callback_info info) {
+    napi_value args[1];
+    gcohos::NapiGetArgs(env, info, 1, args);
+    int64_t handle = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return gcohos::NapiMakeBool(env, false);
+    return gcohos::NapiMakeBool(env, toGlobeEngine(handle)->hasRasterImageLoading());
+}
+
+// 取指定全幅栅格层的加载失败原因（中文）；未失败/越界/已成功加载返回 null。供加载胶囊结束后 Toast 提示。
+napi_value NativeGetRasterImageError(napi_env env, napi_callback_info info) {
+    napi_value args[2];
+    gcohos::NapiGetArgs(env, info, 2, args);
+    int64_t handle = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return gcohos::NapiMakeNull(env);
+    int32_t index = -1;
+    gcohos::NapiGetInt32(env, args[1], index);
+    const std::string err = toGlobeEngine(handle)->rasterImageError(index);
+    if (err.empty()) return gcohos::NapiMakeNull(env);
+    return gcohos::NapiMakeString(env, err);
 }
 
 // ── 矢量图层 ──
@@ -893,6 +1035,12 @@ napi_value RegisterGlobeEngine(napi_env env, napi_value exports) {
         {"nativeAddTileLayer", nullptr, NativeAddTileLayer, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeSetLayerVisible", nullptr, NativeSetLayerVisible, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeAddRasterLayer", nullptr, NativeAddRasterLayer, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"nativeRemoveTileLayer", nullptr, NativeRemoveTileLayer, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"nativeGetRasterAddError", nullptr, NativeGetRasterAddError, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"nativeAddRasterImageLayer", nullptr, NativeAddRasterImageLayer, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"nativeSetRasterImageVisible", nullptr, NativeSetRasterImageVisible, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"nativeHasRasterLoading", nullptr, NativeHasRasterLoading, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"nativeGetRasterImageError", nullptr, NativeGetRasterImageError, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeAddVectorLayer", nullptr, NativeAddVectorLayer, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeUpdateVectorExtent", nullptr, NativeUpdateVectorExtent, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeHasVectorLoading", nullptr, NativeHasVectorLoading, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -909,6 +1057,7 @@ napi_value RegisterGlobeEngine(napi_env env, napi_value exports) {
         {"nativeClearOverlayLayers", nullptr, NativeClearOverlayLayers, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativePickVector", nullptr, NativePickVector, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeSetTapCallback", nullptr, NativeSetTapCallback, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"nativeSetLongPressCallback", nullptr, NativeSetLongPressCallback, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeScreenToGeo", nullptr, NativeScreenToGeo, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeFeatureGeometry", nullptr, NativeFeatureGeometry, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeSetDisplayDensity", nullptr, NativeSetDisplayDensity, nullptr, nullptr, nullptr, napi_default, nullptr},

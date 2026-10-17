@@ -6,9 +6,9 @@
 //  - 鸿蒙：XComponent(SURFACE) 提供窗口，onLoad 时把其 OPEN_GL 上下文交给 nativeAttach，
 //    native 侧 MapRenderHost 起 EGL 渲染线程接管 GL 生命周期；瓦片到位重绘经
 //    nativeRequestRender 通路（对齐 RENDERMODE_WHEN_DIRTY 按需渲染）。
-// 手势识别（平移/捏合/双指旋转/双指俯仰/双击/惯性/单击）在 native DispatchTouchEvent：
+// 手势识别（平移/捏合/双指旋转/双指俯仰/双击/惯性/单击/长按）在 native DispatchTouchEvent：
 // SURFACE 型 XComponent 触摸不投递 ArkTS .onTouch（实证），[MapGestures] 仅作事件兜底保留；
-// 单击经 NAPI 回调转投本类 tapListener，惯性由渲染线程自驱动。双指旋转与俯仰仅 3D 生效（同 Android 门控）。
+// 单击/长按经 NAPI 回调转投本类 tapListener/longPressListener，惯性由渲染线程自驱动。双指旋转与俯仰仅 3D 生效（同 Android 兜底门控）。
 //
 // 使用方（entry 演示页 / 宿主页面）需：
 //  - 组件 aboutToAppear 自动创建 native 实例，aboutToDisappear 自动 detach + destroy；
@@ -104,6 +104,8 @@ export struct NativeMapView {
   private viewHeight: number = 0;
   /** 单击监听缓存：事件源在 native 手势识别，经 nativeSetTapCallback 注册投递器 */
   private tapListener: ((x: number, y: number) => void) | undefined = undefined;
+  /** 长按监听缓存：事件源在 native 手势识别（长按候选到点），经 nativeSetLongPressCallback 注册投递器 */
+  private longPressListener: ((x: number, y: number) => void) | undefined = undefined;
 
   // ── 对外 API（与 Kotlin NativeMapView 逐一对应）──
 
@@ -143,6 +145,25 @@ export struct NativeMapView {
       NativeLib.nativeSetTapCallback(this.nativeHandle, cb);
     } else {
       NativeLib.nativeSetTapCallback(this.nativeHandle, null);
+    }
+  }
+
+  /**
+   * 设置长按回调：native 手势识别确认长按（单指保持按住、未越过拖动阈值达长按时长）时触发，
+   * 坐标为视图内像素口径（同 setOnTapListener，原样透出不乘密度）；供宿主弹落点操作菜单等。
+   * 注册/反注册时机同 setOnTapListener（口径对齐 Android NativeMapView.setOnLongPressListener）。
+   */
+  setOnLongPressListener(listener: ((x: number, y: number) => void) | undefined): void {
+    this.longPressListener = listener;
+    if (listener !== undefined) {
+      const cb: (x: number, y: number) => void = (x: number, y: number): void => {
+        if (this.longPressListener === listener) {
+          listener(x, y);
+        }
+      };
+      NativeLib.nativeSetLongPressCallback(this.nativeHandle, cb);
+    } else {
+      NativeLib.nativeSetLongPressCallback(this.nativeHandle, null);
     }
   }
 
@@ -205,6 +226,18 @@ export struct NativeMapView {
   }
 
   /**
+   * 移除一个瓦片图源图层（index 为 addTileLayer / addRasterLayer 的加入次序，0 起）：墓碑—native
+   * 置 removed + 隐藏，不 erase 底层容器，其它层 index 保持稳定；其瓦片纹理由 GL 线程下一帧释放
+   * （其它层纹理原封不动），后台加载队列即时清空。宿主删除栅格图层时可调本函数就地生效，不必
+   * 再 recreate 整个界面（recreate 会销毁 GL 上下文，使底图全部瓦片重解码上传 → 可见闪动）。
+   * 越界时 native 忽略；磁盘瓦片缓存不删（下次加入同一文件秒命中）；内部触发一帧重绘。
+   */
+  removeTileLayer(index: number): void {
+    NativeLib.nativeRemoveTileLayer(this.nativeHandle, index);
+    this.requestRender();
+  }
+
+  /**
    * 添加本地栅格图层（tif/img 等 GDAL 可打开格式）：native 内建 GDAL 重投影按墨卡托瓦片
    * 四至即时生成（磁盘缓存未命中时回写 cacheDir 复用）；绘制在底图之上、矢量层之下。
    * 返回图层 index（与 addTileLayer 共享索引空间）；打不开返回 -1。
@@ -213,6 +246,54 @@ export struct NativeMapView {
     const index = NativeLib.nativeAddRasterLayer(this.nativeHandle, cacheDir, path);
     this.requestRender();
     return index;
+  }
+
+  /**
+   * 最近一次 [addRasterLayer] 失败的原因（中文，含文件线索，如「GDAL 无法打开该文件…」「无地理参考…」）：
+   * 成功或从未失败返回 null。纯查询、可主线程调用，供宿主 Toast 向用户反馈具体失败原因。
+   */
+  rasterAddError(): string | null {
+    return NativeLib.nativeGetRasterAddError(this.nativeHandle);
+  }
+
+  /**
+   * 添加一个「全幅加载」栅格图层（tif/img 等）：native 后台线程整幅直读为单张贴图（原生分辨率，仅在超过
+   * 设备 GL_MAX_TEXTURE_SIZE/内存帧时沿 overviews 等比降采样），按其 WGS84 四至贴面绘制（2D/3D 均支持）。
+   * 主线程零 GDAL、立即返回（区别于 [addRasterLayer] 的同步读四至，大文件不卡界面）。返回新图层索引
+   * （0 起，独立于 [addRasterLayer] 的索引空间，供 [setRasterImageVisible] / [rasterImageError]）；
+   * 句柄已释放或路径为空返回 -1。图层加入后不删除，只经可见性开关显隐。
+   * [cacheDir] 非空时启用全幅 sidecar 磁盘缓存（未压缩 raw RGBA，与 [addRasterLayer] 瓦片缓存共用同一
+   * 目录，按原文件名称命名）：命中时二次启动免 GDAL 秒级就绪；传空串禁用。
+   */
+  addRasterImageLayer(cacheDir: string, path: string): number {
+    const index = NativeLib.nativeAddRasterImageLayer(this.nativeHandle, cacheDir, path);
+    this.requestRender();
+    return index;
+  }
+
+  /**
+   * 设置指定全幅栅格图层可见性（index 为 [addRasterImageLayer] 的加入次序，0 起）：隐藏层不绘制、
+   * 不计入 [hasRasterLoading]。index 越界时 native 忽略；内部触发一帧重绘使变更立即生效。
+   */
+  setRasterImageVisible(index: number, visible: boolean): void {
+    NativeLib.nativeSetRasterImageVisible(this.nativeHandle, index, visible);
+    this.requestRender();
+  }
+
+  /**
+   * 可见全幅栅格层是否仍有未完成的整幅加载/纹理上传：纯状态查询、不触发重绘，可主线程调用，
+   * 供「加载中」提示轮询显隐（与 [hasVectorLoading] 并联使用）。隐藏层不计入；句柄已释放返回 false。
+   */
+  hasRasterLoading(): boolean {
+    return NativeLib.nativeHasRasterLoading(this.nativeHandle);
+  }
+
+  /**
+   * 取指定全幅栅格层的加载失败原因（中文，如「文件不存在或已被移动」「数据跨 180° 经线…」）：
+   * 未失败/越界/已成功加载返回 null。纯查询，供加载胶囊消失后 Toast 反馈失败图层。
+   */
+  rasterImageError(index: number): string | null {
+    return NativeLib.nativeGetRasterImageError(this.nativeHandle, index);
   }
 
   /**

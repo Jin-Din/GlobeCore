@@ -196,6 +196,52 @@ export class NativeLib {
     return gc.nativeAddRasterLayer(handle, cacheDir, path);
   }
 
+  /** 移除一个瓦片图源图层（含栅格层，墓碑；index 为 addTileLayer/addRasterLayer 加入次序） */
+  static nativeRemoveTileLayer(handle: number, index: number): void {
+    if (handle !== 0) {
+      gc.nativeRemoveTileLayer(handle, index);
+    }
+  }
+
+  /** 最近一次 nativeAddRasterLayer 失败原因（中文）；成功或从未失败 null。供宿主 Toast 展示 */
+  static nativeGetRasterAddError(handle: number): string | null {
+    if (handle === 0) {
+      return null;
+    }
+    return gc.nativeGetRasterAddError(handle);
+  }
+
+  /** 添加全幅加载栅格图层（后台整幅直读，独立索引空间）；返回新图层索引，无效 -1 */
+  static nativeAddRasterImageLayer(handle: number, cacheDir: string, path: string): number {
+    if (handle === 0) {
+      return -1;
+    }
+    return gc.nativeAddRasterImageLayer(handle, cacheDir, path);
+  }
+
+  /** 设置指定全幅栅格图层可见性（index 为 nativeAddRasterImageLayer 加入次序） */
+  static nativeSetRasterImageVisible(handle: number, index: number, visible: boolean): void {
+    if (handle !== 0) {
+      gc.nativeSetRasterImageVisible(handle, index, visible);
+    }
+  }
+
+  /** 可见全幅栅格层是否仍有未完成的整幅加载/纹理上传（纯查询不触发重绘） */
+  static nativeHasRasterLoading(handle: number): boolean {
+    if (handle === 0) {
+      return false;
+    }
+    return gc.nativeHasRasterLoading(handle);
+  }
+
+  /** 取指定全幅栅格层的加载失败原因（中文）；未失败/越界/已成功加载 null */
+  static nativeGetRasterImageError(handle: number, index: number): string | null {
+    if (handle === 0) {
+      return null;
+    }
+    return gc.nativeGetRasterImageError(handle, index);
+  }
+
   // ── 矢量图层 ──
 
   /** iconArgb 为 ARGB 像素数组（>2^31 大值经 toInt32 折算，口径同 Kotlin IntArray） */
@@ -343,6 +389,13 @@ export class NativeLib {
   static nativeSetTapCallback(handle: number, callback: ((x: number, y: number) => void) | null): void {
     if (handle !== 0) {
       gc.nativeSetTapCallback(handle, callback);
+    }
+  }
+
+  /** 注册长按拾取回调（事件源 native 手势识别，坐标 vp）；传 null 反注册 */
+  static nativeSetLongPressCallback(handle: number, callback: ((x: number, y: number) => void) | null): void {
+    if (handle !== 0) {
+      gc.nativeSetLongPressCallback(handle, callback);
     }
   }
 

@@ -101,6 +101,8 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         ${GLOBECORE_ENGINE_ROOT}/layer/TileCache.cpp
         ${GLOBECORE_ENGINE_ROOT}/layer/TileLoader.cpp
         ${GLOBECORE_ENGINE_ROOT}/layer/VectorLoader.cpp
+        # 全幅栅格加载器（tif 整幅直读为一张 RGBA 位图，后台线程交付 GL 上传）
+        ${GLOBECORE_ENGINE_ROOT}/layer/RasterImageLoader.cpp
         # 网络取瓦片（libcurl 封装）
         ${GLOBECORE_ENGINE_ROOT}/net/HttpClient.cpp
         # GDAL 引导 + OGR 矢量读取 + KML 样式 + 几何构建

@@ -54,6 +54,11 @@ export class MapGestures {
   /** 单击（非双击/拖拽）确认回调：透出视图内屏幕坐标（vp），供宿主矢量要素拾取 */
   onTap: ((x: number, y: number) => void) | undefined = undefined;
 
+  /** 长按（单指保持按住、未越过拖动阈值达长按时长）回调：透出视图内坐标（vp），
+   *  供宿主弹落点操作菜单等；口径对齐 Android MapGestures.onLongPress（兜底通路，
+   *  主路径在 native XComponentBridge 长按候选→NAPI 回调） */
+  onLongPress: ((x: number, y: number) => void) | undefined = undefined;
+
   private sink: GestureSink;
 
   // ── 拖动 / 单击 / 双击 ──
@@ -66,6 +71,11 @@ export class MapGestures {
   private lastTapY: number = 0;
   private lastTapTime: number = 0;
   private singleTapTimer: number = -1;
+
+  // ── 长按（单指保持按住未移动达时长）──
+  // 长按触发后不另设消费标志：单击仅对 duration<doubleTapTimeout 的短按生效（长按后的
+  // 抬指天然不过单击门槛），与 Android GestureDetector（长按后不再发 onSingleTapConfirmed）同口径。
+  private longPressTimer: number = -1;
 
   // ── 捏合 / 旋转 / 俯仰（双指）──
   private pinchInProgress: boolean = false;
@@ -89,6 +99,8 @@ export class MapGestures {
   // 识别阈值（vp/ms）
   private readonly touchSlop: number = 8;
   private readonly doubleTapTimeout: number = 300;
+  /** 长按时长（ms）：对齐 native XComponentBridge 的 kLongPressTimeoutNs（500ms）与系统默认 */
+  private readonly longPressTimeout: number = 500;
   private readonly doubleTapSlop: number = 30;
   private readonly flingMinVelocity: number = 150; // vp/s
   private readonly flingFrictionPerFrame: number = 0.95;
@@ -123,6 +135,7 @@ export class MapGestures {
   /** 停掉惯性滑行的逐帧回调（视图销毁/手势重按时调用） */
   cancelFling(): void {
     this.flingRunning = false;
+    this.clearLongPressTimer(); // 组件销毁等终止场景同步撤销长按候选，防定时器泄漏
   }
 
   // ── 内部实现 ──
@@ -138,8 +151,10 @@ export class MapGestures {
       this.dragging = false;
       this.samples = [];
       this.pushSample(event.timestamp, f.x, f.y);
+      this.scheduleLongPress(f.x, f.y); // 单指按下装载长按候选（移动/抬指/双指时取消）
     } else if (this.fingers.size === 2) {
       // 第二指落下：以本帧两指连线角/距离/质心 Y 为旋转、捏合与俯仰基准
+      this.clearLongPressTimer(); // 双指不是长按
       this.startPinch(event);
     }
   }
@@ -159,6 +174,7 @@ export class MapGestures {
         return;
       }
       this.dragging = true;
+      this.clearLongPressTimer(); // 已越过拖动阈值，不再是长按
     }
     const last = this.lastSample();
     const dx = f.x - last.x;
@@ -185,8 +201,12 @@ export class MapGestures {
       this.lastPinchCentroidY = Number.NaN;
     }
     if (this.fingers.size !== 0 || canceled) {
+      // 仍有手指按着（双指降单指）或事件取消：长按候选不再成立
+      this.clearLongPressTimer();
       return;
     }
+    // 全指抬起：先撤未触发的长按候选（抬指即取消，对齐系统 GestureDetector）
+    this.clearLongPressTimer();
     // 全指抬起：判定单击/双击/惯性
     const f = up !== null ? up : this.firstFinger();
     const moved = Math.abs(f.x - this.downX) + Math.abs(f.y - this.downY);
@@ -409,6 +429,24 @@ export class MapGestures {
     if (this.singleTapTimer >= 0) {
       clearTimeout(this.singleTapTimer);
       this.singleTapTimer = -1;
+    }
+  }
+
+  /** 装载长按候选：单指保持按住、未越过拖动阈值达 longPressTimeout 后触发透出 */
+  private scheduleLongPress(x: number, y: number): void {
+    this.clearLongPressTimer();
+    this.longPressTimer = setTimeout(() => {
+      this.longPressTimer = -1;
+      if (this.onLongPress !== undefined) {
+        this.onLongPress(x, y);
+      }
+    }, this.longPressTimeout);
+  }
+
+  private clearLongPressTimer(): void {
+    if (this.longPressTimer >= 0) {
+      clearTimeout(this.longPressTimer);
+      this.longPressTimer = -1;
     }
   }
 

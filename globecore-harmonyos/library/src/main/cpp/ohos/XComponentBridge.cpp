@@ -71,8 +71,9 @@ XComponentBridge *XComponentBridge::attach(napi_env env, globecore::GlobeEngine 
     bridge->host_ = std::make_unique<MapRenderHost>(engine, window);
     // attach 前已注册的单击回调补装进 host（NAPI setTapCallback 与 XComponent onLoad 无固定先后）
     bridge->host_->setSingleTapCallback(bridge->tapCb_);
-    // 长按到点回调：渲染线程触发后转投本桥 handleLongPress（功能待定，当前仅置长按标志
-    // 抑制随后的单击/惯性）。bridge 拥有 host_（shutdown 先于析构），捕获 this 安全。
+    // 长按到点回调：渲染线程触发后转投本桥 handleLongPress（置长按标志抑制惯性，并经
+    // longPressCb_ 透传 ArkTS 投递器）。接线恒装（未注册回调时仍保留抑制行为），
+    // attach 前后注册的投递器都存在 longPressCb_ 内，无需在此判断。
     bridge->host_->setLongPressCallback([bridge](float x, float y) {
         bridge->handleLongPress(x, y);
     });
@@ -369,12 +370,12 @@ void XComponentBridge::handleTouch(const OH_NativeXComponent_TouchEvent &ev) {
 
 void XComponentBridge::handleLongPress(float xVp, float yVp) {
     // 渲染线程在长按候选到点（单指保持按住、未越过拖动阈值、未抬离）时触发，坐标为视图内 vp。
-    // 置位标志：本次按下序列后续的 UP 不再按单击/惯性处理（见 handleTouch 的 UP 分支门控）。
+    // 置位标志：本次按下序列后续的 UP 不再按惯性处理（见 handleTouch 的 UP 分支门控）；
+    // 单击不否决，口径同 Android MapGestures.handleLongPress（长按与拾取消费由宿主自行决定）。
     gLongPressFired_ = true;
-    // TODO：长按具体功能尚未确定，确定后在此实现（候选如落点上下文菜单 / 打点标注 /
-    //   测量起点等），并按需经 NAPI 回调转投 ArkTS 侧（参照 setSingleTapCallback 通路）。
-    (void) xVp;
-    (void) yVp;
+    // 透传 ArkTS 侧：longPressCb_ 为 NAPI 层注册的 TSFN 投递器（渲染线程直接入队，非阻塞），
+    // 供宿主弹落点操作菜单等；未注册（纯 native 演示/未设回调）则仅置标志。
+    if (longPressCb_) longPressCb_(xVp, yVp);
 }
 
 } // namespace gcohos

@@ -64,11 +64,19 @@ public:
         if (host_) host_->setSingleTapCallback(tapCb_);
     }
 
+    /// 长按确认回调（vp 坐标，渲染线程长按候选到点触发；NAPI 层注册 TSFN 转投 ArkTS 主线程）。
+    /// 补装时机同 setSingleTapCallback：早于 attach 则缓存，attach 建 host 后补装。
+    void setLongPressCallback(std::function<void(float, float)> cb) {
+        longPressCb_ = std::move(cb);
+        if (host_) host_->setLongPressCallback(longPressCb_);
+    }
+
 private:
     XComponentBridge(OH_NativeXComponent *component, globecore::GlobeEngine *engine);
 
     /// 长按到点回调（渲染线程经 host 触发，坐标 vp）：本按下序列标记为长按，后续 UP 不再
-    /// 当单击/惯性处理。当前仅留入口，具体行为待功能确定后补充。
+    /// 当惯性处理（单击不否决，口径同 Android MapGestures.handleLongPress），并透传给
+    /// longPressCb_（NAPI 层 TSFN 转投 ArkTS 主线程，供宿主弹落点操作菜单等）。
     void handleLongPress(float xVp, float yVp);
 
     /// 静态 trampolines：OH_NativeXComponent 回调只给 component 指针，经组件注册表反查实例。
@@ -101,6 +109,7 @@ private:
     std::atomic<bool> gLongPressFired_{false};
 
     std::function<void(float, float)> tapCb_; // 单击回调缓存（attach 时补装进 host）
+    std::function<void(float, float)> longPressCb_; // 长按回调缓存（attach 时补装进 host）
 
     static std::mutex s_registryMtx;
     static std::unordered_map<OH_NativeXComponent *, XComponentBridge *> s_byComponent;
