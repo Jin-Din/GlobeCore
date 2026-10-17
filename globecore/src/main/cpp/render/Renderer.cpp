@@ -218,8 +218,8 @@ varying vec3 vViewDir;
 void main() {
     gl_Position = uMvp * vec4(aPos, 1.0);
     vTexCoord = uUvOffset + aTexCoord * uUvScale;
-    vNormal = aPos + uEye;       // 球面法向（表面 ECEF 方向），片元再归一
-    vViewDir = -aPos;           // 表面→眼点的视线方向，片元再归一
+    vNormal = normalize(aPos + uEye);   // 球面法向（表面 ECEF 方向），顶点阶段归一化避免 mediump 插值丢精度
+    vViewDir = normalize(-aPos);        // 表面→眼点的视线方向，同上
 }
 )GLSL";
 
