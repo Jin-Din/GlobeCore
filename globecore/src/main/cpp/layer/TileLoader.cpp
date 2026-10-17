@@ -4,6 +4,7 @@
 #include "globe/MercatorProjection.h"
 #include "net/HttpClient.h"
 #include "raster/RasterRenderer.h"
+#include "render/ImageDecoder.h"
 #include "util/Log.h"
 
 #include <cmath>
@@ -90,11 +91,17 @@ bool TileLoader::hasUrlTemplate() const {
     return !urlTemplate_.empty();
 }
 
-void TileLoader::setRasterSource(std::string path) {
+void TileLoader::setRasterSource(std::string path, bool hasEnv,
+                                 double minLon, double minLat, double maxLon, double maxLat) {
     std::lock_guard<std::mutex> lk(urlMtx_);
     rasterPath_ = std::move(path);
-    LOGI("TileLoader rasterSource set (len=%zu, gen=%s)",
-         rasterPath_.size(), rasterPath_.empty() ? "off" : "on");
+    // 四至仅在栅格源有效时参与剪枝；换源即重置（空路径禁用生成，亦不剪枝）
+    rasterEnvOk_ = hasEnv && !rasterPath_.empty();
+    rasterEnv_[0] = minLon; rasterEnv_[1] = minLat;
+    rasterEnv_[2] = maxLon; rasterEnv_[3] = maxLat;
+    LOGI("TileLoader rasterSource set (len=%zu, gen=%s, envOk=%d [%.5f,%.5f,%.5f,%.5f])",
+         rasterPath_.size(), rasterPath_.empty() ? "off" : "on",
+         rasterEnvOk_ ? 1 : 0, rasterEnv_[0], rasterEnv_[1], rasterEnv_[2], rasterEnv_[3]);
 }
 
 bool TileLoader::hasRasterSource() const {
@@ -104,6 +111,24 @@ bool TileLoader::hasRasterSource() const {
 
 void TileLoader::request(int z, int x, int y) {
     // 不再因无 URL 模板而跳过：磁盘读取也走本异步管线（GL 线程绝不同步读盘，对齐 参考实现 getTexture 不阻塞渲染线程）。
+
+    // 栅格层 envelope 预判（复刻 WWK TiledSurfaceImage 的 sector 剪枝）：瓦片四至与栅格四至无交集
+    // 则根本不入队——这类瓦片生成端注定无字节（永久失败），剪枝免其占队列/工作线程并进 GDAL 空转。
+    // 判据保守：边界接触算相交（防误剔边缘瓦）；经度跨度>350° 疑跨 180° 经线时停用剪枝（取极值
+    // 包络不可信，全放行交给生成端自行判交集）。先取 urlMtx_ 完成判断后释放，再取 mtx_，不嵌套锁。
+    bool prune = false;
+    {
+        std::lock_guard<std::mutex> lk(urlMtx_);
+        // 跨度>350° 视为疑跨 180° 经线（取极值包络不可信），rasterEnvOk_ 置伪同效：不剪枝全放行
+        if (rasterEnvOk_ && rasterEnv_[2] - rasterEnv_[0] <= 350.0) {
+            double tMinLon = 0.0, tMinLat = 0.0, tMaxLon = 0.0, tMaxLat = 0.0;
+            tileBounds(z, x, y, tMinLon, tMinLat, tMaxLon, tMaxLat);
+            prune = tMaxLon < rasterEnv_[0] || tMinLon > rasterEnv_[2] ||
+                    tMaxLat < rasterEnv_[1] || tMinLat > rasterEnv_[3];
+        }
+    }
+    if (prune) return;
+
     const uint64_t k = key(z, x, y);
     {
         std::lock_guard<std::mutex> lk(mtx_);
@@ -149,6 +174,22 @@ bool TileLoader::hasPendingOrReady() {
     return false;
 }
 
+void TileLoader::cancelPending() {
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        queue_.clear();
+        pending_.clear();
+        failedUntil_.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lk(readyMtx_);
+        ready_.clear();
+    }
+    // 只清队列、不置 stop_/abort_：墓碑槽位仍持有本对象（容器不 erase），工作线程无活可干时自然回到
+    // cv_.wait 挂起（零 CPU，仅留线程栈），且万一上层重新启用该层仍可正常工作；
+    // 在途那块交给它跑完（GDAL 生成不可中断），其交付因无人 drain 而随就绪队列一并作废。
+}
+
 void TileLoader::workerLoop() {
     while (true) {
         Request req{0, 0, 0};
@@ -157,11 +198,38 @@ void TileLoader::workerLoop() {
             cv_.wait(lk, [this] { return stop_ || !queue_.empty(); });
             if (stop_) return;
             if (queue_.empty()) continue;
-            // LIFO 取最新请求：连续手势下视角每帧一换，FIFO 会让工作线程一直下载已滑出
-            // 屏幕的旧视角瓦片，当前视角排在队尾迟迟轮不上（3D 移动时"慢、停下才补齐"）。
-            // 队首的陈旧项由 kMaxQueue 超限丢弃兜底，不会无限积压。
-            req = queue_.back();
-            queue_.pop_back();
+            // 出队策略：级别最细（z 最大）优先，同级取最新（靠队尾）。
+            // 旧 LIFO 被祖先链反转成「最粗祖先最先处理」：叶子与其 z-1..0 链交替入队，LIFO 从队尾
+            // 取即最后入队的深层祖先，首屏被粗级巨瓦堵死（无塔栅格源低级别粗瓦源窗口≈整幅，
+            // 单块实测 6.4s/16.2s），用户真正在看的叶子最后才出。
+            // 现改为：当前可见级叶子先出先画（首屏秒开），粗级祖先自动让位空闲时间——即
+            // 「本层级读取完成后，后台再缓存其他层」；同级优先最新保留旧 LIFO 的手势跟手性
+            // （连续手势下同为新视角的当前级瓦排队尾，仍先于旧视角拿worker）。队首陈旧项
+            // 仍由 kMaxQueue 超限丢弃兜底。队列 ≤kMaxQueue(1200)，逐块线性扫描相对单块
+            // 毫秒～秒级的取字节耗时可忽。
+            size_t best = 0;
+            for (size_t i = 1; i < queue_.size(); ++i) {
+                if (queue_[i].z >= queue_[best].z) best = i; // 同级：下标越大越新
+            }
+            req = queue_[best];
+            queue_.erase(queue_.begin() + static_cast<std::ptrdiff_t>(best));
+        }
+
+        // 诊断采样：本 loader 前若干块处理瓦片逐块打印来源（排查「栅格层零日志」归属问题），超预算自动静默
+        std::string rasterPath;
+        std::string urlTemplateSnapshot;
+        {
+            std::lock_guard<std::mutex> lk(urlMtx_);
+            rasterPath = rasterPath_;
+            urlTemplateSnapshot = urlTemplate_;
+        }
+        const bool sampled = diagSample_.fetch_sub(1) > 0;
+        if (sampled) {
+            LOGI("TileLoader process z=%d x=%d y=%d raster=%s net=%s cacheDir=%s",
+                 req.z, req.x, req.y,
+                 rasterPath.empty() ? "-" : rasterPath.c_str(),
+                 urlTemplateSnapshot.empty() ? "off" : "on",
+                 cache_.baseDir().c_str());
         }
 
         // 1) 先读磁盘缓存（异步，避免 GL 线程阻塞）；命中则直接交付，不联网。
@@ -176,27 +244,24 @@ void TileLoader::workerLoop() {
             haveBytes = false;
         }
         // 2) 磁盘未命中 → 栅格层：按 (z,x,y) 四至用 GDAL 重投影即时生成 PNG 字节，成功则回写缓存
-        if (!haveBytes) {
-            std::string rasterPath;
-            {
-                std::lock_guard<std::mutex> lk(urlMtx_);
-                rasterPath = rasterPath_;
+        if (!haveBytes && !rasterPath.empty()) {
+            bytes.clear();
+            double minLon = 0.0, minLat = 0.0, maxLon = 0.0, maxLat = 0.0;
+            tileBounds(req.z, req.x, req.y, minLon, minLat, maxLon, maxLat);
+            const bool genOk = RasterRenderer::renderTile(rasterPath, minLon, minLat, maxLon, maxLat, 256, bytes);
+            if (sampled) {
+                LOGI("TileLoader raster gen z=%d x=%d y=%d ok=%d bytes=%zu tile=[%.5f,%.5f,%.5f,%.5f]",
+                     req.z, req.x, req.y, genOk ? 1 : 0, bytes.size(), minLon, minLat, maxLon, maxLat);
             }
-            if (!rasterPath.empty()) {
-                bytes.clear();
-                double minLon = 0.0, minLat = 0.0, maxLon = 0.0, maxLat = 0.0;
-                tileBounds(req.z, req.x, req.y, minLon, minLat, maxLon, maxLat);
-                if (RasterRenderer::renderTile(rasterPath, minLon, minLat, maxLon, maxLat, 256, bytes)
-                    && !bytes.empty()) {
-                    cache_.writeTile(req.z, req.x, req.y, bytes);
-                    haveBytes = true;
-                }
-                // 无交集/生成失败：不联网（栅格层无 URL），本瓦片无字节，由祖先兜底或保持透明
+            if (genOk && !bytes.empty()) {
+                cache_.writeTile(req.z, req.x, req.y, bytes);
+                haveBytes = true;
             }
+            // 无交集/生成失败：不联网（栅格层无 URL），本瓦片无字节，由祖先兜底或保持透明
         }
         // 3) 仍未命中 → 联网拉取（可被 abort_ 中断），成功则原子写盘。
         //    响应体须过图像魔数校验才落盘/交付：图源限流时以 HTTP 200 回异常 XML，不可当瓦片污染缓存。
-        if (!haveBytes) {
+        if (!haveBytes && rasterPath.empty()) {
             bytes.clear();
             const std::string url = buildUrl(req.z, req.x, req.y);
             bool ok = !url.empty() &&
@@ -217,15 +282,29 @@ void TileLoader::workerLoop() {
             }
         }
         if (haveBytes) {
-            std::lock_guard<std::mutex> lk(readyMtx_);
-            // 高水位背压：ready_ 逼近上限时丢弃本次交付（字节已落盘，下帧重请求读盘秒得），防无界堆积 OOM
-            if (ready_.size() < kMaxReadyTiles) {
-                ReadyTile rt;
-                rt.z = req.z;
-                rt.x = req.x;
-                rt.y = req.y;
-                rt.bytes = std::move(bytes);
-                ready_.push_back(std::move(rt));
+            // worker 线程解码 RGBA（替代 GL 线程解码）：PNG/JPEG→RGBA8888 在此完成，
+            // GL 线程 drainReady 后只做 glTexImage2D 上传，免一扎瓦片同时就绪时 GL 线程集中解码丢帧。
+            int w = 0, h = 0;
+            std::vector<uint8_t> rgba;
+            if (ImageDecoder::decodeRGBA(bytes.data(), bytes.size(), w, h, rgba)) {
+                std::lock_guard<std::mutex> lk(readyMtx_);
+                // 高水位背压：ready_ 逼近上限时丢弃本次交付（字节已落盘，下帧重请求读盘秒得），防无界堆积 OOM
+                if (ready_.size() < kMaxReadyTiles) {
+                    ReadyTile rt;
+                    rt.z = req.z;
+                    rt.x = req.x;
+                    rt.y = req.y;
+                    rt.width = w;
+                    rt.height = h;
+                    rt.rgba = std::move(rgba);
+                    ready_.push_back(std::move(rt));
+                }
+            } else {
+                // 解码失败：磁盘缓存里的瓦片可能损坏（looksLikeImage 过了但 stb 解不开），删盘自愈；
+                // 计为未取到字节，走失败退避，避免逐帧重刷坏瓦片
+                LOGW("瓦片解码失败，清除缓存 z=%d x=%d y=%d size=%zu", req.z, req.x, req.y, bytes.size());
+                cache_.removeTile(req.z, req.x, req.y);
+                haveBytes = false;
             }
         }
 

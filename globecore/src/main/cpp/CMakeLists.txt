@@ -72,12 +72,26 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         # 3D 球体地基（P1）：WGS84 椭球地理↔笛卡尔/射线求交 + quadtree 可见瓦片细分
         globe/Wgs84Globe.cpp
         globe/Tessellator.cpp
+        # #11 带帧间一致性的地理四叉树（相机微动复用上帧叶集 + 极冠外推覆盖 85°~90°）
+        globe/GeographicQuadtree.cpp
+        # #9 RHI 抽象层：后端无关渲染接口 + GLES2/Vulkan 双后端
+        rhi/RHIFactory.cpp
+        rhi/GLES2Backend.cpp
+        rhi/VulkanBackend.cpp
+        # quantized-mesh 地形 DEM 解码器（Cesium 格式：量化顶点+三角索引→高度采样）
+        terrain/QuantizedMesh.cpp
+        # binary glTF (.glb) v2 解码器（顶点/索引/PBR baseColor 提取，供 3D Tiles 渲染）
+        gltf/GltfDecoder.cpp
+        # 3D Tiles tileset.json 解析器（tile 树+boundingVolume+geometricError+content.uri）
+        layer/TilesetJson.cpp
         # 瓦片磁盘缓存读取（对应 参考实现 layer.cache 的 TileStore 只读部分）
         layer/TileCache.cpp
         # 后台瓦片加载器（线程池联网取瓦片 + 写缓存 + 交付 GL 上传，Phase C）
         layer/TileLoader.cpp
         # 后台矢量加载器（阶段三：读文件 + 投影 + earcut 三角剖分，交付 GL 上传）
         layer/VectorLoader.cpp
+        # 全幅栅格加载器（tif 整幅直读为一张 RGBA 位图，后台线程交付 GL 上传）
+        layer/RasterImageLoader.cpp
         # 网络取瓦片（libcurl 封装，Phase C）
         net/HttpClient.cpp
         # GDAL/OGR 全进程一次引导（阶段三：native 直接读矢量的链接锚点 + 驱动注册）
@@ -88,6 +102,12 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         vector/KmlStyle.cpp
         # 矢量几何构建器（WGS84 几何 → RTC 顶点/earcut 三角化/miter 描边/拾取图元；逐要素并行分片）
         vector/VectorBuilder.cpp
+        # MVT/PBF 矢量瓦片解码器（手写 protobuf wire-format，不依赖 libprotobuf）
+        vector/MvtDecoder.cpp
+        # Mapbox Style JSON 解析+映射（fill/line/circle/symbol paint → VectorStyle）
+        vector/MapboxStyle.cpp
+        # 轻量 JSON 解析器（无外部依赖，递归下降，供 MapboxStyle 解析样式 JSON）
+        util/JsonParser.cpp
         # native 栅格瓦片渲染器（栅格下沉：GDAL 重投影按墨卡托瓦片四至即时生成 PNG，供 TileLoader 消费）
         raster/RasterRenderer.cpp
         # OpenGL ES 渲染器、着色器、纹理与图片解码（对应 参考实现 渲染核心）
@@ -95,6 +115,8 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         render/ShaderProgram.cpp
         render/Texture.cpp
         render/ImageDecoder.cpp
+        # KTX2/ETC2/ASTC 纹理压缩解码（GPU 硬解压，省显存 4-8 倍）
+        render/Ktx2Decoder.cpp
         # 动态字形图集（stb_truetype）：矢量要素标注文本的屏幕空间 billboard 渲染基础
         render/FontAtlas.cpp
         # 数据 IO 桥接（自 app 侧迁入）：符号只挂本模块 Kotlin 门面类（NativeSrs/NativeLayerInfo/NativeVector），

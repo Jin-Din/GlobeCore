@@ -84,11 +84,41 @@ internal object NativeLib {
     /** 设置指定图层可见性（index 为 [nativeAddTileLayer] 加入次序，0 起）：隐藏层不绘制、不取瓦片（如注记显隐开关） */
     external fun nativeSetLayerVisible(handle: Long, index: Int, visible: Boolean)
 
+    /**
+     * 移除一个瓦片图源图层（含 [nativeAddRasterLayer] 的栅格层，index 为加入次序，0 起）：墓碑——native 置
+     * removed + 隐藏，不 erase 底层容器，其它层 index 保持稳定；其瓦片纹理由 GL 线程下一帧释放，后台加载
+     * 队列即时清空（不再为已删层跑 GDAL/联网）。越界/句柄无效忽略。
+     * 用于宿主删除栅格图层时就地换层，免整界面 recreate（recreate 会销毁 GL 上下文→全部纹理重解码→底图闪动）。
+     * 磁盘瓦片缓存不动（下次加入同一文件秒命中）。
+     */
+    external fun nativeRemoveTileLayer(handle: Long, index: Int)
+
     /** 添加一个本地栅格图层（tif/img 等 GDAL 可打开格式）：native 用内建 GDAL 重投影按全球墨卡托瓦片
      * 四至即时生成瓦片（磁盘缓存未命中时），以 alpha 混合绘制在底图之上、矢量层之下（范围外透明）；maxLevel
      * 由栅格分辨率自动推算。返回新图层索引（0 起，与 [nativeAddTileLayer] 共享 layers_ 索引空间，供
      * [nativeSetLayerVisible]）；打不开栅格或句柄无效返回 -1。 */
     external fun nativeAddRasterLayer(handle: Long, cacheDir: String, path: String): Int
+
+    /** 最近一次 [nativeAddRasterLayer] 失败的原因（中文，含文件线索）；成功或从未失败返回 null。供宿主 Toast 展示 */
+    external fun nativeGetRasterAddError(handle: Long): String?
+
+    /** 添加一个「全幅加载」栅格图层：后台线程整幅直读 tif/img 为单张贴图（原生分辨率，超过设备纹理
+     * 边长/内存帽时由 GDAL 沿 overviews 等比降采样），按其 WGS84 四至贴面绘制（2D 平面 / 3D 贴球）。
+     * UI 线程零 GDAL、立即返回。返回新图层索引（0 起，独立于 [nativeAddRasterLayer] 的索引空间，供
+     * [nativeSetRasterImageVisible] / [nativeGetRasterImageError]）；句柄/路径无效返回 -1。
+     * [cacheDir] 非空时启用全幅 sidecar 磁盘缓存（未压缩 raw RGBA，与 [nativeAddRasterLayer] 共用同一
+     * 目录）：二次启动免 GDAL 直读位图；空串禁用。 */
+    external fun nativeAddRasterImageLayer(handle: Long, cacheDir: String, path: String): Int
+
+    /** 设置指定全幅栅格图层可见性（index 为 [nativeAddRasterImageLayer] 加入次序，0 起）：越界忽略 */
+    external fun nativeSetRasterImageVisible(handle: Long, index: Int, visible: Boolean)
+
+    /** 可见全幅栅格层是否仍有未完成的整幅加载/纹理上传：纯查询不触发重绘，供「加载中」胶囊轮询；
+     *  隐藏层不计入（口径同 [nativeHasVectorLoading]）；句柄已释放返回 false。 */
+    external fun nativeHasRasterLoading(handle: Long): Boolean
+
+    /** 取指定全幅栅格层的加载失败原因（中文）；未失败/越界/已成功加载返回 null。供胶囊消失时 Toast 提示 */
+    external fun nativeGetRasterImageError(handle: Long, index: Int): String?
 
     /** 设置定位标记（蓝点）的地理坐标、可见性与移动方位角（headingDeg<0 不画箭头）：在所有瓦片层之上以屏幕固定尺寸绘制 */
     external fun nativeSetLocationMarker(handle: Long, lonDeg: Double, latDeg: Double, visible: Boolean, headingDeg: Double)

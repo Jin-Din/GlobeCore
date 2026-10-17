@@ -62,6 +62,7 @@ struct VectorLayer {
     // ── GL 资源（仅 GL 线程访问）：每类顶点按上传预算切为多个 chunk VBO，绘制逐 chunk 循环──
     struct GlChunk {
         GLuint vbo = 0;
+        GLuint pickIdVbo = 0;  // GPU 拾取：逐顶点 RGBA8 PickID（与 vbo 顶点数对齐），0=未建
         GLsizei vertexCount = 0;
     };
     // 面填充（GL_TRIANGLES）/ 面描边、线要素（各为合批后单条 GL_TRIANGLE_STRIP，段间 degenerate 连接）

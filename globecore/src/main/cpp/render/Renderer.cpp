@@ -3,10 +3,12 @@
 #include "geom/Matrix4.h"
 #include "globe/MercatorProjection.h"
 #include "globe/Tessellator.h"
+#include "globe/GeographicQuadtree.h"
 #include "globe/TileMatrix.h"
 #include "globe/Wgs84Globe.h"
 #include "render/FontAtlas.h"
 #include "render/ImageDecoder.h"
+#include "rhi/RHIFactory.h"
 #include "util/Log.h"
 
 #include <algorithm>
@@ -22,7 +24,12 @@ namespace globecore {
 // 每次准备重建 HAR 前，把 GLOBECORE_BUILD_ID 改成一个全新的唯一串（例如末尾序号 +1，或带上你自定义的标记）。
 // 装机日志出现该串 = 跑的确实是你这次改过、并重新构建 + 重新链接的 HAR；
 // 未出现 / 仍是旧串 = app 还在用旧 HAR（引擎源码根本没进设备）。改完务必：重建 HAR → app Sync/ohpm 重新链接 → 卸载重装。
-#define GLOBECORE_BUILD_ID "v0.1.2-20261002-005"
+#define GLOBECORE_BUILD_ID "v0.1.3-20261006-004"
+
+// 祖先链请求深度帽：叶子只向上请求 4 级。更深的祖先拉伸 >16× 已无兜底价值，而链条请求数是
+// 数量倍增器；尤其无金字塔栅格源，低级别粗瓦源窗口≈整幅（单块秒级～十几秒），砍深度直接减掉
+// 每片叶子的重复全幅读。配合 TileLoader「最细级优先出队」：可见级先出图，祖先垫后且仅 4 级。
+constexpr int kAncestorChainDepth = 4;
 
 namespace {
 
@@ -46,6 +53,46 @@ precision mediump float;
 varying vec4 vColor;
 void main() {
     gl_FragColor = vColor;
+}
+)GLSL";
+
+// ── GPU 拾取着色器（2D 面填充）：aPos + aPickId → 颜色编码 (layerIndex, primIndex) ──
+// 与 colorProgram_ 同口径（aPos + uOffset），但以 PickID 替代顶点色输出；片元直接输出 varying。
+// 拾取 pass 渲到离屏 FBO，glReadPixels 读点击像素解码回 (layerIndex, primIndex) → pickPrims[primIndex].fid。
+const char *const kPickColorVertexSrc = R"GLSL(
+attribute vec2 aPos;
+attribute vec4 aPickId;
+uniform mat4 uMvp;
+uniform vec2 uOffset;
+varying vec4 vPickId;
+void main() {
+    gl_Position = uMvp * vec4(aPos + uOffset, 0.0, 1.0);
+    vPickId = aPickId;
+}
+)GLSL";
+
+// ── GPU 拾取着色器（2D 线/描边）：aPos + aMiter + aPickId → 同上但加 miter 偏移 ──
+// 与 lineProgram_ 同口径（aPos + uOffset + aMiter*uHalfWidthWorld），以 PickID 替代顶点色输出。
+const char *const kPickLineVertexSrc = R"GLSL(
+attribute vec2 aPos;
+attribute vec2 aMiter;
+attribute vec4 aPickId;
+uniform mat4 uMvp;
+uniform vec2 uOffset;
+uniform float uHalfWidthWorld;
+varying vec4 vPickId;
+void main() {
+    vec2 p = aPos + uOffset + aMiter * uHalfWidthWorld;
+    gl_Position = uMvp * vec4(p, 0.0, 1.0);
+    vPickId = aPickId;
+}
+)GLSL";
+
+const char *const kPickFragmentSrc = R"GLSL(
+precision mediump float;
+varying vec4 vPickId;
+void main() {
+    gl_FragColor = vPickId;
 }
 )GLSL";
 
@@ -156,29 +203,82 @@ void main() {
 // ── 3D 球面瓦片纹理着色器：pos3 + uv（交错 9 floats，见 kGlobeFloatsPerVertex），透视 MVP ──
 // uMvp 传 viewProjRtc（顶点已在 CPU 端 double 减眼点，RTC 口径同 2D 相机相对渲染，否则 ECEF ~6.4e6 m
 // 量级下 float32 仅 0.5~1 m 误差，近地视角顶点拖动/自阴影条纹）；uUvOffset/uUvScale 同 2D 做祖先子矩形。
-// 片元复用 kTexFragmentSrc。
+// 加 uEye：顶点算球面法向（normalize(aPos+uEye)，aPos 为减眼后 RTC，加回 eye 得 ECEF 表面点方向即法向）
+// 与视线方向 -aPos（眼点相对表面点的方向），传片元做 Lambert 漫反射 + 边缘 rim glow（大气感）。
 const char *const kGlobeTexVertexSrc = R"GLSL(
 attribute vec3 aPos;
 attribute vec2 aTexCoord;
 uniform mat4 uMvp;
 uniform vec2 uUvOffset;
 uniform vec2 uUvScale;
+uniform vec3 uEye;
 varying vec2 vTexCoord;
+varying vec3 vNormal;
+varying vec3 vViewDir;
 void main() {
     gl_Position = uMvp * vec4(aPos, 1.0);
     vTexCoord = uUvOffset + aTexCoord * uUvScale;
+    vNormal = aPos + uEye;       // 球面法向（表面 ECEF 方向），片元再归一
+    vViewDir = -aPos;           // 表面→眼点的视线方向，片元再归一
 }
 )GLSL";
 
-// 3D 占位着色器：同交错缓冲取 pos3 + color4，画无图无祖先瓦片的棋盘深色。片元复用 kColorFragmentSrc。
+// 3D 瓦片纹理片元着色器：Lambert 漫反射（uSunDir·N）+ 边缘 rim glow（青蓝大气边缘光）。
+// uAmbient 为环境光底（0.25 左右），diff 为日光贡献；rim 在视角切线方向增强模拟大气壳散射。
+const char *const kGlobeTexFragmentSrc = R"GLSL(
+precision mediump float;
+varying vec2 vTexCoord;
+varying vec3 vNormal;
+varying vec3 vViewDir;
+uniform sampler2D uTexture;
+uniform vec3 uSunDir;
+uniform float uAmbient;
+void main() {
+    vec4 tex = texture2D(uTexture, vTexCoord);
+    vec3 n = normalize(vNormal);
+    vec3 v = normalize(vViewDir);
+    float diff = max(dot(n, uSunDir), 0.0);
+    float rim = pow(1.0 - max(dot(n, v), 0.0), 3.0);
+    vec3 color = tex.rgb * (uAmbient + (1.0 - uAmbient) * diff);
+    color += vec3(0.3, 0.5, 0.7) * rim * 0.25;   // 青蓝大气边缘光
+    gl_FragColor = vec4(color, tex.a);
+}
+)GLSL";
+
+// 3D 占位着色器：同交错缓冲取 pos3 + color4，画无图无祖先瓦片的棋盘深色。同样加 uEye 与法向/视线
+// varying，片元用 kGlobeColorFragmentSrc 做 Lambert + rim glow，使占位与纹理瓦片光照一致。
 const char *const kGlobeColorVertexSrc = R"GLSL(
 attribute vec3 aPos;
 attribute vec4 aColor;
 uniform mat4 uMvp;
+uniform vec3 uEye;
 varying vec4 vColor;
+varying vec3 vNormal;
+varying vec3 vViewDir;
 void main() {
     gl_Position = uMvp * vec4(aPos, 1.0);
     vColor = aColor;
+    vNormal = aPos + uEye;
+    vViewDir = -aPos;
+}
+)GLSL";
+
+// 3D 占位瓦片片元着色器：与 kGlobeTexFragmentSrc 同口径（Lambert + rim glow），但 rgb 取顶点色（棋盘深色）。
+const char *const kGlobeColorFragmentSrc = R"GLSL(
+precision mediump float;
+varying vec4 vColor;
+varying vec3 vNormal;
+varying vec3 vViewDir;
+uniform vec3 uSunDir;
+uniform float uAmbient;
+void main() {
+    vec3 n = normalize(vNormal);
+    vec3 v = normalize(vViewDir);
+    float diff = max(dot(n, uSunDir), 0.0);
+    float rim = pow(1.0 - max(dot(n, v), 0.0), 3.0);
+    vec3 color = vColor.rgb * (uAmbient + (1.0 - uAmbient) * diff);
+    color += vec3(0.3, 0.5, 0.7) * rim * 0.25;
+    gl_FragColor = vec4(color, vColor.a);
 }
 )GLSL";
 
@@ -396,7 +496,9 @@ constexpr int kGlobeColorFloatsPerVertex = 7;
 // 边跨径远超视野的超大要素（如低空视角下的国界）弦中点矢高会超出动态高度而被深度剔除，
 // 需配套 CPU 边细分（P2.e）；当前林业调查数据集无此类要素，真机 tilt 验证无缺块回归。
 constexpr double kGlobeVecAltMeters = 500.0;
-// P2.a 3D 描边/线 miter 长度上限制（与 2D VectorBuilder 中 kMiterLimit 同口径，尖角鉗制）
+// #10 大气/光照：3D 球面瓦片环境光底（Lambert 漫反射之外的恒定亮度，保证夜侧不全黑、保留纹理可读）
+constexpr float kGlobeAmbient = 0.25f;
+// P2.a 3D 描边/线 miter 长度上限制（与 2D VectorBuilder 中 kMiterLimit 同口径，尖角钳制）
 constexpr float kGlobeMiterLimit = 4.0f;
 // 球面瓦片网格每边分段数（G×G 四边格 → 每瓦片 2·G·(G+1) 顶点）：G=8 时根瓦片（90°跨径）
 // 棱弦矢高约 6km（球半径的 0.1%，球视轮廓不可见），近地视角瓦片跨径极小更无感；
@@ -645,6 +747,131 @@ VectorLayer::GlChunk uploadVectorChunk(const float *data, size_t floats, int fpv
     return c;
 }
 
+/// GPU 拾取 PickID 编码：layerIndex（0-255）占高 8 位，primIndex（0-16M）占低 24 位。
+/// 拾取 pass 渲到 RGBA8 FBO，glReadPixels 读回后解码 → pickPrims[primIndex].fid。
+inline uint32_t encodePickId(int layerIndex, size_t primIndex) {
+    return (static_cast<uint32_t>(layerIndex & 0xFF) << 24) |
+           (static_cast<uint32_t>(primIndex) & 0x00FFFFFF);
+}
+inline void packPickIdRgba(uint32_t id, uint8_t *out) {
+    out[0] = static_cast<uint8_t>((id >> 24) & 0xFF);
+    out[1] = static_cast<uint8_t>((id >> 16) & 0xFF);
+    out[2] = static_cast<uint8_t>((id >> 8) & 0xFF);
+    out[3] = static_cast<uint8_t>(id & 0xFF);
+}
+/// 从 glReadPixels 的 RGBA 解码回 (layerIndex, primIndex)。返回 false 表示背景（全 0）。
+inline bool decodePickPixel(uint8_t r, uint8_t g, uint8_t b, uint8_t a,
+                            int &outLayer, size_t &outPrim) {
+    const uint32_t id = (static_cast<uint32_t>(r) << 24) |
+                        (static_cast<uint32_t>(g) << 16) |
+                        (static_cast<uint32_t>(b) << 8) |
+                        static_cast<uint32_t>(a);
+    if (id == 0) return false; // 背景（无矢量命中）
+    outLayer = static_cast<int>((id >> 24) & 0xFF);
+    outPrim = static_cast<size_t>(id & 0x00FFFFFF);
+    return true;
+}
+
+/// 同 uploadVectorChunk，但额外创建一张逐顶点 RGBA8 PickID VBO（pickIds 为 vertexCount*4 字节）。
+VectorLayer::GlChunk uploadVectorChunkWithPickId(const float *data, size_t floats, int fpv,
+                                                  const uint8_t *pickIds, size_t pickIdBytes) {
+    VectorLayer::GlChunk c = uploadVectorChunk(data, floats, fpv);
+    if (c.vertexCount > 0 && pickIds && pickIdBytes >= static_cast<size_t>(c.vertexCount) * 4) {
+        glGenBuffers(1, &c.pickIdVbo);
+        glBindBuffer(GL_ARRAY_BUFFER, c.pickIdVbo);
+        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(c.vertexCount * 4),
+                     pickIds, GL_STATIC_DRAW);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+    }
+    return c;
+}
+
+/// 构建面填充 chunk 的逐顶点 PickID 数组。fillVerts 在 [fStart, fEnd) 内按要素序连续，
+/// 每要素的顶点区间由 featSpans[fi] 给出。返回 vertexCount*4 字节 RGBA8 数组。
+std::vector<uint8_t> buildFillPickIds(const VectorGeometry &geom, size_t fStart, size_t fEnd,
+                                      int layerIndex, size_t firstFeat, size_t nextFeat) {
+    const size_t vertCount = (fEnd - fStart) / kColorFloatsPerVertex;
+    std::vector<uint8_t> ids(vertCount * 4, 0);
+    for (size_t fi = firstFeat; fi < nextFeat; ++fi) {
+        const FeatureSpans &s = geom.featSpans[fi];
+        const int vStart = (s.fillStart - static_cast<int>(fStart)) / kColorFloatsPerVertex;
+        const int vCount = s.fillCount / kColorFloatsPerVertex;
+        if (vStart < 0 || vCount <= 0) continue;
+        const uint32_t id = encodePickId(layerIndex, fi);
+        uint8_t rgba[4];
+        packPickIdRgba(id, rgba);
+        for (int v = 0; v < vCount; ++v) {
+            size_t off = (static_cast<size_t>(vStart) + static_cast<size_t>(v)) * 4;
+            if (off + 4 <= ids.size()) {
+                ids[off] = rgba[0]; ids[off+1] = rgba[1]; ids[off+2] = rgba[2]; ids[off+3] = rgba[3];
+            }
+        }
+    }
+    return ids;
+}
+
+/// 构建线/描边 strip batch 的逐顶点 PickID 数组。复刻 buildStripBatch 的顶点布局逻辑
+///（含 degenerate 桥复制顶点），每段 range 的顶点取该 range 所属要素的 pickId。
+/// 桥复制顶点取背景色（0,0,0,0）——零面积三角形不影响拾取。
+/// @param rangeStart  FeatureSpans 中对应 range 的起始字段偏移（&FeatureSpans::outRangeStart 或
+///                    &FeatureSpans::lineRangeStart），用于建 range→要素 映射
+/// @param rangeCount  对应 range 的计数字段偏移
+std::vector<uint8_t> buildStripPickIds(const std::vector<std::pair<int, int>> &ranges,
+                                       size_t fromRange, size_t toRange,
+                                       const std::vector<FeatureSpans> &featSpans,
+                                       size_t featFirst, size_t featNext,
+                                       int layerIndex,
+                                       int FeatureSpans::*rangeStartField,
+                                       int FeatureSpans::*rangeCountField) {
+    // 先算总顶点数（复刻 buildStripBatch 的预留逻辑）
+    size_t estVerts = 0;
+    for (size_t ri = fromRange; ri < toRange; ++ri)
+        if (ranges[ri].second > 0) estVerts += static_cast<size_t>(ranges[ri].second) + 2;
+    std::vector<uint8_t> ids;
+    ids.reserve(estVerts * 4);
+
+    // 预建 range→要素 映射（featSpans 按要素序连续覆盖 range 区间）
+    // 用线性扫描：外层要素、内层 range 均按序递增，range 数有限
+    size_t curFeat = featFirst;
+    auto featForRange = [&](size_t ri) -> size_t {
+        while (curFeat < featNext) {
+            const FeatureSpans &s = featSpans[curFeat];
+            const int start = s.*rangeStartField;
+            const int count = s.*rangeCountField;
+            if (ri >= static_cast<size_t>(start) &&
+                ri < static_cast<size_t>(start) + static_cast<size_t>(count))
+                return curFeat;
+            // ri 在本要素 range 区间之后 → 推进到下一要素
+            if (ri >= static_cast<size_t>(start) + static_cast<size_t>(count))
+                ++curFeat;
+            else
+                break; // ri 在本要素区间之前（不应发生，但防死循环）
+        }
+        return curFeat < featNext ? curFeat : (featNext > 0 ? featNext - 1 : featFirst);
+    };
+
+    bool first = true;
+    for (size_t ri = fromRange; ri < toRange; ++ri) {
+        const auto &rg = ranges[ri];
+        const int c = rg.second;
+        if (c <= 0) continue;
+        if (!first) {
+            // degenerate 桥：2 顶点取背景色（零面积三角形）
+            ids.insert(ids.end(), 8, 0);
+        }
+        const size_t fi = featForRange(ri);
+        const uint32_t id = encodePickId(layerIndex, fi);
+        uint8_t rgba[4];
+        packPickIdRgba(id, rgba);
+        for (int v = 0; v < c; ++v) {
+            ids.push_back(rgba[0]); ids.push_back(rgba[1]);
+            ids.push_back(rgba[2]); ids.push_back(rgba[3]);
+        }
+        first = false;
+    }
+    return ids;
+}
+
 // ── P2.e 3D 矢量分帧流式上传 + 视锥剔除参数 ──
 // 3D 要素组预算按「源(2D RTC) floats」计：转换后 fill 7/6、stroke 14/8 倍膨胀再加桥顶点，
 // 0.5M 源 floats ≈ ≤1M 转换 floats ≈ ≤4MB/chunk，单块 glBufferData 十毫秒级、不拆要素。
@@ -708,7 +935,10 @@ inline bool globeAabbEmpty(const double *bb) { return bb[0] > bb[1]; }
 /// [del]=false 仅放弃句柄不 glDelete（GL 上下文已重建、旧句柄失效场景）。仅 GL 线程调用。
 void resetVectorUpload(VectorLayer &vl, bool del) {
     auto delAll = [del](std::vector<VectorLayer::GlChunk> &chunks) {
-        for (auto &c : chunks) if (del && c.vbo != 0) glDeleteBuffers(1, &c.vbo);
+        for (auto &c : chunks) {
+            if (del && c.vbo != 0) glDeleteBuffers(1, &c.vbo);
+            if (del && c.pickIdVbo != 0) glDeleteBuffers(1, &c.pickIdVbo);
+        }
         chunks.clear();
     };
     delAll(vl.fillChunks);
@@ -742,8 +972,9 @@ void resetVectorUpload(VectorLayer &vl, bool del) {
 } // namespace
 
 Renderer::Renderer(const Navigator &navigator, const std::vector<std::unique_ptr<TileLayer>> &layers,
-                   const std::vector<std::unique_ptr<VectorLayer>> &vectorLayers)
-    : nav_(navigator), layers_(layers), vectorLayers_(vectorLayers) {}
+                   const std::vector<std::unique_ptr<VectorLayer>> &vectorLayers,
+                   const std::vector<std::unique_ptr<RasterImageLayer>> &rasterImageLayers)
+    : nav_(navigator), layers_(layers), vectorLayers_(vectorLayers), rasterImageLayers_(rasterImageLayers) {}
 
 Renderer::~Renderer() {
     // GL 资源必须在 GL 线程删除，故此处不调用 release()（off-thread 调用 glDelete* 会出错）。
@@ -772,12 +1003,25 @@ void Renderer::onSurfaceCreated() {
     // 下一帧据 dirty/invalid 重新上传（与新上下文重建同一口径，避免绑失效纹理名）。
     atlasTex_.abandon();
     markerIconTex_.abandon(); // 罗盘图标纹理属旧上下文：放弃句柄，下一帧据 markerIconRgba_ 重传
+    resetRasterImageGl();     // 全幅栅格纹理句柄失效：abandon 后置，下一帧据常驻 CPU rgba 懒重传
     vboText_ = 0;
     vboIcon_ = 0;
     vboGlobeMesh_ = 0; // 3D 网格动态 VBO 属旧上下文：放弃句柄，下帧逐瓦片重传
     // 矢量层 GL 资源同样属于旧上下文，已失效：清零 VBO 句柄 + glReady（保留 CPU 几何），
     // 下一帧据 geom 重新上传（与瓦片纹理/VBO 重建同一口径，避免绑失效 VBO 导致崩溃）。
     resetVectorGl();
+
+    // #9 RHI 抽象层：创建后端实例（默认 GLES2，经编译守卫可选 Vulkan）并初始化。
+    // 后端 initialize() 内部查询能力上限（如 GL_MAX_TEXTURE_SIZE），替代散落的直接 GL 查询。
+    // 现有 ShaderProgram/Texture 薄封装保留不动，RHI 在更高层抽象状态管理（视口/深度/混合/清除）。
+    rhi_ = createRHIBackend();
+    rhi_->initialize();
+
+    // 设备纹理边长上限：供 GlobeEngine::addRasterImageLayer 取全幅位图边长帽（超出则 GDAL 沿 overviews 降采样）。
+    // 经 RHI 后端查询（GLES2Backend::initialize 内 glGetIntegerv），替代原直接 GL 调用。
+    maxTextureSize_ = rhi_->maxTextureSize();
+    if (maxTextureSize_ < 1024) maxTextureSize_ = 2048;
+    LOGI("Renderer GL_MAX_TEXTURE_SIZE=%d (via RHI:%s)", maxTextureSize_, rhi_->name());
 
     if (!colorProgram_.init(kColorVertexSrc, kColorFragmentSrc)) {
         LOGE("Renderer: color shader init failed");
@@ -835,8 +1079,34 @@ void Renderer::onSurfaceCreated() {
 
     if (vboDynamic_ == 0) glGenBuffers(1, &vboDynamic_);
 
-    // 3D 球体通路：透视瓦片纹理/占位两程序（片元复用 2D 对应片元着色器）
-    if (!globeTexProgram_.init(kGlobeTexVertexSrc, kTexFragmentSrc)) {
+    // GPU 拾取着色器（2D 面填充 + 线/描边两路，片元直接输出 PickID 颜色）
+    if (!pickColorProgram_.init(kPickColorVertexSrc, kPickFragmentSrc)) {
+        LOGE("Renderer: pick color shader init failed");
+    } else {
+        pkAPos_ = pickColorProgram_.attribLocation("aPos");
+        pkAPickId_ = pickColorProgram_.attribLocation("aPickId");
+        pkUMvp_ = pickColorProgram_.uniformLocation("uMvp");
+        pkUOffset_ = pickColorProgram_.uniformLocation("uOffset");
+    }
+    if (!pickLineProgram_.init(kPickLineVertexSrc, kPickFragmentSrc)) {
+        LOGE("Renderer: pick line shader init failed");
+    } else {
+        pkLAPos_ = pickLineProgram_.attribLocation("aPos");
+        pkLAMiter_ = pickLineProgram_.attribLocation("aMiter");
+        pkLAPickId_ = pickLineProgram_.attribLocation("aPickId");
+        pkLUMvp_ = pickLineProgram_.uniformLocation("uMvp");
+        pkLUOffset_ = pickLineProgram_.uniformLocation("uOffset");
+        pkLUHalfWidthWorld_ = pickLineProgram_.uniformLocation("uHalfWidthWorld");
+    }
+    // 拾取 FBO 属旧上下文：放弃句柄（与纹理/VBO 同口径，下帧懒重建）
+    pickFbo_ = 0;
+    pickTex_ = 0;
+    pickW_ = 0;
+    pickH_ = 0;
+
+    // 3D 球体通路：透视瓦片纹理/占位两程序。片元用带 Lambert + rim glow 的 3D 专用着色器
+    //（kGlobeTexFragmentSrc/kGlobeColorFragmentSrc），由 uEye/uSunDir/uAmbient 驱动方向光 + 大气边缘光。
+    if (!globeTexProgram_.init(kGlobeTexVertexSrc, kGlobeTexFragmentSrc)) {
         LOGE("Renderer: globe texture shader init failed");
     } else {
         g3APos_ = globeTexProgram_.attribLocation("aPos");
@@ -845,13 +1115,19 @@ void Renderer::onSurfaceCreated() {
         g3UTexture_ = globeTexProgram_.uniformLocation("uTexture");
         g3UUvOffset_ = globeTexProgram_.uniformLocation("uUvOffset");
         g3UUvScale_ = globeTexProgram_.uniformLocation("uUvScale");
+        g3UEye_ = globeTexProgram_.uniformLocation("uEye");
+        g3USunDir_ = globeTexProgram_.uniformLocation("uSunDir");
+        g3UAmbient_ = globeTexProgram_.uniformLocation("uAmbient");
     }
-    if (!globeColorProgram_.init(kGlobeColorVertexSrc, kColorFragmentSrc)) {
+    if (!globeColorProgram_.init(kGlobeColorVertexSrc, kGlobeColorFragmentSrc)) {
         LOGE("Renderer: globe color shader init failed");
     } else {
         gc3APos_ = globeColorProgram_.attribLocation("aPos");
         gc3AColor_ = globeColorProgram_.attribLocation("aColor");
         gc3UMvp_ = globeColorProgram_.uniformLocation("uMvp");
+        gc3UEye_ = globeColorProgram_.uniformLocation("uEye");
+        gc3USunDir_ = globeColorProgram_.uniformLocation("uSunDir");
+        gc3UAmbient_ = globeColorProgram_.uniformLocation("uAmbient");
     }
     // P2.a 3D 矢量 fill/stroke 两程序（片元均复用 kColorFragmentSrc）
     if (!globeFillProgram_.init(kGlobeFillVertexSrc, kColorFragmentSrc)) {
@@ -950,7 +1226,8 @@ void Renderer::onSurfaceCreated() {
 void Renderer::onSurfaceChanged(int width, int height) {
     viewportWidth_ = width;
     viewportHeight_ = height;
-    glViewport(0, 0, width, height);
+    // #9 RHI：经后端抽象设置视口（GLES2Backend 内 glViewport）
+    if (rhi_) rhi_->setViewport(0, 0, width, height);
     LOGI("Renderer::onSurfaceChanged %d x %d", width, height);
 }
 
@@ -991,19 +1268,29 @@ Renderer::TileTexEntry *Renderer::findAncestorEntry(TexMap &texMap, int level, i
 }
 
 void Renderer::evictTileTextures(TexMap &texMap) {
-    if (texMap.size() <= kMaxCachedTiles) return;
-    // 超容量驱逐排序：先驱逐无纹理的占位条目（已上传纹理受保护），再按 lastUsed 升序淘汰最久未用项。
-    // 若不排除占位优先：3D 大范围视图叶瓦片数超容量时，成功纹理被挤掉→下帧 miss 重请求→
-    // 触发服务限流（HTTP 429）的请求风暴死循环（切 3D 只剩棋盘、切回 2D 也异常的真因）。
+    // 按字节预算淘汰（替代按张数）：累计有效纹理字节，超预算时先驱逐无纹理占位条目（保护已上传纹理），
+    // 再按 lastUsed 升序淘汰最久未用的有效纹理，直到总字节降到预算以下。
+    // 字节预算与按张数相比：512² 高分瓦片不再因张数少而漏网、256² 旧瓦不再因张数多被误留。
+    // 占位优先避免 3D 大范围视图叶瓦片超容量时挤掉成功纹理→miss 重请求→服务限流（HTTP 429）
+    // 请求风暴死循环（切 3D 只剩棋盘、切回 2D 也异常的真因）。
+    size_t totalBytes = 0;
+    for (const auto &kv : texMap) {
+        if (kv.second.tex.isValid()) {
+            totalBytes += size_t(kv.second.tex.width()) * size_t(kv.second.tex.height()) * 4;
+        }
+    }
+    if (totalBytes <= kMaxTextureBytesPerLayer) return;
     std::vector<std::tuple<int, uint64_t, uint64_t>> order; // (有纹理?1:0, lastUsed, key)
     order.reserve(texMap.size());
     for (const auto &kv : texMap)
         order.emplace_back(kv.second.tex.isValid() ? 1 : 0, kv.second.lastUsed, kv.first);
     std::sort(order.begin(), order.end());
-    const size_t toRemove = texMap.size() - kMaxCachedTiles;
-    for (size_t i = 0; i < toRemove && i < order.size(); ++i) {
+    for (size_t i = 0; i < order.size() && totalBytes > kMaxTextureBytesPerLayer; ++i) {
         auto it = texMap.find(std::get<2>(order[i]));
         if (it == texMap.end()) continue;
+        if (it->second.tex.isValid()) {
+            totalBytes -= size_t(it->second.tex.width()) * size_t(it->second.tex.height()) * 4;
+        }
         it->second.tex.release();
         texMap.erase(it);
     }
@@ -1016,10 +1303,26 @@ void Renderer::clearTileTextures() {
     layerTextures_.clear();
 }
 
+void Renderer::discardRemovedLayerTextures() {
+    // 逐层消费「待回收」标志（一次性）：只释放被宿主移除那层的纹理，其余层缓存原封不动——
+    // 删一个栅格层不再牵动底图（旧口径靠整界面 recreate，GL 上下文销毁 → 全部纹理重解码
+    // → 底图先棋盘后瓦片的可见闪动，且 recreate 同时重建矢量层/重读文档，代价远超删除本身）。
+    const size_t n = std::min(layers_.size(), layerTextures_.size());
+    for (size_t li = 0; li < n; ++li) {
+        TileLayer *layer = layers_[li].get(); // 元素可变（容器只 const 引用），exchange 需非 const 原子对象
+        if (layer == nullptr || !layer->discardTextures.exchange(false)) continue;
+        TexMap &texMap = layerTextures_[li];
+        for (auto &kv : texMap) kv.second.tex.release();
+        texMap.clear();
+        LOGI("Renderer discardRemovedLayerTextures layer=%d", static_cast<int>(li));
+    }
+}
+
 bool Renderer::onDrawFrame() {
     // 视图模式分发：3D 球体走独立管线（透视+深度+贴球网格，复用瓦片纹理缓存），2D 正交通路零回归
     if (nav_.viewMode() == Navigator::ViewMode::MODE_3D) return onDrawFrame3D();
-    glClear(GL_COLOR_BUFFER_BIT);
+    // #9 RHI：经后端抽象清除颜色缓冲（GLES2Backend 内 glClear(GL_COLOR_BUFFER_BIT)）
+    if (rhi_) rhi_->clear(RHI_CLEAR_COLOR); else glClear(GL_COLOR_BUFFER_BIT);
     if (colorProgram_.program() == 0 || texProgram_.program() == 0) return false;
 
     ++frameTick_; // LRU 帧标记：本帧用到的纹理 lastUsed 置此值，淘汰时最久未用者先出
@@ -1027,6 +1330,11 @@ bool Renderer::onDrawFrame() {
     if (layers_.empty()) return false;
     // 每层一份纹理缓存，索引与 layers_ 对齐；addTileLayer 在运行期追加图层时按需扩容
     if (layerTextures_.size() != layers_.size()) layerTextures_.resize(layers_.size());
+    // 先回收被移除层的纹理（必须在扩容对齐之后，否则新层尚无 TexMap 可清），再做本帧绘制
+    discardRemovedLayerTextures();
+    // 帧内层数快照：取两容器较小者为本帧遍历边界（正常路径下两者已对齐；若宿主旁路
+    // 绕过 GlobeEngine::drawFrame 的锁调用本函数，至少不会越界引用 layerTextures_ 脏元素）
+    const size_t layerCount = std::min(layers_.size(), layerTextures_.size());
 
     // 相机 → 世界中心与可视半跨度（每帧算一次，各层共享；瓦片级别按各层 maxLevel 分别钳制）
     double cwx = 0.0, cwy = 0.0;
@@ -1045,46 +1353,51 @@ bool Renderer::onDrawFrame() {
     // 绘制顺序（对齐主界面「注记置顶于矢量之上」）：底图瓦片层（非 overlay）→ 矢量层 →
     // 注记 overlay 层 → 定位标记。任一层仍有资源在途则需再画一帧。
     bool needRedraw = false;
-    for (size_t li = 0; li < layers_.size(); ++li) {
+    for (size_t li = 0; li < layerCount; ++li) {
         // 注记 overlay 层留到矢量之后；栅格层虽 overlay=true（alpha 混合）但须与底图同趟画在矢量之前
         if (layers_[li]->overlay && !layers_[li]->raster) continue;
         if (renderLayer(li, cwx, cwy, hw, hh, ortho)) needRedraw = true;
     }
+    // 全幅栅格贴图（tif 整幅直读）：与瓦片栅格同层级——底图瓦片趟之后、矢量层之前
+    if (drawRasterImages2D(cwx, cwy, ortho)) needRedraw = true;
     // 矢量层：绘制在底图之上、注记之下
     if (drawVectorLayers(cwx, cwy, hw, ortho)) needRedraw = true;
     // 点要素图标：屏幕固定 billboard，绘制在矢量层之上、标注之下
     drawVectorIcons(cwx, cwy, hw, ortho);
     // 矢量要素标注：绘制在矢量层之上、注记 overlay 之下（不影响 needRedraw：字体加载/几何就绪由其它路径驱动重绘）
     drawVectorLabels(cwx, cwy, hw, ortho);
-    for (size_t li = 0; li < layers_.size(); ++li) {
+    for (size_t li = 0; li < layerCount; ++li) {
         if (!layers_[li]->overlay || layers_[li]->raster) continue; // 仅注记 overlay 层（栅格已在矢量前绘制）
         if (renderLayer(li, cwx, cwy, hw, hh, ortho)) needRedraw = true;
     }
     // 定位标记（蓝点）叠加在所有图层之上，以屏幕固定尺寸绘制（不影响 needRedraw：其位置更新由外部触发重绘）。
     drawLocationMarker(cwx, cwy, hw, ortho);
+    // 快照本帧 2D 相机参数供 renderPickPass2D 复用（免重算）
+    lastCwx_ = cwx; lastCwy_ = cwy; lastHw_ = hw; lastOrtho_ = ortho;
     return needRedraw;
 }
 
 bool Renderer::renderLayer(size_t layerIndex, double cwx, double cwy, double hw, double hh, const Matrix4 &ortho) {
+    // 双界防护：层数据与纹理缓存任一侧不足即跳过本层（免越界引用脏 TexMap → rehash 非法分配崩溃）
+    if (layerIndex >= layers_.size() || layerIndex >= layerTextures_.size()) return false;
     TileLayer &layer = *layers_[layerIndex];
     // 隐藏层整层跳过（对齐 参考实现 Layer.isEnabled=false）：不绘制、不请求瓦片，也不需要因它再画一帧。
     if (!layer.visible) return false;
     TileLoader &loader = *layer.loader;
     TexMap &texMap = layerTextures_[layerIndex];
 
-    // 交付后台下载就绪的瓦片：解码上传到本层持久缓存（不按级别过滤，供当前级与祖先兜底复用）。
-    // 限制单帧解码上传量：一批瓦片同时就绪（如跨级/联网返回）时若全部在本帧解码会集中占用 GL 线程
-    // 造成掉帧（时快时慢）；取预算内的量、其余留到后续帧渐进补齐，缩放时表现为「由粗到细」连续变清晰。
+    // 交付后台下载就绪的瓦片：上传到本层持久缓存（不按级别过滤，供当前级与祖先兜底复用）。
+    // 解码已在 worker 线程完成（TileLoader::workerLoop），GL 线程只做 glTexImage2D 上传；
+    // 限制单帧上传量：一批瓦片同时就绪时若全部在本帧上传会集中占用 GL 线程造成掉帧，
+    // 取预算内的量、其余留到后续帧渐进补齐，缩放时表现为「由粗到细」连续变清晰。
     {
         constexpr int kMaxDecodePerFrame = 12;
         std::vector<TileLoader::ReadyTile> ready;
         loader.drainReady(ready, kMaxDecodePerFrame);
         for (auto &rt : ready) {
-            int w = 0, h = 0;
-            std::vector<uint8_t> rgba;
-            if (!ImageDecoder::decodeRGBA(rt.bytes.data(), rt.bytes.size(), w, h, rgba)) continue;
+            if (rt.width <= 0 || rt.height <= 0 || rt.rgba.empty()) continue;
             Texture tex;
-            if (!tex.uploadRGBA(rgba.data(), w, h)) continue;
+            if (!tex.uploadRGBA(rt.rgba.data(), rt.width, rt.height)) continue;
             TileTexEntry &e = texMap[tileKey(rt.z, rt.x, rt.y)];
             e.tex.release(); // 若已有占位/旧纹理，先释放再替换
             e.tex = std::move(tex);
@@ -1110,13 +1423,14 @@ bool Renderer::renderLayer(size_t layerIndex, double cwx, double cwy, double hw,
     // 露出深色清屏背景形成「黑边」。外扩后邻块重叠约 1px，彻底盖住缝隙；放大显示下拉伸 <0.5% 不可见。
     const float texelPad = tileWorld * (0.5f / 256.0f);
 
-    // 请求可见叶瓦片及其祖先链的纹理（异步）。对齐 参考实现 沿金字塔路径 getTexture + retrieveTopLevelTiles：
-    // 确保放大/缩小时各级祖先都在缓存中可兜底，不露黑洞。getTexture 命中缓存即返回，不会重复请求。
+    // 请求可见叶瓦片及其近段祖先链的纹理（异步，深度经 kAncestorChainDepth 限帽，不再无界追到 z0——
+    // 理由见文件顶部常量定义）。对齐 参考实现 沿金字塔路径 getTexture + retrieveTopLevelTiles 的兜底意图：
+    // 保证加载途中有祖先可拉伸、不露黑洞。getTexture 命中缓存即返回，不会重复请求。
     for (int ty = tyMin; ty <= tyMax; ++ty) {
         for (int tx = txMin; tx <= txMax; ++tx) {
             getTexture(texMap, loader, level, tx, ty);
-            // 祖先链：level-1 .. 0；(tx,ty) 右移 k 位即第 k 级祖先的行列
-            for (int L = level - 1, k = 1; L >= 0; --L, ++k) {
+            // 祖先链：level-1 .. level-kAncestorChainDepth；(tx,ty) 右移 k 位即第 k 级祖先的行列
+            for (int L = level - 1, k = 1; L >= 0 && k <= kAncestorChainDepth; --L, ++k) {
                 getTexture(texMap, loader, L, tx >> k, ty >> k);
             }
         }
@@ -1236,13 +1550,32 @@ bool Renderer::renderLayer(size_t layerIndex, double cwx, double cwy, double hw,
 
 bool Renderer::onDrawFrame3D() {
     // 清颜色+深度（深度缓冲由 GLSurfaceView 默认 EGLConfig 提供 16bit）；背景仍为深色=太空
-    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    // #9 RHI：经后端抽象清除颜色+深度缓冲
+    if (rhi_) rhi_->clear(RHI_CLEAR_COLOR | RHI_CLEAR_DEPTH);
+    else      glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
     if (globeTexProgram_.program() == 0 || globeColorProgram_.program() == 0) return false;
 
     ++frameTick_; // 与 2D 共用 LRU 帧标记：切换模式后缓存继续按帧号淘汰
 
     const Navigator::Camera3D cam = nav_.camera3D();
     if (!cam.valid) return false;
+
+    // 日光跟随相机（默认）：把日下点置于视野中心偏向屏幕上方 30°——e 为相机天底方向（从地心
+    // 指向相机），t 为屏幕上方向在地表切平面的投影。视野中心入射角仅 30°（Lambert 亮度
+    // cos30≈0.87，始终明亮），斜射又让地形起伏保留明暗层次；背对相机的夜半球自然变暗，
+    // 转到哪里哪里是白天。heading 旋转时光在屏幕空间固定（总从屏幕上方斜照），不随方位跳变。
+    // 外部显式 setSunDirection 后 sunFollowCamera_=false，改用指定的固定太阳方向。
+    if (sunFollowCamera_) {
+        const Vec3 e = cam.eye.normalized();
+        const Vec3 tRaw = cam.up - e * cam.up.dot(e);
+        const double tLen = tRaw.length();
+        if (tLen > 1e-9) {
+            const double kSunTilt = 0.5235987756; // 30°：日下点相对视野中心的偏角
+            sunDir_ = (e * std::cos(kSunTilt) + (tRaw / tLen) * std::sin(kSunTilt)).normalized();
+        } else {
+            sunDir_ = e; // up 恰与视线方向平行（正视天顶）的退化情形：阳光直射视野中心
+        }
+    }
 
     // 绝对 viewProj 仅供 Tessellator 提视锥平面（包围球心为绝对 ECEF）；绘制用 RTC 版：
     // 顶点已在 CPU 端 double 减眼点，若再套含 -s·eye 平移的绝对 view 会二次错位。
@@ -1251,19 +1584,27 @@ bool Renderer::onDrawFrame3D() {
     const Matrix4 viewProjRtc = Matrix4::multiply(cam.proj, viewRtc);
 
     bool needRedraw = false;
+    // 帧内层数快照（同 2D 口径）：在扩容对齐后取两容器较小者，Pass A/B2 共用
+    size_t layerCount = 0;
 
     // Pass A：瓦片球面（开深度）——只画底图与栅格 overlay（栅格须垫矢量之下，2D 同口径）；
     // 注记 overlay（非栅格）留到矢量之后画，对齐 2D「注记置顶于矢量之上」（onDrawFrame 分发序）。
-    glEnable(GL_DEPTH_TEST);
-    glDepthFunc(GL_LEQUAL); // 贴球网格间允许共面覆盖（外扩重叠区后画者胜，免大面片 early-z 拒绘）
+    // #9 RHI：经后端抽象开深度测试 + 设比较函数（GLES2Backend 内 glEnable/glDepthFunc）
+    if (rhi_) { rhi_->setDepthTest(true); rhi_->setDepthFunc(RHIDepthFunc::LessEqual); }
+    else      { glEnable(GL_DEPTH_TEST); glDepthFunc(GL_LEQUAL); } // 贴球网格间允许共面覆盖（外扩重叠区后画者胜，免大面片 early-z 拒绘）
 
     if (!layers_.empty()) {
         if (layerTextures_.size() != layers_.size()) layerTextures_.resize(layers_.size());
-        for (size_t li = 0; li < layers_.size(); ++li) {
+        discardRemovedLayerTextures(); // 同 2D：回收被移除层纹理（3D 与 2D 共用同一层纹理缓存）
+        layerCount = std::min(layers_.size(), layerTextures_.size());
+        for (size_t li = 0; li < layerCount; ++li) {
             if (layers_[li]->overlay && !layers_[li]->raster) continue; // 注记 overlay 留到矢量后
             if (renderGlobeLayer3D(li, cam, viewProjAbs, viewProjRtc)) needRedraw = true;
         }
     }
+
+    // Pass A2：全幅栅格贴图沿经纬网格贴球面（瓦片栅格之后、矢量之前，层级感与 2D 一致）。深度仍开。
+    if (drawRasterImages3D(cam, viewProjRtc)) needRedraw = true;
 
     // Pass B：3D 矢量层（面/描边/线/点/图标），仍开深度、启 polygon offset（实现内局部开关）。
     // drainReady 接管几何，与 2D 共用 loader/glReady 口径；相机未变则绑旧 VBO 直接画。
@@ -1273,7 +1614,7 @@ bool Renderer::onDrawFrame3D() {
 
     // Pass B2：注记 overlay 贴球面画在矢量之上（矢量不写深度 + 抬 vecAlt，若先画会被注记的深度测试挡掉）。
     // 本 Pass 内 fill 的 polygonOffset(+2) 已失效——注记与矢量填充共面斜视时的轻度 z-fight 留待后续优化。
-    for (size_t li = 0; li < layers_.size(); ++li) {
+    for (size_t li = 0; li < layerCount; ++li) {
         if (!layers_[li]->overlay || layers_[li]->raster) continue; // 仅注记 overlay（栅格已在矢量前绘制）
         if (renderGlobeLayer3D(li, cam, viewProjAbs, viewProjRtc)) needRedraw = true;
     }
@@ -1286,29 +1627,30 @@ bool Renderer::onDrawFrame3D() {
     // （内部自关/复开深度测试）。
     drawLocationMarker3D(cam, viewProjRtc);
 
-    glDisable(GL_DEPTH_TEST);
+    // #9 RHI：经后端抽象关深度测试（GLES2Backend 内 glDisable(GL_DEPTH_TEST)）
+    if (rhi_) rhi_->setDepthTest(false); else glDisable(GL_DEPTH_TEST);
     return needRedraw;
 }
 
 bool Renderer::renderGlobeLayer3D(size_t layerIndex, const Navigator::Camera3D &cam,
                                   const Matrix4 &viewProjAbs, const Matrix4 &viewProjRtc) {
+    // 双界防护（同 renderLayer）：越界层直接计为无需再画一帧
+    if (layerIndex >= layers_.size() || layerIndex >= layerTextures_.size()) return false;
     TileLayer &layer = *layers_[layerIndex];
     if (!layer.visible) return false; // 隐藏层整层跳过（同 2D）
     TileLoader &loader = *layer.loader;
     TexMap &texMap = layerTextures_[layerIndex];
 
-    // drain 就绪瓦片解码上传（与 2D renderLayer 同预算）：纹理缓存按 (z,x,y) 键共用，
-    // 2D 下载的瓦片切 3D 直接命中，反之亦然；单帧解码限额防 GL 线程尖峰。
+    // drain 就绪瓦片上传（与 2D renderLayer 同预算）：纹理缓存按 (z,x,y) 键共用，
+    // 2D 下载的瓦片切 3D 直接命中，反之亦然；解码已在 worker 线程完成，单帧上传限额防 GL 线程尖峰。
     {
         constexpr int kMaxDecodePerFrame = 12;
         std::vector<TileLoader::ReadyTile> ready;
         loader.drainReady(ready, kMaxDecodePerFrame);
         for (auto &rt : ready) {
-            int w = 0, h = 0;
-            std::vector<uint8_t> rgba;
-            if (!ImageDecoder::decodeRGBA(rt.bytes.data(), rt.bytes.size(), w, h, rgba)) continue;
+            if (rt.width <= 0 || rt.height <= 0 || rt.rgba.empty()) continue;
             Texture tex;
-            if (!tex.uploadRGBA(rgba.data(), w, h)) continue;
+            if (!tex.uploadRGBA(rt.rgba.data(), rt.width, rt.height)) continue;
             TileTexEntry &e = texMap[tileKey(rt.z, rt.x, rt.y)];
             e.tex.release();
             e.tex = std::move(tex);
@@ -1324,14 +1666,16 @@ bool Renderer::renderGlobeLayer3D(size_t layerIndex, const Navigator::Camera3D &
     tc.eye = cam.eye;
     tc.viewProj = viewProjAbs;
     tc.frustumPlanes = cam.frustumPlanes; // 直接采用 Navigator 预提的 double 平面
-    Tessellator::buildVisibleTiles(tc, targetLevel, layer.maxLevel, tanHalf, viewportHeight_,
+    // #11 用带帧间一致性的地理四叉树替代 Tessellator 全量重建：
+    // 相机微动时复用上帧叶集（零递归），极冠外推覆盖 85°~90° 空洞。
+    geoQuadtree_.buildVisibleTiles(tc, targetLevel, layer.maxLevel, tanHalf, viewportHeight_,
                                    nav_.lodDetailFactor(), Wgs84Globe::instance(), globeTilesScratch_);
 
     // 请求预算：可见叶数可远超纹理缓存容量（3D 全景下千级），若全部插入占位又被驱逐，会逐帧
     // 重复「驱逐→miss 重请求→服务端限流(429)→失败」的风暴。按 z 降序（z 越大距视线越近）
     // 仅对前段叶瓦片请求自身；其余远侧瓦片只请求祖先链（链上各级多与近侧共享，去重后增量很小），
     // 它们绘制时经祖先 UV 子矩形兜底，损失仅在球缘斜视区的精细度。
-    constexpr size_t kGlobeLeafRequestBudget = 192; // < kMaxCachedTiles，留余量给祖先链
+    constexpr size_t kGlobeLeafRequestBudget = 192; // 叶请求预算：与纹理字节预算解耦，限单帧请求数防 429 风暴；留余量给祖先链
     std::stable_sort(globeTilesScratch_.begin(), globeTilesScratch_.end(),
                      [](const GlobeTile &a, const GlobeTile &b) { return a.z > b.z; });
     const size_t leafBudget = std::min(globeTilesScratch_.size(), kGlobeLeafRequestBudget);
@@ -1347,7 +1691,8 @@ bool Renderer::renderGlobeLayer3D(size_t layerIndex, const Navigator::Camera3D &
         const GlobeTile &t = globeTilesScratch_[i];
         getTexture(texMap, loader, t.z, t.x, t.y);
         if (i < leafBudget) {
-            for (int L = t.z - 1, k = 1; L >= 0; --L, ++k) {
+            // 祖先链同 2D：深度帽 kAncestorChainDepth（链本就是数量倍增器，见常量定义与下方请求策略注释）
+            for (int L = t.z - 1, k = 1; L >= 0 && k <= kAncestorChainDepth; --L, ++k) {
                 getTexture(texMap, loader, L, t.x >> k, t.y >> k);
             }
         }
@@ -1369,6 +1714,12 @@ bool Renderer::renderGlobeLayer3D(size_t layerIndex, const Navigator::Camera3D &
         if (!verts.empty()) {
             globeColorProgram_.use();
             glUniformMatrix4fv(gc3UMvp_, 1, GL_FALSE, viewProjRtc.data());
+            // 光照 uniform（占位与纹理瓦片同口径：uEye/uSunDir/uAmbient）
+            glUniform3f(gc3UEye_, static_cast<GLfloat>(cam.eye.x), static_cast<GLfloat>(cam.eye.y),
+                        static_cast<GLfloat>(cam.eye.z));
+            glUniform3f(gc3USunDir_, static_cast<GLfloat>(sunDir_.x), static_cast<GLfloat>(sunDir_.y),
+                        static_cast<GLfloat>(sunDir_.z));
+            glUniform1f(gc3UAmbient_, kGlobeAmbient);
             glBindBuffer(GL_ARRAY_BUFFER, vboGlobeMesh_);
             glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
                          verts.data(), GL_DYNAMIC_DRAW);
@@ -1393,6 +1744,12 @@ bool Renderer::renderGlobeLayer3D(size_t layerIndex, const Navigator::Camera3D &
     }
     globeTexProgram_.use();
     glUniformMatrix4fv(g3UMvp_, 1, GL_FALSE, viewProjRtc.data());
+    // 光照 uniform（方向光 + 大气边缘光）：uEye 供顶点求球面法向、uSunDir 为日光方向、uAmbient 为环境光底
+    glUniform3f(g3UEye_, static_cast<GLfloat>(cam.eye.x), static_cast<GLfloat>(cam.eye.y),
+                static_cast<GLfloat>(cam.eye.z));
+    glUniform3f(g3USunDir_, static_cast<GLfloat>(sunDir_.x), static_cast<GLfloat>(sunDir_.y),
+                static_cast<GLfloat>(sunDir_.z));
+    glUniform1f(g3UAmbient_, kGlobeAmbient);
     glActiveTexture(GL_TEXTURE0);
     glUniform1i(g3UTexture_, 0);
     glBindBuffer(GL_ARRAY_BUFFER, vboGlobeMesh_);
@@ -1439,6 +1796,57 @@ bool Renderer::renderGlobeLayer3D(size_t layerIndex, const Navigator::Camera3D &
     return loader.hasPendingOrReady();
 }
 
+// ==================== 地形 DEM 通路（quantized-mesh 高度缓存 + 球面网格抬升） ====================
+
+void Renderer::setTerrainTile(int z, int x, int y, const std::vector<uint8_t> &bytes) {
+    const uint64_t key = tileKey(z, x, y);
+    if (bytes.empty()) {
+        // 清除该 tile
+        terrainCache_.erase(key);
+        for (auto it = terrainLru_.begin(); it != terrainLru_.end(); ++it) {
+            if (*it == key) { terrainLru_.erase(it); break; }
+        }
+        return;
+    }
+    QuantizedMeshData qm = decodeQuantizedMesh(bytes);
+    if (!qm.valid) {
+        LOGW("setTerrainTile decode failed z=%d x=%d y=%d", z, x, y);
+        return;
+    }
+    // LRU 更新：存在则先移除旧条目，再 push_back
+    terrainCache_[key] = std::move(qm);
+    for (auto it = terrainLru_.begin(); it != terrainLru_.end(); ++it) {
+        if (*it == key) { terrainLru_.erase(it); break; }
+    }
+    terrainLru_.push_back(key);
+    // 淘汰最旧
+    while (terrainLru_.size() > kMaxTerrainTiles) {
+        uint64_t oldest = terrainLru_.front();
+        terrainLru_.pop_front();
+        terrainCache_.erase(oldest);
+    }
+}
+
+void Renderer::clearTerrain() {
+    terrainCache_.clear();
+    terrainLru_.clear();
+}
+
+void Renderer::setSunDirection(const Vec3 &dir) {
+    // 自动归一化（长度过小时保留默认方向，避免除零产生 NaN 污染所有瓦片亮度）
+    const double len = dir.length();
+    sunDir_ = len > 1e-9 ? dir / len : Vec3{1.0, 0.0, 0.3};
+    // 外部显式指定太阳方向 → 退出「跟随相机」模式，之后 3D 每帧不再用相机位置覆盖 sunDir_。
+    sunFollowCamera_ = false;
+}
+
+double Renderer::sampleTerrainHeight(const GlobeTile &tile, double lon, double lat) const {
+    const uint64_t key = tileKey(tile.z, tile.x, tile.y);
+    auto it = terrainCache_.find(key);
+    if (it == terrainCache_.end()) return 0.0;
+    return it->second.sampleHeight(lon, lat);
+}
+
 void Renderer::buildGlobeTileMesh(const GlobeTile &tile, const Vec3 &eye, float r, float g, float b,
                                   std::vector<float> &verts) const {
     // 包围盒外约 0.75% 外扩：盖住不同级别邻瓦片的 T 形缝隙（深度测试裁决前后，轻微 z-fighting
@@ -1449,6 +1857,10 @@ void Renderer::buildGlobeTileMesh(const GlobeTile &tile, const Vec3 &eye, float 
     const double latN = tile.latMax + padLat, latS = tile.latMin - padLat;
     const Wgs84Globe &globe = Wgs84Globe::instance();
     constexpr int G = kGlobeGridDiv;
+    // 查一次 DEM 缓存：有则逐顶点采样高度抬升球面网格，无则 alt=0 贴地（零开销）
+    const uint64_t terrainKey = tileKey(tile.z, tile.x, tile.y);
+    auto terrainIt = terrainCache_.find(terrainKey);
+    const QuantizedMeshData *dem = (terrainIt != terrainCache_.end()) ? &terrainIt->second : nullptr;
     for (int row = 0; row < G; ++row) {
         for (int c = 0; c <= G; ++c) {
             const double u = static_cast<double>(c) / G; // 0=西（lonMin）
@@ -1457,8 +1869,9 @@ void Renderer::buildGlobeTileMesh(const GlobeTile &tile, const Vec3 &eye, float 
                 // 逐行 (上,下) 顶点对→ GL_TRIANGLE_STRIP；跨带缠绕方向交替但未开背面剪裁，无影响
                 const double v = static_cast<double>(row + e) / G; // 0=北边=图像顶行（同 2D 单位四边形口径）
                 const double lat = latN + (latS - latN) * v;
+                const double alt = dem ? dem->sampleHeight(lon, lat) : 0.0;
                 Vec3 p;
-                globe.geographicToCartesian(lon, lat, 0.0, p);
+                globe.geographicToCartesian(lon, lat, alt, p);
                 p -= eye; // RTC：double 差后转 float（ECEF 量级 ~6.4e6 m，绝对坐标不可直上 float）
                 verts.push_back(static_cast<float>(p.x));
                 verts.push_back(static_cast<float>(p.y));
@@ -1480,6 +1893,188 @@ void Renderer::setLocationMarker(double lonDeg, double latDeg, bool visible, dou
     markerLat_ = latDeg;
     markerVisible_ = visible;
     markerHeading_ = headingDeg;
+}
+
+// ==================== 全幅栅格贴图通路（tif 整幅直读为一张纹理，非分瓦） ====================
+
+bool Renderer::prepareRasterImageTex(RasterImageLayer &rl) {
+    if (!rl.geomReady) {
+        if (!rl.loader) return false;
+        RasterImageLoader::Data data;
+        if (!rl.loader->drainReady(data)) return false;
+        rl.uploading.store(true);
+        rl.rgba = std::move(data.rgba);
+        rl.w = data.w;
+        rl.h = data.h;
+        rl.minLon = data.minLon;
+        rl.minLat = data.minLat;
+        rl.maxLon = data.maxLon;
+        rl.maxLat = data.maxLat;
+        rl.geomReady = true;
+        LOGI("Renderer RasterImage takeover w=%d h=%d extent=[%.6f,%.6f,%.6f,%.6f] path=%s",
+             rl.w, rl.h, rl.minLon, rl.minLat, rl.maxLon, rl.maxLat, rl.sourcePath.c_str());
+    }
+    if (rl.tex.isValid()) {
+        rl.uploading.store(false);
+        return true;
+    }
+    if (rl.rgba.empty() || rl.w <= 0 || rl.h <= 0) {
+        rl.uploading.store(false);
+        return false;
+    }
+    // 接管即上传（每层一次性、数毫秒级尖峰，同字形图集重传口径）；失败（纹理超限/OOM）保留 rgba，下帧重试
+    Texture tex;
+    if (!tex.uploadRGBA(rl.rgba.data(), rl.w, rl.h)) {
+        rl.uploading.store(false);
+        LOGW("Renderer RasterImage upload failed w=%d h=%d maxTex=%d path=%s",
+             rl.w, rl.h, maxTextureSize_, rl.sourcePath.c_str());
+        return false;
+    }
+    rl.tex = std::move(tex);
+    rl.uploading.store(false);
+    return true;
+}
+
+bool Renderer::drawRasterImages2D(double cwx, double cwy, const Matrix4 &ortho) {
+    bool needRedraw = false;
+    std::vector<RasterImageLayer *> drawables;
+    for (const auto &ptr : rasterImageLayers_) {
+        RasterImageLayer &rl = *ptr;
+        if (!rl.visible) continue; // 隐藏层不绘制/不接管/不计入加载态（同瓦片/矢量口径）
+        if (prepareRasterImageTex(rl)) {
+            drawables.push_back(&rl);
+        } else if (rl.loader && rl.loader->hasPendingOrReady()) {
+            needRedraw = true; // 后台整幅读取中：续帧直至接管上传
+        }
+    }
+    if (drawables.empty()) return needRedraw;
+    if (texProgram_.program() == 0 || vboUnitQuad_ == 0) return needRedraw;
+
+    // alpha 混合恒开：全幅位图四至之外像素 alpha=0（透明），范围内半透明影像亦正确压底图
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    texProgram_.use();
+    glActiveTexture(GL_TEXTURE0);
+    glUniform1i(tUTexture_, 0);
+    glUniform2f(tUUvOffset_, 0.0f, 0.0f); // 整幅即全纹理：UV 恒等
+    glUniform2f(tUUvScale_, 1.0f, 1.0f);
+    glBindBuffer(GL_ARRAY_BUFFER, vboUnitQuad_);
+    glEnableVertexAttribArray(tAPos_);
+    glVertexAttribPointer(tAPos_, 2, GL_FLOAT, GL_FALSE, kTexFloatsPerVertex * sizeof(float),
+                          reinterpret_cast<const void *>(0));
+    glEnableVertexAttribArray(tATexCoord_);
+    glVertexAttribPointer(tATexCoord_, 2, GL_FLOAT, GL_FALSE, kTexFloatsPerVertex * sizeof(float),
+                          reinterpret_cast<const void *>(2 * sizeof(float)));
+    for (RasterImageLayer *p : drawables) {
+        RasterImageLayer &rl = *p;
+        double wx0 = 0.0, wy0 = 0.0, wx1 = 0.0, wy1 = 0.0;
+        MercatorProjection::lonLatToWorld(rl.minLon, MercatorProjection::clampLatitude(rl.maxLat), wx0, wy0);
+        MercatorProjection::lonLatToWorld(rl.maxLon, MercatorProjection::clampLatitude(rl.minLat), wx1, wy1);
+        // RTC：double 减相机中心后转 float（同瓦片口径，防高级别下 float 有效位被大偏移占满而错位）
+        const Matrix4 model = Matrix4::model2D(
+            static_cast<float>(wx0 - cwx), static_cast<float>(wy0 - cwy),
+            static_cast<float>(wx1 - wx0), static_cast<float>(wy1 - wy0));
+        const Matrix4 mvp = Matrix4::multiply(ortho, model);
+        glUniformMatrix4fv(tUMvp_, 1, GL_FALSE, mvp.data());
+        rl.tex.bind();
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+    }
+    glDisableVertexAttribArray(tAPos_);
+    glDisableVertexAttribArray(tATexCoord_);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glDisable(GL_BLEND);
+    return needRedraw;
+}
+
+bool Renderer::drawRasterImages3D(const Navigator::Camera3D &cam, const Matrix4 &viewProjRtc) {
+    bool needRedraw = false;
+    bool setup = false;
+    for (const auto &ptr : rasterImageLayers_) {
+        RasterImageLayer &rl = *ptr;
+        if (!rl.visible) continue;
+        if (!prepareRasterImageTex(rl)) {
+            if (rl.loader && rl.loader->hasPendingOrReady()) needRedraw = true;
+            continue;
+        }
+        if (!setup) {
+            setup = true;
+            if (globeTexProgram_.program() == 0 || vboGlobeMesh_ == 0) break; // 着色器/网格 VBO 不可用：跳过绘制
+            glEnable(GL_BLEND);
+            glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+            globeTexProgram_.use();
+            glUniformMatrix4fv(g3UMvp_, 1, GL_FALSE, viewProjRtc.data());
+            glActiveTexture(GL_TEXTURE0);
+            glUniform1i(g3UTexture_, 0);
+            glUniform2f(g3UUvOffset_, 0.0f, 0.0f);
+            glUniform2f(g3UUvScale_, 1.0f, 1.0f);
+            glBindBuffer(GL_ARRAY_BUFFER, vboGlobeMesh_);
+            const GLsizei stride = kGlobeFloatsPerVertex * sizeof(float);
+            glEnableVertexAttribArray(g3APos_);
+            glVertexAttribPointer(g3APos_, 3, GL_FLOAT, GL_FALSE, stride,
+                                  reinterpret_cast<const void *>(0));
+            glEnableVertexAttribArray(g3ATexCoord_);
+            glVertexAttribPointer(g3ATexCoord_, 2, GL_FLOAT, GL_FALSE, stride,
+                                  reinterpret_cast<const void *>(3 * sizeof(float)));
+        }
+        globeMeshScratch_.clear();
+        buildRasterImageGlobeMesh(rl, cam.eye, globeMeshScratch_);
+        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(globeMeshScratch_.size() * sizeof(float)),
+                     globeMeshScratch_.data(), GL_DYNAMIC_DRAW);
+        rl.tex.bind();
+        glDrawArrays(GL_TRIANGLE_STRIP, 0,
+                     static_cast<GLsizei>(globeMeshScratch_.size() / kGlobeFloatsPerVertex));
+    }
+    if (setup) {
+        glDisableVertexAttribArray(g3APos_);
+        glDisableVertexAttribArray(g3ATexCoord_);
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glDisable(GL_BLEND);
+    }
+    return needRedraw;
+}
+
+void Renderer::buildRasterImageGlobeMesh(const RasterImageLayer &rl, const Vec3 &eye,
+                                         std::vector<float> &verts) const {
+    const double latN = MercatorProjection::clampLatitude(rl.maxLat);
+    const double latS = MercatorProjection::clampLatitude(rl.minLat);
+    const Wgs84Globe &globe = Wgs84Globe::instance();
+    // 贴球网格 + 抬 30m：网格顶点在球面、三角形内部沿弦垂入球体（与瓦片球面网格同量级、数米），
+    // 全幅图若也贴 alt=0，其片元深度会大于瓦片 → GL_LEQUAL 下被剔掉整层不可见。抬到两侧弦垂之上
+    // 稳定盖住瓦片；地图尺度下 30m 不可辨（低空俯仰视的轻微视差为已知取舍，后续可随高度自适应）。
+    constexpr double kAltMeters = 30.0;
+    constexpr int G = 16;
+    for (int row = 0; row < G; ++row) {
+        for (int c = 0; c <= G; ++c) {
+            const double u = static_cast<double>(c) / G; // 0=西（minLon）
+            const double lon = rl.minLon + (rl.maxLon - rl.minLon) * u;
+            for (int e = 0; e < 2; ++e) {
+                // 逐行 (上,下) 顶点对 → GL_TRIANGLE_STRIP（同 buildGlobeTileMesh；未开背面剪裁，缠绕无影响）
+                const double v = static_cast<double>(row + e) / G; // 0=北边=图像顶行
+                const double lat = latN + (latS - latN) * v;
+                Vec3 p;
+                globe.geographicToCartesian(lon, lat, kAltMeters, p);
+                p -= eye; // RTC：double 差后转 float
+                verts.push_back(static_cast<float>(p.x));
+                verts.push_back(static_cast<float>(p.y));
+                verts.push_back(static_cast<float>(p.z));
+                verts.push_back(static_cast<float>(u));
+                verts.push_back(static_cast<float>(v));
+                verts.push_back(1.0f);
+                verts.push_back(1.0f);
+                verts.push_back(1.0f);
+                verts.push_back(1.0f);
+            }
+        }
+    }
+}
+
+void Renderer::resetRasterImageGl() {
+    // 上下文重建：旧纹理句柄已随上下文失效，abandon（不 glDelete）保留 CPU rgba，下一帧懒重传
+    for (const auto &ptr : rasterImageLayers_) ptr->tex.abandon();
+}
+
+void Renderer::releaseRasterImageGl() {
+    for (const auto &ptr : rasterImageLayers_) ptr->tex.release();
 }
 
 void Renderer::setLocationMarkerIcon(std::vector<uint8_t> rgba, int w, int h) {
@@ -1657,7 +2252,7 @@ drawBlueDot:
     glDisable(GL_BLEND);
 }
 
-void Renderer::uploadVectorChunks(VectorLayer &vl) {
+void Renderer::uploadVectorChunks(VectorLayer &vl, int layerIndex) {
     // 要素组分片流式上传：时间预算内循环推进（每组必成 + 超时即停）。按 geom.featSpans 以要素序
     // 累计 fill+描边+线三组总 floats ≈ 预算为一组，整组一次上传（空段跳过）：同一图斑的填充与
     // 描边/线同帧落块 → 上传途中图斑整块整块长出，不再出现「前半要素带白描边、后半只剩淡填充」的混合态。
@@ -1693,20 +2288,32 @@ void Renderer::uploadVectorChunks(VectorLayer &vl) {
         const size_t fStart = static_cast<size_t>(sF.fillStart);
         const size_t fEnd = static_cast<size_t>(sL.fillStart) + static_cast<size_t>(sL.fillCount);
         if (fEnd > fStart) {
+            auto pickIds = buildFillPickIds(geom, fStart, fEnd, layerIndex, first, next);
             vl.fillChunks.push_back(
-                uploadVectorChunk(geom.fillVerts.data() + fStart, fEnd - fStart, kColorFloatsPerVertex));
+                uploadVectorChunkWithPickId(geom.fillVerts.data() + fStart, fEnd - fStart,
+                                            kColorFloatsPerVertex, pickIds.data(), pickIds.size()));
         }
         const size_t oStart = static_cast<size_t>(sF.outRangeStart);
         const size_t oEnd = static_cast<size_t>(sL.outRangeStart) + static_cast<size_t>(sL.outRangeCount);
         if (oEnd > oStart) {
             const std::vector<float> batch = buildStripBatch(geom.outlineVerts, geom.outlineRanges, oStart, oEnd);
-            vl.outlineChunks.push_back(uploadVectorChunk(batch.data(), batch.size(), kLineFloatsPerVertex));
+            auto pickIds = buildStripPickIds(geom.outlineRanges, oStart, oEnd,
+                                             geom.featSpans, first, next, layerIndex,
+                                             &FeatureSpans::outRangeStart,
+                                             &FeatureSpans::outRangeCount);
+            vl.outlineChunks.push_back(uploadVectorChunkWithPickId(
+                batch.data(), batch.size(), kLineFloatsPerVertex, pickIds.data(), pickIds.size()));
         }
         const size_t lStart = static_cast<size_t>(sF.lineRangeStart);
         const size_t lEnd = static_cast<size_t>(sL.lineRangeStart) + static_cast<size_t>(sL.lineRangeCount);
         if (lEnd > lStart) {
             const std::vector<float> batch = buildStripBatch(geom.lineVerts, geom.lineRanges, lStart, lEnd);
-            vl.lineChunks.push_back(uploadVectorChunk(batch.data(), batch.size(), kLineFloatsPerVertex));
+            auto pickIds = buildStripPickIds(geom.lineRanges, lStart, lEnd,
+                                             geom.featSpans, first, next, layerIndex,
+                                             &FeatureSpans::lineRangeStart,
+                                             &FeatureSpans::lineRangeCount);
+            vl.lineChunks.push_back(uploadVectorChunkWithPickId(
+                batch.data(), batch.size(), kLineFloatsPerVertex, pickIds.data(), pickIds.size()));
         }
         vl.uploadFeat = next;
         if (std::chrono::steady_clock::now() >= deadline) break;
@@ -1745,6 +2352,142 @@ void Renderer::releaseVectorGl() {
     }
 }
 
+// ==================== GPU 拾取通路实现（2D PickID color-attachment） ====================
+
+bool Renderer::ensurePickFbo() {
+    if (viewportWidth_ <= 0 || viewportHeight_ <= 0) return false;
+    if (pickFbo_ != 0 && pickW_ == viewportWidth_ && pickH_ == viewportHeight_) return true;
+    // 尺寸变了或首次：删除旧的，建新的（懒创建口径同纹理/VBO）
+    if (pickFbo_ != 0) { glDeleteFramebuffers(1, &pickFbo_); pickFbo_ = 0; }
+    if (pickTex_ != 0) { glDeleteTextures(1, &pickTex_); pickTex_ = 0; }
+    glGenFramebuffers(1, &pickFbo_);
+    glGenTextures(1, &pickTex_);
+    glBindTexture(GL_TEXTURE_2D, pickTex_);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, viewportWidth_, viewportHeight_, 0,
+                 GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, pickFbo_);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, pickTex_, 0);
+    const GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    if (status != GL_FRAMEBUFFER_COMPLETE) {
+        LOGE("Renderer: pick FBO incomplete (0x%04x)", static_cast<unsigned>(status));
+        glDeleteFramebuffers(1, &pickFbo_); pickFbo_ = 0;
+        glDeleteTextures(1, &pickTex_); pickTex_ = 0;
+        return false;
+    }
+    pickW_ = viewportWidth_;
+    pickH_ = viewportHeight_;
+    return true;
+}
+
+std::pair<int, long long> Renderer::renderPickPass2D(double sxPx, double syPx) {
+    // 前置条件：拾取着色器已编译、视口有效、有矢量层
+    if (pickColorProgram_.program() == 0 || pickLineProgram_.program() == 0) return {-1, -1};
+    if (viewportWidth_ <= 0 || viewportHeight_ <= 0) return {-1, -1};
+    if (vectorLayers_.empty()) return {-1, -1};
+    if (!ensurePickFbo()) return {-1, -1};
+    // 像素越界守卫
+    const int px = static_cast<int>(sxPx);
+    const int py = static_cast<int>(syPx);
+    if (px < 0 || px >= pickW_ || py < 0 || py >= pickH_) return {-1, -1};
+
+    const int camLevel = nav_.displayLevel();
+    const GLsizei stride = kColorFloatsPerVertex * sizeof(float);
+    const GLsizei lineStride = kLineFloatsPerVertex * sizeof(float);
+    const float worldPerPx = viewportWidth_ > 0
+        ? static_cast<float>((2.0 * lastHw_) / viewportWidth_) : 0.0f;
+
+    // 1) 绑定离屏 FBO，清背景为 (0,0,0,0) = 无命中
+    GLint savedViewport[4];
+    glGetIntegerv(GL_VIEWPORT, savedViewport);
+    glBindFramebuffer(GL_FRAMEBUFFER, pickFbo_);
+    glViewport(0, 0, pickW_, pickH_);
+    glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+    glDisable(GL_BLEND); // 拾取 pass 不需混合：后绘要素直接覆盖前绘
+
+    // 2) 逐可见矢量层以 PickID 着色器绘制（同 drawVectorLayers 可见/上传判据 + 绘制顺序）
+    for (size_t li = 0; li < vectorLayers_.size(); ++li) {
+        const VectorLayer &vl = *vectorLayers_[li];
+        if (vl.dead || vl.noPick) continue;
+        if (!vectorLayerShown(vl, camLevel)) continue;
+        if (!vl.glReady || vl.geom.empty()) continue;
+        const float offX = static_cast<float>(vl.geom.originWx - lastCwx_);
+        const float offY = static_cast<float>(vl.geom.originWy - lastCwy_);
+
+        // 面填充（pickColorProgram_：aPos stride=6f offset=0 + aPickId stride=4b）
+        if (!vl.fillChunks.empty()) {
+            pickColorProgram_.use();
+            glUniformMatrix4fv(pkUMvp_, 1, GL_FALSE, lastOrtho_.data());
+            glUniform2f(pkUOffset_, offX, offY);
+            glEnableVertexAttribArray(pkAPos_);
+            glEnableVertexAttribArray(pkAPickId_);
+            for (const auto &c : vl.fillChunks) {
+                if (c.pickIdVbo == 0) continue; // 无 PickID VBO（旧 chunk / 建失败）跳过
+                glBindBuffer(GL_ARRAY_BUFFER, c.vbo);
+                glVertexAttribPointer(pkAPos_, 2, GL_FLOAT, GL_FALSE, stride,
+                                      reinterpret_cast<const void *>(0));
+                glBindBuffer(GL_ARRAY_BUFFER, c.pickIdVbo);
+                glVertexAttribPointer(pkAPickId_, 4, GL_UNSIGNED_BYTE, GL_TRUE, 4,
+                                      reinterpret_cast<const void *>(0));
+                glDrawArrays(GL_TRIANGLES, 0, c.vertexCount);
+            }
+            glDisableVertexAttribArray(pkAPos_);
+            glDisableVertexAttribArray(pkAPickId_);
+        }
+
+        // 面描边 + 线要素（pickLineProgram_：aPos + aMiter stride=8f + aPickId stride=4b）
+        const auto drawPickStrips = [&](const std::vector<VectorLayer::GlChunk> &chunks, float halfPx) {
+            if (chunks.empty()) return;
+            pickLineProgram_.use();
+            glUniformMatrix4fv(pkLUMvp_, 1, GL_FALSE, lastOrtho_.data());
+            glUniform2f(pkLUOffset_, offX, offY);
+            glUniform1f(pkLUHalfWidthWorld_, halfPx * worldPerPx);
+            glEnableVertexAttribArray(pkLAPos_);
+            glEnableVertexAttribArray(pkLAMiter_);
+            glEnableVertexAttribArray(pkLAPickId_);
+            for (const auto &c : chunks) {
+                if (c.pickIdVbo == 0) continue;
+                glBindBuffer(GL_ARRAY_BUFFER, c.vbo);
+                glVertexAttribPointer(pkLAPos_, 2, GL_FLOAT, GL_FALSE, lineStride,
+                                      reinterpret_cast<const void *>(0));
+                glVertexAttribPointer(pkLAMiter_, 2, GL_FLOAT, GL_FALSE, lineStride,
+                                      reinterpret_cast<const void *>(2 * sizeof(float)));
+                glBindBuffer(GL_ARRAY_BUFFER, c.pickIdVbo);
+                glVertexAttribPointer(pkLAPickId_, 4, GL_UNSIGNED_BYTE, GL_TRUE, 4,
+                                      reinterpret_cast<const void *>(0));
+                glDrawArrays(GL_TRIANGLE_STRIP, 0, c.vertexCount);
+            }
+            glDisableVertexAttribArray(pkLAPos_);
+            glDisableVertexAttribArray(pkLAMiter_);
+            glDisableVertexAttribArray(pkLAPickId_);
+        };
+        drawPickStrips(vl.outlineChunks, vl.style.outlineWidth * 0.5f);
+        drawPickStrips(vl.lineChunks, vl.style.lineWidth * 0.5f);
+        // 点要素不在 GPU pass 中绘制：数量少、CPU 距离检测快；GPU miss 后 CPU 回退覆盖
+    }
+
+    // 3) 读回点击位置像素并解码（GLES 2.0 无 PBO，直接同步 glReadPixels）
+    uint8_t pixel[4] = {0, 0, 0, 0};
+    glReadPixels(px, pickH_ - 1 - py, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE, pixel);
+    // 恢复默认帧缓冲 + 视口
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+    glViewport(savedViewport[0], savedViewport[1], savedViewport[2], savedViewport[3]);
+
+    int layer = -1;
+    size_t prim = 0;
+    if (!decodePickPixel(pixel[0], pixel[1], pixel[2], pixel[3], layer, prim))
+        return {-1, -1};
+    // 越界保护：layer 索引和 prim 索引有效性
+    if (layer < 0 || static_cast<size_t>(layer) >= vectorLayers_.size()) return {-1, -1};
+    const VectorLayer &vl = *vectorLayers_[static_cast<size_t>(layer)];
+    if (prim >= vl.geom.pickPrims.size()) return {-1, -1};
+    return {layer, vl.geom.pickPrims[prim].fid};
+}
+
 bool Renderer::drawVectorLayers(double cwx, double cwy, double hw, const Matrix4 &ortho) {
     if (vectorLayers_.empty()) return false;
     bool needRedraw = false;
@@ -1754,8 +2497,8 @@ bool Renderer::drawVectorLayers(double cwx, double cwy, double hw, const Matrix4
     const GLsizei stride = kColorFloatsPerVertex * sizeof(float);    // 面填充/点：6 floats
     const GLsizei lineStride = kLineFloatsPerVertex * sizeof(float); // 线/描边：8 floats
 
-    for (auto &vlp : vectorLayers_) {
-        VectorLayer &vl = *vlp;
+    for (size_t li = 0; li < vectorLayers_.size(); ++li) {
+        VectorLayer &vl = *vectorLayers_[li];
         // 墓碑叠加层：在 GL 线程回收其 VBO/图标纹理/CPU 几何（JNI 线程不可安全释放 GL 资源），随后跳过。
         // 与 releaseVectorGl 同款释放口径，幂等：句柄已清零/纹理已失效时为空操作，可反复进入不重复删除。
         if (vl.dead) {
@@ -1790,7 +2533,7 @@ bool Renderer::drawVectorLayers(double cwx, double cwy, double hw, const Matrix4
         // 绘制 → 画面「整块图斑一片一片」长出；未完成期间持续请求重绘（WHEN_DIRTY 下自触发）。
         // 隐藏层上传挂起，转可见后再续跑（streamingUpload 判定含 visible，提示不误留）。
         if (!vl.uploadDone && !vl.geom.empty()) {
-            uploadVectorChunks(vl);
+            uploadVectorChunks(vl, static_cast<int>(li));
             needRedraw = true;
         }
         if (vl.geom.empty()) continue;
@@ -3073,6 +3816,9 @@ void Renderer::drawVectorLabels3D(const Navigator::Camera3D &cam, const Matrix4 
 void Renderer::release() {
     clearTileTextures();
     releaseVectorGl();
+    releaseRasterImageGl();
+    clearTerrain();
+    geoQuadtree_.clear(); // #11 清除四叉树帧间缓存
     if (vboDynamic_ != 0) {
         glDeleteBuffers(1, &vboDynamic_);
         vboDynamic_ = 0;
@@ -3107,6 +3853,15 @@ void Renderer::release() {
     globePointProgram_.release();
     globeIconProgram_.release();
     globeFlatIconProgram_.release();
+    // GPU 拾取通路资源
+    pickColorProgram_.release();
+    pickLineProgram_.release();
+    if (pickFbo_ != 0) { glDeleteFramebuffers(1, &pickFbo_); pickFbo_ = 0; }
+    if (pickTex_ != 0) { glDeleteTextures(1, &pickTex_); pickTex_ = 0; }
+    pickW_ = 0; pickH_ = 0;
+    // #9 RHI：释放后端实例（unique_ptr 析构，GLES2Backend 无额外 GL 源须显式销毁——
+    // 其资源均由 create/destroy 配对管理，后端对象本身无 GL 句柄成员）
+    rhi_.reset();
 }
 
 } // namespace globecore

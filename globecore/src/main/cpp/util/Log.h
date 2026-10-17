@@ -5,7 +5,32 @@
 // 平台差异仅收敛在本头：Android 走 __android_log_print；OHOS 走 vsnprintf 预格式化 +
 // OH_LOG_Print("%{public}s")——hilog 默认脱敏未标 public 的参数，先自行拼装整条消息，
 // 使全部调用点的 printf 格式串与 Android 行为完全一致，无需逐处改 public 标记。
-#if defined(__OHOS__)
+// 桌面（globecore-desktop，Windows/Linux）走 stderr 同一格式串，调用点仍零改动。
+#if defined(GLOBECORE_DESKTOP)
+
+#include <stdarg.h>
+#include <stdio.h>
+
+#define GC_LOG_TAG "globecore"
+
+#if defined(__GNUC__) || defined(__clang__)
+__attribute__((format(printf, 2, 3)))
+#endif
+static inline void gc_log(const char *level, const char *fmt, ...) {
+    fprintf(stderr, "[%s][%s] ", GC_LOG_TAG, level);
+    va_list ap;
+    va_start(ap, fmt);
+    vfprintf(stderr, fmt, ap);
+    va_end(ap);
+    fputc('\n', stderr);
+}
+
+#define LOGD(...) gc_log("D", __VA_ARGS__)
+#define LOGI(...) gc_log("I", __VA_ARGS__)
+#define LOGW(...) gc_log("W", __VA_ARGS__)
+#define LOGE(...) gc_log("E", __VA_ARGS__)
+
+#elif defined(__OHOS__)
 
 #include <hilog/log.h>
 #include <stdarg.h>

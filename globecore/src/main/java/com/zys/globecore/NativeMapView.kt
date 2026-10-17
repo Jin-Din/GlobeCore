@@ -98,6 +98,11 @@ class NativeMapView @JvmOverloads constructor(
         gestures.onTap = listener
     }
 
+    /** 设置长按回调：在手势识别器 onLongPress 触发（单指保持按住、未越过拖动阈值达系统长按时长），坐标为视图内像素。 */
+    fun setOnLongPressListener(listener: ((x: Float, y: Float) -> Unit)?) {
+        gestures.onLongPress = listener
+    }
+
     /**
      * 触摸事件：分发给手势识别器 [MapGestures]（拖动/捏合/单击/长按/惯性）。
      * 手势只更新 native 相机状态（不涉及 GL），连续渲染模式下下一帧自动生效。
@@ -197,18 +202,85 @@ class NativeMapView @JvmOverloads constructor(
     }
 
     /**
+     * 移除一个瓦片图源图层（[index] 为 [addTileLayer] / [addRasterLayer] 的加入次序，0 起）：墓碑——native
+     * 置 removed + 隐藏，不 erase 底层容器，其它层 index 保持稳定；其瓦片纹理由 GL 线程下一帧释放（其余层
+     * 纹理原封不动），后台加载队列即时清空。[addRasterLayer] 的文档约定「加入后不删除」由本接口补齐：
+     * 宿主删除栅格图层时可调本函数就地生效，不必再 recreate 整个界面（recreate 会销毁 GL 上下文，
+     * 使底图全部瓦片重解码上传 → 肉眼可见的「先棋盘后瓦片」闪动）。越界时 native 忽略；内部触发一帧重绘。
+     * 磁盘瓦片缓存不删（下次加入同一文件秒命中）；该层槽位保留至本 native 实例释放。
+     */
+    fun removeTileLayer(index: Int) {
+        val h = nativeHandle
+        if (h != 0L) NativeLib.nativeRemoveTileLayer(h, index)
+        requestRender()
+    }
+
+    /**
      * 添加一个本地栅格图层（tif/img 等 GDAL 可打开格式），可多次调用叠加。native 用内建 GDAL 重投影，
      * 按全球墨卡托瓦片 (z,x,y) 四至即时生成瓦片（仅磁盘缓存未命中时），生成后回写 [cacheDir] 复用；
      * 以 alpha 混合绘制在底图之上、矢量层之下（范围外像素透明），maxLevel 由栅格分辨率自动推算。
      * [cacheDir] 为该栅格瓦片的磁盘缓存目录（形如 `/调查宝/tiles/raster-jni/<hash>`）。返回图层 index
      * （0 起，与 [addTileLayer] 共享索引空间，供 [setLayerVisible]）；打不开栅格或句柄已释放返回 -1。
-     * 仅更新 native 状态、不涉 GL，可任意线程调用；图层加入后不删除，只经可见性开关显隐。
+     * 仅更新 native 状态、不涉 GL，可任意线程调用；图层加入后如需移除经 [removeTileLayer]（墓碑，不牵动其它层）。
      */
     fun addRasterLayer(cacheDir: String, path: String): Int {
         val h = nativeHandle
         val index = if (h != 0L) NativeLib.nativeAddRasterLayer(h, cacheDir, path) else -1
         requestRender()
         return index
+    }
+
+    /**
+     * 最近一次 [addRasterLayer] 失败的原因（中文，含文件线索，如「GDAL 无法打开该文件…」「无地理参考…」）；
+     * 成功或从未失败返回 null。纯查询、可任意线程调用，供宿主 Toast 向用户反馈具体失败原因。
+     */
+    fun rasterAddError(): String? {
+        val h = nativeHandle
+        return if (h != 0L) NativeLib.nativeGetRasterAddError(h) else null
+    }
+
+    /**
+     * 添加一个「全幅加载」栅格图层（tif/img 等）：native 后台线程整幅直读为单张贴图（原生分辨率，仅在超过
+     * 设备 GL_MAX_TEXTURE_SIZE/内存帽时沿 overviews 等比降采样），按其 WGS84 四至贴面绘制（2D/3D 均支持）。
+     * UI 线程零 GDAL、立即返回（区别于 [addRasterLayer] 的同步读四至，大文件不卡界面）。返回新图层索引
+     * （0 起，独立于 [addRasterLayer] 的索引空间，供 [setRasterImageVisible] / [rasterImageError]）；
+     * 句柄已释放或路径为空返回 -1。图层加入后不删除，只经可见性开关显隐。
+     * [cacheDir] 非空时启用全幅 sidecar 磁盘缓存（未压缩 raw RGBA，与 [addRasterLayer] 瓦片缓存共用同一
+     * 目录，按原文件名称命名）：命中时二次启动免 GDAL 秒级就绪；传空串禁用。
+     */
+    fun addRasterImageLayer(cacheDir: String, path: String): Int {
+        val h = nativeHandle
+        val index = if (h != 0L) NativeLib.nativeAddRasterImageLayer(h, cacheDir, path) else -1
+        requestRender()
+        return index
+    }
+
+    /**
+     * 设置指定全幅栅格图层可见性（[index] 为 [addRasterImageLayer] 的加入次序，0 起）：隐藏层不绘制、
+     * 不计入 [hasRasterLoading]。index 越界时 native 忽略；内部触发一帧重绘使变更立即生效。
+     */
+    fun setRasterImageVisible(index: Int, visible: Boolean) {
+        val h = nativeHandle
+        if (h != 0L) NativeLib.nativeSetRasterImageVisible(h, index, visible)
+        requestRender()
+    }
+
+    /**
+     * 可见全幅栅格层是否仍有未完成的整幅加载/纹理上传：纯状态查询、不触发重绘，可 UI 线程调用，
+     * 供「加载中」提示轮询显隐（与 [hasVectorLoading] 并联使用）。隐藏层不计入；句柄已释放返回 false。
+     */
+    fun hasRasterLoading(): Boolean {
+        val h = nativeHandle
+        return h != 0L && NativeLib.nativeHasRasterLoading(h)
+    }
+
+    /**
+     * 取指定全幅栅格层的加载失败原因（中文，如「文件不存在或已被移动」「数据跨 180° 经线…」）；
+     * 未失败/越界/已成功加载返回 null。纯查询，供加载胶囊消失后 Toast 反馈失败图层。
+     */
+    fun rasterImageError(index: Int): String? {
+        val h = nativeHandle
+        return if (h != 0L) NativeLib.nativeGetRasterImageError(h, index) else null
     }
 
     /**

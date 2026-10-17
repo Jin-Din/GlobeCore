@@ -34,6 +34,28 @@ public:
     /// 打不开或四至无效返回 false。供 GlobeEngine::addRasterLayer 建层时确定 maxLevel。
     static bool info(const std::string &path, double &outMinLon, double &outMinLat,
                      double &outMaxLon, double &outMaxLat, int &outMaxLevel);
+
+    /// 同上，失败时写出可展示的中文原因 [outError]（文件不存在/打不开/无地理参考/无法重投影/四至无效）。
+    static bool info(const std::string &path, double &outMinLon, double &outMinLat,
+                     double &outMaxLon, double &outMaxLat, int &outMaxLevel,
+                     std::string &outError);
+
+    /// 整幅读取栅格为 RGBA 位图（全幅加载通路，供 [RasterImageLoader]）：按原生分辨率直读，
+    /// 仅当宽/高超过 [maxSide]（一般传 GL_MAX_TEXTURE_SIZE）或总像素超过 [maxPixels] 时等比缩小——
+    /// 缩小经 GDAL RasterIO 自动沿内部 overviews 降采样，不做主动重采样放大。写出四至与像素尺寸，
+    /// [outRgba] 为 w×h×4 RGBA（顶行对应 maxLat）。需数据集成功建立 WGS84 重投影 VRT。
+    /// 失败返回 false 并写出 [outError]。线程安全（内部全局串行化）。
+    ///
+    /// [sidecarDir] 非空时启用全幅 sidecar 磁盘缓存（未压缩 raw RGBA，磁盘字节与 [outRgba] 1:1）：
+    /// 命中 = 目录内匹配 `full_<w>x<h>.rgba` + 同名 `.meta`（源文件 mtime+size 与四至），校验字节数
+    /// 恰为 w×h×4 后直读——完全绕开 GDAL 与任何图像解码，且命中尺寸亦受双帽约束（跨设备帽不同不误命中）；
+    /// 未命中则照常经 GDAL 生成，成功后回写 sidecar（源文件被改动即失效重生成）。空串禁用缓存。
+    static bool renderFullImage(const std::string &path, int maxSide, long long maxPixels,
+                                int &outW, int &outH, std::vector<uint8_t> &outRgba,
+                                double &outMinLon, double &outMinLat,
+                                double &outMaxLon, double &outMaxLat,
+                                std::string &outError,
+                                const std::string &sidecarDir = std::string());
 };
 
 } // namespace globecore

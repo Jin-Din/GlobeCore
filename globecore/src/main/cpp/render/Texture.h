@@ -25,6 +25,12 @@ public:
     /// 上传 RGBA8888 像素为纹理（自动生成 id、设置线性过滤 + CLAMP_TO_EDGE）
     bool uploadRGBA(const uint8_t *rgba, int width, int height);
 
+    /// 上传 GPU 压缩纹理（ETC2/ASTC 等，直传压缩数据，硬件解压省内存 4-8 倍）。
+    /// internalFormat 为 GL 压缩内部格式（如 GL_COMPRESSED_RGBA8_ETC2_EAC / GL_COMPRESSED_RGBA_ASTC_4x4），
+    /// data 为压缩字节流，dataSize 为其字节长度。须在 GL 线程调用。
+    bool uploadCompressed(GLenum internalFormat, int width, int height,
+                          const void *data, GLsizei dataSize);
+
     void bind() const;
     void release();
 

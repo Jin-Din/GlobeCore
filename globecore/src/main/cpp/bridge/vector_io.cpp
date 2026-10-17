@@ -815,7 +815,7 @@ std::string getFeatureAttributes(const std::string &pathStr, long long featureId
 } // namespace gcbridge
 
 // ── Android JNI 导出薄封装（com.zys.globecore.NativeVector 门面）──
-#if !defined(__OHOS__)
+#if !defined(__OHOS__) && !defined(GLOBECORE_DESKTOP)
 #include <jni.h>
 
 /** jstring 数组 -> std::vector<std::string>（属性写回用） */

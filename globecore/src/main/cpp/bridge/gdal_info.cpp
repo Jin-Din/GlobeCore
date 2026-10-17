@@ -37,7 +37,7 @@ std::string vectorDrivers() {
 } // namespace gcbridge
 
 // ── Android JNI 导出薄封装 ──
-#if !defined(__OHOS__)
+#if !defined(__OHOS__) && !defined(GLOBECORE_DESKTOP)
 #include <jni.h>
 
 extern "C"

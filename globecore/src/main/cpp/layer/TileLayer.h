@@ -1,6 +1,7 @@
 #ifndef GLOBECORE_LAYER_TILE_LAYER_H
 #define GLOBECORE_LAYER_TILE_LAYER_H
 
+#include <atomic>
 #include <memory>
 #include <string>
 #include <utility>
@@ -39,6 +40,12 @@ struct TileLayer {
     bool raster = false;
     /// 栅格文件路径（raster=true 时有效）：TileLoader 磁盘未命中时据此调 RasterRenderer 按瓦片四至重投影生成。
     std::string rasterPath;
+    /// 图层已被宿主移除（墓碑）：不绘制、不请求瓦片，但槽位保留以维持其它层 index 稳定
+    /// （口径同 [VectorLayer::dead]——容器不 erase，宿主持有的索引不失效）。
+    bool removed = false;
+    /// 纹理待回收标志：置 [removed] 时由调用线程置位，GL 线程在下一帧 exchange 消费后释放本层全部瓦片纹理
+    /// （GL 资源只可在 GL 线程删除）。回收后该层转入闲置：其 [loader] 排队项已清空、就绪字节已丢弃。
+    std::atomic<bool> discardTextures{false};
 
     TileLayer(std::string cacheDir, std::string urlTemplate, int maxLevel_, bool overlay_, int numThreads = 4)
         : maxLevel(maxLevel_), overlay(overlay_) {

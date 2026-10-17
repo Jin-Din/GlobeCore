@@ -345,6 +345,16 @@ Java_com_zys_globecore_NativeLib_nativeSetLayerVisible(JNIEnv * /*env*/, jobject
     toGlobeEngine(handle)->setLayerVisible(index, visible == JNI_TRUE);
 }
 
+// 移除一个瓦片图源图层（含栅格层）：墓碑—置 removed + 隐藏，不 erase 以保持其它层 index 稳定；
+// 其纹理由 Renderer 下一帧在 GL 线程释放，后台加载队列即时清空。index 越界/句柄无效忽略。
+// 用于宿主删除栅格图层时就地换层，免整界面 recreate（避免 GL 上下文销毁导致的底图重载闪动）。
+JNIEXPORT void JNICALL
+Java_com_zys_globecore_NativeLib_nativeRemoveTileLayer(JNIEnv * /*env*/, jobject /*thiz*/, jlong handle,
+                                                          jint index) {
+    if (handle == 0) return;
+    toGlobeEngine(handle)->removeTileLayer(index);
+}
+
 // 添加一个本地栅格图层（tif/img 等）：native 用内建 GDAL 重投影按全球墨卡托瓦片四至即时生成瓦片，
 // 绘制在底图之上、矢量之下。返回新图层在 layers_ 的索引（0 起，供 nativeSetLayerVisible）；句柄/路径无效或打不开栅格返回 -1。
 JNIEXPORT jint JNICALL
@@ -362,6 +372,60 @@ Java_com_zys_globecore_NativeLib_nativeAddRasterLayer(JNIEnv *env, jobject /*thi
     env->ReleaseStringUTFChars(path, pathUtf);
     env->ReleaseStringUTFChars(cacheDir, dirUtf);
     return index;
+}
+
+// 最近一次 nativeAddRasterLayer 失败原因（中文，含文件路径线索）；成功或从未失败返回 null。供宿主 Toast 展示。
+JNIEXPORT jstring JNICALL
+Java_com_zys_globecore_NativeLib_nativeGetRasterAddError(JNIEnv *env, jobject /*thiz*/, jlong handle) {
+    if (handle == 0) return nullptr;
+    const std::string err = toGlobeEngine(handle)->rasterAddError();
+    if (err.empty()) return nullptr;
+    return env->NewStringUTF(err.c_str());
+}
+
+// 添加一个「全幅加载」栅格图层：后台线程整幅直读 tif 为单张贴图，贴其 WGS84 四至（UI 线程零 GDAL）。
+// cacheDir 非空时启用全幅 sidecar 磁盘缓存（与 nativeAddRasterLayer 共用同一目录）；null/空串禁用。
+// 返回新图层索引（0 起，供 nativeSetRasterImageVisible/nativeGetRasterImageError）；句柄/路径无效返回 -1。
+JNIEXPORT jint JNICALL
+Java_com_zys_globecore_NativeLib_nativeAddRasterImageLayer(JNIEnv *env, jobject /*thiz*/, jlong handle,
+                                                              jstring cacheDir, jstring path) {
+    if (handle == 0 || path == nullptr) return -1;
+    const char *dirUtf = cacheDir != nullptr ? env->GetStringUTFChars(cacheDir, nullptr) : nullptr;
+    const char *pathUtf = env->GetStringUTFChars(path, nullptr);
+    if (pathUtf == nullptr) {
+        if (dirUtf != nullptr) env->ReleaseStringUTFChars(cacheDir, dirUtf);
+        return -1;
+    }
+    const jint index = toGlobeEngine(handle)->addRasterImageLayer(
+        std::string(dirUtf != nullptr ? dirUtf : ""), std::string(pathUtf));
+    env->ReleaseStringUTFChars(path, pathUtf);
+    if (dirUtf != nullptr) env->ReleaseStringUTFChars(cacheDir, dirUtf);
+    return index;
+}
+
+// 设置指定全幅栅格图层可见性（index 为 nativeAddRasterImageLayer 加入次序，0 起）：越界忽略
+JNIEXPORT void JNICALL
+Java_com_zys_globecore_NativeLib_nativeSetRasterImageVisible(JNIEnv * /*env*/, jobject /*thiz*/, jlong handle,
+                                                                jint index, jboolean visible) {
+    if (handle == 0) return;
+    toGlobeEngine(handle)->setRasterImageVisible(index, visible == JNI_TRUE);
+}
+
+// 可见全幅栅格层是否仍有未完成的整幅加载/纹理上传：供宿主轮询显示「加载中」提示。纯查询不触发重绘。
+JNIEXPORT jboolean JNICALL
+Java_com_zys_globecore_NativeLib_nativeHasRasterLoading(JNIEnv * /*env*/, jobject /*thiz*/, jlong handle) {
+    if (handle == 0) return JNI_FALSE;
+    return toGlobeEngine(handle)->hasRasterImageLoading() ? JNI_TRUE : JNI_FALSE;
+}
+
+// 取指定全幅栅格层的加载失败原因（中文）；未失败/越界/已成功返回 null。供胶囊结束后 Toast 提示。
+JNIEXPORT jstring JNICALL
+Java_com_zys_globecore_NativeLib_nativeGetRasterImageError(JNIEnv *env, jobject /*thiz*/, jlong handle,
+                                                              jint index) {
+    if (handle == 0) return nullptr;
+    const std::string err = toGlobeEngine(handle)->rasterImageError(index);
+    if (err.empty()) return nullptr;
+    return env->NewStringUTF(err.c_str());
 }
 
 // 添加一个矢量图层（native 直接读文件：GDAL/OGR 读取 + 重投影 + earcut 三角剖分，异步加载）。

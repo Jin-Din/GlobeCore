@@ -1,12 +1,15 @@
 #ifndef GLOBECORE_CORE_GlobeEngine_H
 #define GLOBECORE_CORE_GlobeEngine_H
 
+#include <condition_variable>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 #include <cstdint>
 
+#include "layer/RasterImageLayer.h"
 #include "layer/TileLayer.h"
 #include "layer/VectorLayer.h"
 #include "navigator/Navigator.h"
@@ -55,6 +58,11 @@ public:
     /// 读回当前视图模式（0/1），供宿主 UI 态同步。
     int viewMode() const;
 
+    /// 设置日光方向（ECEF 单位向量，指向太阳）。仅 3D 通路消费：驱动球面瓦片 Lambert 漫反射 +
+    /// 边缘 rim glow（青蓝大气边缘光）。宿主可按当前时间/季节算太阳赤纬赤经后传入营造昼夜效果。
+    /// 内部自动归一化；变更后触发一帧重绘即时生效。
+    void setSunDirection(double x, double y, double z);
+
     /// 当前视口高（像素，与 panByPixels/zoomBy 位移入参同一单位口径）：供手势层按 参考实现
     /// 的 180·Δcy/视口高 换算俯仰灵敏度（手势位移与视口高同单位，免密度换算错配）。
     int viewportHeight() const;
@@ -83,11 +91,42 @@ public:
     /// index 越界则忽略；变更后若已注入重绘回调则触发一帧重绘（RENDERMODE_WHEN_DIRTY 下即时生效）。
     void setLayerVisible(int index, bool visible);
 
+    /// 移除一个瓦片图源图层（含 [addRasterLayer] 的栅格层）：墓碑——置 removed + 隐藏，不 erase 以保持
+    /// 其它层 index 稳定（口径同 [removeVectorLayer]）。其瓦片纹理由 [Renderer] 在下一帧于 GL 线程释放，
+    /// 后台加载队列即时清空（不再产生 GDAL/联网工作）。index 越界忽略；变更后触发一帧重绘。
+    /// 用途：宿主删除栅格图层时就地换层，免整界面 recreate（recreate 会销毁 GL 上下文 → 全部纹理重建
+    /// → 底图先棋盘后瓦片的可见闪动）。磁盘瓦片缓存不动（下次加入同一文件秒命中）。
+    void removeTileLayer(int index);
+
     /// 添加一个本地栅格图层（tif/img 等 GDAL 可打开格式）：native 用内建 GDAL 重投影，按全球墨卡托瓦片
     /// (z,x,y) 四至即时生成瓦片（仅磁盘缓存未命中时），生成后回写 [cacheDir] 复用。以 overlay 混合绘制在
     /// 底图之上、矢量层之下（范围外像素透明）；maxLevel 由栅格重投影分辨率自动推算（LOD 上限，避免过度拉伸）。
     /// 返回新图层在 layers_ 的索引（0 起，供 [setLayerVisible]）；打不开栅格或四至无效返回 -1。
     int addRasterLayer(const std::string &cacheDir, const std::string &path);
+
+    /// 最近一次 [addRasterLayer] 失败的原因（中文，含路径）；成功或从未失败为空。
+    /// UI 线程写入（addRasterLayer）、任意线程读取，addErrMtx_ 防撕裂。供宿主 Toast 具体失败原因。
+    std::string rasterAddError() const;
+
+    /// 添加一个「全幅加载」栅格图层：整幅 tif 由 GDAL 在后台线程一次性直读为单张贴图（原生分辨率，
+    /// 仅在超过 GL_MAX_TEXTURE_SIZE/内存帽时沿 overviews 等比降采样），按经纬度四至贴面绘制——
+    /// 2D 为单位四边形 × ortho，3D 为经纬细分网格贴球面。UI 线程零 GDAL（立即返回索引）。
+    /// 与瓦片路 [addRasterLayer] 互不依赖，独立索引空间（供 [setRasterImageVisible]）。
+    /// 跨 180° 经线的数据本期拒载（异步失败，经 [rasterImageError] 报出）。返回新图层索引（0 起）；
+    /// path 为空返回 -1（记入 [rasterAddError]）。
+    /// [cacheDir] 非空时启用全幅 sidecar 磁盘缓存（raw RGBA，见 [RasterRenderer::renderFullImage]）：
+    /// 二次启动免 GDAL 直读位图；与瓦片路共用同一目录（按原文件名称命名），空串禁用。
+    int addRasterImageLayer(const std::string &cacheDir, const std::string &path);
+
+    /// 设置全幅栅格图层可见性（index 为 [addRasterImageLayer] 次序）。越界忽略；变更后触发一帧重绘。
+    void setRasterImageVisible(int index, bool visible);
+
+    /// 全幅栅格层是否仍有未完成的加载/GPU 上传（仅统计可见层，口径同 [hasVectorLoading]）。
+    /// 纯状态查询、不触发重绘，供宿主「加载中」胶囊轮询。
+    bool hasRasterImageLoading() const;
+
+    /// 取指定全幅栅格层的加载错误（中文）；未失败/越界返回空串。加载成功（纹理就绪）后不再报错。
+    std::string rasterImageError(int index) const;
 
     /// 添加一个矢量图层（native 直接读文件：GDAL/OGR 读取 + 重投影 + earcut 三角剖分，异步加载）。
     /// 返回新图层的索引（0 起，供 [setVectorLayerVisible] 使用）。绘制在底图瓦片层之上、注记 overlay 层之下。
@@ -231,6 +270,17 @@ public:
     /// 释放 GL 资源（应在 GL 上下文销毁前调用）
     void releaseGl();
 
+    // ==================== 地形 DEM 通路（quantized-mesh，3D 球面网格高度抬升） ====================
+
+    /// 注入一块 quantized-mesh 地形瓦片到 3D 球面网格。解码 [bytes] → Renderer DEM 缓存，
+    /// 下帧 buildGlobeTileMesh 在生成该瓦片球面网格时逐顶点采样高度（替代 alt=0 贴地）。
+    /// [bytes] 为空则清除该 tile 缓存。须在 GL 线程调用（转发到 Renderer，非线程安全）。
+    /// 未注入 DEM 的瓦片保持 alt=0 贴地（零开销，向后兼容）。
+    void setTerrainTile(int z, int x, int y, const std::vector<uint8_t> &bytes);
+
+    /// 清除全部地形缓存（换地形源/上下文重建时调用）。
+    void clearTerrain();
+
 private:
     Navigator navigator_;
     // 瓦片图源图层（按加入顺序绘制）；以 unique_ptr 持有保证地址稳定，供 Renderer 长期引用
@@ -238,8 +288,24 @@ private:
     // 矢量图层（native 直接读 OGR）；以 unique_ptr 持有保证地址稳定，供 Renderer 长期引用。
     // 须声明在 renderer_ 之前：Renderer 构造时引用本向量。
     std::vector<std::unique_ptr<VectorLayer>> vectorLayers_;
-    Renderer renderer_;     // 依赖 navigator_、layers_、vectorLayers_，须在其后声明以保证构造顺序
+    // 全幅栅格图层（整幅贴图）：独立容器/索引空间，不与 layers_ 的底图/注记索引混淆。
+    // 须声明在 renderer_ 之前：Renderer 构造时引用本向量。
+    std::vector<std::unique_ptr<RasterImageLayer>> rasterImageLayers_;
+    Renderer renderer_;     // 引用 navigator_、layers_、vectorLayers_、rasterImageLayers_，须在其后声明以保证构造顺序
     std::function<void()> renderCallback_; // 「需重绘」回调（由 JNI 注入，指向 requestRender）
+
+    // 图层容器互斥锁：保护 layers_/vectorLayers_/rasterImageLayers_ 的结构变化（push_back 会重分配
+    // 内部数组，GL 线程正遍历同一数组时即读到已释放内存）。根因取证见 MobileMap-android/doc/
+    // 鸿蒙3.0启动闪退.md 第十节：UI 线程 add* push_back 与 GL 线程 drawFrame 帧遍历无同步 →
+    // layerTextures_ 越界脏引用 → unordered_map rehash 非法分配长度 bad_array_new_length/SIGSEGV。
+    // 口径：drawFrame 全程持有（GL 帧内不突变容器）；各 add* 仅在 push_back/取 index 的极短临界区持有
+    // （GDAL info() 等耗时打开一律留在锁外，避免饿死 GL 线程）。其余读取方法只读不重排容器：
+    // 容器仅增不 erase（删除为墓碑），UI 侧读与 UI 侧增同线程串行，与 GL 只读遍历并发安全。
+    std::mutex layersMtx_;
+
+    // 最近一次 addRasterLayer 失败原因（UI 线程写、任意线程读，addErrMtx_ 防撕裂）
+    mutable std::mutex addErrMtx_;
+    std::string lastAddError_;
 
     /// 3D 矢量拾取实体（pickVector 的 MODE_3D 分支）：屏幕空间投影命中检测。与 2D 同口径分两阶段
     /// （先叠加层后文件矢量层，noPick 跳过）。逐图元把 RTC 世界坐标
@@ -247,6 +313,21 @@ private:
     /// 复用与 2D 同口径的像素容差（点半径+tapSlop、线半宽下限 2px+tapSlop）与点/线优先于面判据；
     /// 逐图元投影四至快速排除。跨层命中以「离眼点最近者」胜出（背半球穿地图元以射线交点邻域近侧优先）。
     bool pickVector3D(double sxPx, double syPx, int &outLayerIndex, long long &outFid) const;
+
+    /// 2D CPU 拾取（pickVector 的 CPU 回退路径）：屏幕点→世界坐标→逐层逐 pickPrims 命中检测。
+    /// GPU 拾取超时/不可用时调用，行为与旧 pickVector 2D 分支一致。
+    bool pickVectorCpu(double sxPx, double syPx, int &outLayerIndex, long long &outFid) const;
+
+    // ── GPU 拾取跨线程协调：UI 线程（pickVector）设请求→触发 renderCallback_→
+    // GL 线程（drawFrame）处理请求→renderPickPass2D→写结果→notify。UI 线程 wait_for
+    //（超时 100ms 回退 CPU 拾取，避免 ANR）。所有成员 mutable 因 pickVector 为 const。
+    mutable std::mutex pickMtx_;
+    mutable std::condition_variable pickCv_;
+    mutable bool pickPending_ = false;       // UI 线程写、GL 线程读（const pickVector 内写入，需 mutable）
+    mutable double pickX_ = 0.0, pickY_ = 0.0;
+    mutable bool pickDone_ = false;         // GL 线程写、UI 线程读
+    mutable int pickResultLayer_ = -1;
+    mutable long long pickResultFid_ = -1;
 };
 
 } // namespace globecore

@@ -35,12 +35,16 @@ class TileCache;
  */
 class TileLoader {
 public:
-    /// 一块下载就绪的瓦片字节，交由 GL 线程解码上传
+    /// 一块下载并解码就绪的 RGBA 瓦片，交由 GL 线程上传纹理。
+    /// 解码（PNG/JPEG→RGBA）在 worker 线程完成，GL 线程只做 glTexImage2D 上传，
+    /// 避免一扎瓦片同时就绪时 GL 线程集中解码丢帧（对齐 Cesium/maplibre 的 off-GL-thread 解码）。
     struct ReadyTile {
         int z = 0;
         int x = 0;
         int y = 0;
-        std::vector<uint8_t> bytes;
+        int width = 0;
+        int height = 0;
+        std::vector<uint8_t> rgba;  // 已解码 RGBA8888（width*height*4）
     };
 
     explicit TileLoader(TileCache &cache, int numThreads = 8);
@@ -56,7 +60,12 @@ public:
     /// 设置栅格数据源路径（本地 tif/img）。非空时，磁盘缓存未命中的瓦片由 [RasterRenderer] 按 (z,x,y)
     /// 的全球墨卡托经纬度四至即时重投影生成 PNG 字节（GDAL），成功后回写缓存。空路径禁用栅格生成。
     /// 与 URL 模板互斥使用（栅格层不设 URL）。线程安全。
-    void setRasterSource(std::string path);
+    /// [hasEnv]+[minLon,minLat,maxLon,maxLat]：栅格 WGS84 四至（调用方已由 info() 取得），hasEnv=true 时
+    /// request() 在派发端对无交集瓦片直接剪枝（复刻 WWK TiledSurfaceImage 的 sector 剪枝，免空白瓦进 GDAL）；
+    /// hasEnv=false 则不剪枝（保守全放行）。
+    void setRasterSource(std::string path, bool hasEnv = false,
+                         double minLon = 0.0, double minLat = 0.0,
+                         double maxLon = 0.0, double maxLat = 0.0);
     bool hasRasterSource() const;
 
     /// 请求某瓦片（后台异步拉取）。已排队/进行中的会去重跳过；无模板或关机中直接忽略。
@@ -72,6 +81,11 @@ public:
     /// 是否仍有未完成的瓦片工作（排队/下载中 或 就绪待上传）。供 Renderer 判断是否需再画一帧：
     /// RENDERMODE_WHEN_DIRTY 省电模式下，瓦片异步到位需据此触发重绘；全部就绪后返回 false 停绘。
     bool hasPendingOrReady();
+
+    /// 丢弃尚未开工的全部请求与已就绪待上传的字节（层被宿主移除时用）：清排队项/去重集/失败退避表与就绪队列，
+    /// 令闲置的工作线程回到条件变量挂起。不中断在途的一块（GDAL 生成/下载）——其结果因无人 drain 自然丢弃，
+    /// 故调用后本 loader 不再产生任何后续工作。线程安全。
+    void cancelPending();
 
 private:
     struct Request {
@@ -99,14 +113,20 @@ private:
     std::mutex readyMtx_;
     std::deque<ReadyTile> ready_;
 
-    // URL 模板（独立锁）+ 子域轮询计数 + 栅格数据源路径（共用 urlMtx_：二者互斥、均后台读）
+    // URL 模板（独立锁）+ 子域轮询计数 + 栅格数据源路径与四至（共用 urlMtx_：二者互斥、均后台读）
     mutable std::mutex urlMtx_;
     std::string urlTemplate_;
     std::string rasterPath_;
+    // 栅格四至（minLon,minLat,maxLon,maxLat）及有效性：供 request() 交集预判（urlMtx_ 保护）
+    bool rasterEnvOk_ = false;
+    double rasterEnv_[4] = {0.0, 0.0, 0.0, 0.0};
     std::atomic<uint32_t> randCounter_{0};
 
     // 关机中断标志：置位后 curl 传输尽快中断，令 join 不长时间阻塞
     std::atomic<bool> abort_{false};
+
+    // 诊断采样计数（排查瓦片去向）：本 loader 前若干块处理瓦片打一条带来源标识的日志，之后静默
+    std::atomic<int> diagSample_{32};
 };
 
 } // namespace globecore

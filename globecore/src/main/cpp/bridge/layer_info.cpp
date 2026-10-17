@@ -11,8 +11,24 @@
 #include "gdal/cpl_conv.h"
 
 #include "srs_resolve.h"
+// ESRI 退化 LOCAL_CS 重建 + 投影四至护栏：与 raster/RasterRenderer.cpp 瓦片渲染路同源口径，
+// 避免「瓦片位置正确、缩放到图层却跑到米制坐标处」这类两路漂移。
+#include "raster/RasterSrsRepair.h"
 #include "bridge_api.h"
 #include "util/Log.h"
+
+/**
+ * 投影源四至护栏：源坐标系为投影系时，最终四至必须落在有效经纬度域内，否则说明坐标变换
+ * 建不起来或退化为恒等（米制值被当度使用）——返回 false，绝不把米制包络交给上层缩放/过滤。
+ * 地理坐标系源（含 srs 为空，按既定约定视为经纬度）不拦截。
+ */
+static bool projectedExtentPlausible(const OGRSpatialReference *srs, const double extent[4]) {
+    if (srs == nullptr || srs->IsGeographic()) return true;
+    if (globecore::IsPlausibleLonLat(extent[0], extent[1], extent[2], extent[3])) return true;
+    LOGE("四至护栏拦截：投影源未得到经纬度 minLon=%.3f minLat=%.3f maxLon=%.3f maxLat=%.3f", extent[0],
+         extent[1], extent[2], extent[3]);
+    return false;
+}
 
 // ==================== 图层四至与字段名（NativeLayerInfo 门面） ====================
 
@@ -62,8 +78,14 @@ static bool computeLayerExtent(const char *p, double extent[4]) {
                         }
                         OGRCoordinateTransformation::DestroyCT(ct);
                     } else {
-                        LOGE("四至重投影失败：无法创建坐标变换（proj.db 未配置？），返回源坐标系四至");
+                        LOGE("四至重投影失败：无法创建坐标变换（proj.db 未配置？）");
                     }
+                }
+                // 变换缺失/退化时 extent 仍是源坐标系米制包络：宁可不给四至，也不让相机飞错
+                if (!projectedExtentPlausible(srs, extent)) {
+                    if (srs != nullptr) srs->Release();
+                    GDALClose(ds);
+                    return false;
                 }
                 if (srs != nullptr) srs->Release();
             }
@@ -93,6 +115,11 @@ static bool computeLayerExtent(const char *p, double extent[4]) {
                 // 投影坐标系（如高斯-克吕格）下 GeoTransform 为米制，
                 // 需重投影到 WGS84 再取极值（同矢量分支策略），否则缩放定位错位。
                 const OGRSpatialReference *srs = ds->GetSpatialRef();
+                // ESRI 退化 LOCAL_CS（无椭球、无法建坐标变换）：从文件 ESRI PE 字符串重建后再参与判定
+                // （ArcGIS 导出的 Web Mercator 影像即此情形，与瓦片渲染路同一修复）。
+                OGRSpatialReference *repaired = globecore::TryRepairLocalCsSrs(srs, std::string(p));
+                if (repaired != nullptr) srs = repaired;
+                bool transformed = false;
                 if (srs != nullptr && !srs->IsGeographic()) {
                     OGRSpatialReference *src = srs->Clone();
                     src->SetAxisMappingStrategy(OAMS_TRADITIONAL_GIS_ORDER);
@@ -101,11 +128,12 @@ static bool computeLayerExtent(const char *p, double extent[4]) {
                     dst.SetWellKnownGeogCS("WGS84");
                     OGRCoordinateTransformation *ct = OGRCreateCoordinateTransformation(src, &dst);
                     src->Release();
-                    if (ct != nullptr && ct->Transform(4, xs, ys)) {
+                    if (ct != nullptr) {
+                        transformed = ct->Transform(4, xs, ys);
                         OGRCoordinateTransformation::DestroyCT(ct);
+                        if (!transformed) LOGE("栅格四至重投影失败：坐标变换返回失败");
                     } else {
-                        if (ct != nullptr) OGRCoordinateTransformation::DestroyCT(ct);
-                        LOGE("栅格四至重投影失败：无法创建坐标变换，返回源坐标系四至");
+                        LOGE("栅格四至重投影失败：无法创建坐标变换");
                     }
                 }
 
@@ -113,7 +141,13 @@ static bool computeLayerExtent(const char *p, double extent[4]) {
                 extent[2] = std::max(std::max(xs[0], xs[1]), std::max(xs[2], xs[3]));
                 extent[1] = std::min(std::min(ys[0], ys[1]), std::min(ys[2], ys[3]));
                 extent[3] = std::max(std::max(ys[0], ys[1]), std::max(ys[2], ys[3]));
-                ok = true;
+                // 护栏：投影源没拿到经纬度（变换缺失/退化为恒等）时绝不返回米制包络——否则
+                // 上层把米当度缩放，视角飞到数据坐标系下的错误位置（表现为「加载后看不到瓦片」）。
+                const bool plausible = (srs == nullptr || srs->IsGeographic() || transformed) &&
+                        globecore::IsPlausibleLonLat(extent[0], extent[1], extent[2], extent[3]);
+                if (repaired != nullptr) repaired->Release();
+                if (plausible) ok = true;
+                else LOGE("栅格四至不可用：返回源坐标系外的范围，交由上层提示");
             }
             GDALClose(ds);
         }
@@ -187,13 +221,17 @@ static char *computeLayerSrs(const char *p) {
         GDALClose(ds);
     }
 
-    // 栅格数据兜底：读取数据集空间参考
+    // 栅格数据兜底：读取数据集空间参考（ESRI 退化 LOCAL_CS 按瓦片渲染路同一口径重建，
+    // 使图层信息展示的坐标系与渲染实际使用的一致）
     if (srs == nullptr) {
         ds = (GDALDataset *) GDALOpenEx(p, GDAL_OF_RASTER | GDAL_OF_READONLY,
                                         nullptr, nullptr, nullptr);
         if (ds != nullptr) {
             const OGRSpatialReference *rsrs = ds->GetSpatialRef();
-            if (rsrs != nullptr) {
+            OGRSpatialReference *repaired = globecore::TryRepairLocalCsSrs(rsrs, std::string(p));
+            if (repaired != nullptr) {
+                srs = repaired;
+            } else if (rsrs != nullptr) {
                 srs = rsrs->Clone();
             }
             GDALClose(ds);
@@ -237,7 +275,7 @@ std::string layerSrs(const std::string &path) {
 } // namespace gcbridge
 
 // ── Android JNI 导出薄封装（com.zys.globecore.NativeLayerInfo 门面）──
-#if !defined(__OHOS__)
+#if !defined(__OHOS__) && !defined(GLOBECORE_DESKTOP)
 #include <jni.h>
 
 extern "C"

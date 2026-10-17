@@ -56,6 +56,9 @@ internal class MapGestures(
     /** 单击（非拖拽/长按）回调：透出视图内屏幕像素坐标，供宿主做矢量要素拾取。 */
     var onTap: ((x: Float, y: Float) -> Unit)? = null
 
+    /** 长按（单指保持按住、未越过拖动阈值达系统长按时长）回调：透出视图内屏幕像素坐标，供宿主弹落点操作菜单等。 */
+    var onLongPress: ((x: Float, y: Float) -> Unit)? = null
+
     /** 捏合缩放：以焦点为锚调用缩放（scaleFactor>1 即两指张开 → 放大/拉近） */
     private val scaleDetector = ScaleGestureDetector(
         context,
@@ -253,13 +256,11 @@ internal class MapGestures(
     }
 
     /**
-     * 长按处理入口（功能尚未确定，仅留占位）：由手势识别器 onLongPress 在单指保持按住、
-     * 未越过拖动阈值达系统长按时长后触发，坐标为视图内像素。确定功能后在此实现（候选如
-     * 落点上下文菜单 / 打点标注 / 测量起点等），并按需仿 [onTap] 向 [NativeMapView] 暴露宿主回调。
-     * 对齐鸿蒙侧 XComponentBridge::handleLongPress 占位（同为一套手势双平台口径）。
+     * 长按处理入口：由手势识别器 onLongPress 在单指保持按住、未越过拖动阈值达系统长按时长后
+     * 触发，坐标为视图内像素。直接透传给宿主回调 [onLongPress]（供宿主弹落点操作菜单等）。
+     * 对齐鸿蒙侧 XComponentBridge::handleLongPress（同为一套手势双平台口径）。
      */
-    @Suppress("UNUSED_PARAMETER")
     private fun handleLongPress(xPx: Float, yPx: Float) {
-        // TODO：长按具体功能待定，确定后在此实现。
+        onLongPress?.invoke(xPx, yPx)
     }
 }

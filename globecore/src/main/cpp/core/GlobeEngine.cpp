@@ -1,6 +1,7 @@
 #include "core/GlobeEngine.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 
 #include "globe/MercatorProjection.h"
@@ -13,7 +14,7 @@
 
 namespace globecore {
 
-GlobeEngine::GlobeEngine() : renderer_(navigator_, layers_, vectorLayers_) {
+GlobeEngine::GlobeEngine() : renderer_(navigator_, layers_, vectorLayers_, rasterImageLayers_) {
     // 图层由 app 经 addTileLayer 逐个加入（影像底图 + 注记叠加）；相机/图源装配见 MainActivity。
     // 初始化 libcurl（幂等）：链接期强制拉入 curl 符号验证可用性，运行期从 logcat 打印版本自检。
     HttpClient::globalInit();
@@ -39,7 +40,31 @@ void GlobeEngine::surfaceChanged(int width, int height) {
 void GlobeEngine::drawFrame() {
     // Renderer 返回「是否需再画一帧」（后台仍有瓦片在途/待上传）；省电模式下据此自请求下一帧，
     // 使异步到位的瓦片无需等待手势即可增量补齐；全部就绪后不再回调 → GL 线程停绘省电。
-    if (renderer_.onDrawFrame() && renderCallback_) renderCallback_();
+    // 全程持 layersMtx_：整帧对 layers_/vectorLayers_/rasterImageLayers_ 及其对齐缓存 layerTextures_
+    // 做下标遍历，须与 UI 线程 add* 的 push_back（可能重分配内部数组）互斥（见 GlobeEngine.h 注释）。
+    // renderCallback_（requestRender）非阻塞，锁内调用安全；不嵌套取锁，无死锁路径。
+    std::lock_guard<std::mutex> lock(layersMtx_);
+    bool needRedraw = renderer_.onDrawFrame();
+    // 处理 2D GPU 拾取请求：UI 线程（pickVector）设 pending→触发本帧→renderPickPass2D→写结果→notify
+    {
+        bool doPick = false;
+        double px = 0.0, py = 0.0;
+        {
+            std::lock_guard<std::mutex> lk(pickMtx_);
+            if (pickPending_ && !pickDone_) { doPick = true; px = pickX_; py = pickY_; }
+        }
+        if (doPick) {
+            std::pair<int, long long> result = renderer_.renderPickPass2D(px, py);
+            {
+                std::lock_guard<std::mutex> lk(pickMtx_);
+                pickResultLayer_ = result.first;
+                pickResultFid_ = result.second;
+                pickDone_ = true;
+            }
+            pickCv_.notify_one();
+        }
+    }
+    if (needRedraw && renderCallback_) renderCallback_();
 }
 
 void GlobeEngine::setCamera(const Camera &camera) {
@@ -58,6 +83,12 @@ void GlobeEngine::setViewMode(int mode) {
 
 int GlobeEngine::viewMode() const {
     return navigator_.viewMode() == Navigator::ViewMode::MODE_3D ? 1 : 0;
+}
+
+void GlobeEngine::setSunDirection(double x, double y, double z) {
+    renderer_.setSunDirection(Vec3(x, y, z));
+    // 省电模式（WHEN_DIRTY）下主动请求一帧，使光照变更即时生效（仅 3D 通路消费，2D 无影响）
+    if (renderCallback_) renderCallback_();
 }
 
 int GlobeEngine::viewportHeight() const {
@@ -82,6 +113,8 @@ void GlobeEngine::rotateTilt(double deltaDeg) {
 
 void GlobeEngine::addTileLayer(const std::string &cacheDir, const std::string &urlTemplate, int maxLevel, bool overlay) {
     // 每层自带 TileCache + TileLoader（独立线程池/URL 模板），按加入顺序绘制（底图在前、注记 overlay 在后）。
+    // 锁内仅 push_back（重分配窗口与 GL 帧遍历互斥，口径同 addRasterLayer）
+    std::lock_guard<std::mutex> lock(layersMtx_);
     layers_.push_back(std::make_unique<TileLayer>(cacheDir, urlTemplate, maxLevel, overlay));
     LOGI("GlobeEngine addTileLayer maxLevel=%d overlay=%d net=%s", maxLevel, overlay ? 1 : 0,
          urlTemplate.empty() ? "off" : "on");
@@ -95,27 +128,111 @@ void GlobeEngine::setLayerVisible(int index, bool visible) {
     if (renderCallback_) renderCallback_();
 }
 
+void GlobeEngine::removeTileLayer(int index) {
+    if (index < 0 || static_cast<size_t>(index) >= layers_.size()) return;
+    TileLayer &layer = *layers_[static_cast<size_t>(index)];
+    // 墓碑：置 removed + 隐藏，不 erase 以保持其它瓦片层 index 稳定（与 removeVectorLayer 同口径）。
+    // 纹理属 GL 资源，不能在调用线程删除：只置 discardTextures 交 Renderer 下一帧在 GL 线程回收；
+    // loader 队列就地清空（本帧起不再为已删层跑 GDAL/联网）；线程保留、挂起零占用。
+    layer.visible = false;
+    layer.removed = true;
+    layer.discardTextures.store(true);
+    if (layer.loader) layer.loader->cancelPending();
+    LOGI("GlobeEngine removeTileLayer index=%d raster=%d path=%s", index,
+         layer.raster ? 1 : 0, layer.rasterPath.c_str());
+    if (renderCallback_) renderCallback_();
+}
+
 int GlobeEngine::addRasterLayer(const std::string &cacheDir, const std::string &path) {
     // 先读四至 + 据重投影分辨率推算 maxLevel（LOD 上限）：会打开数据集并建重投影 VRT（一次性，入 RasterRenderer
     // 的 LRU 缓存，后续瓦片生成复用）；打不开或四至无效则不建层。与原主界面 GdalRasterLayer（已删除）构造同口径（同步读四至）。
     double minLon = 0.0, minLat = 0.0, maxLon = 0.0, maxLat = 0.0;
     int maxLevel = 18;
-    if (!RasterRenderer::info(path, minLon, minLat, maxLon, maxLat, maxLevel)) {
-        LOGW("GlobeEngine addRasterLayer 无法解析栅格，跳过 path=%s", path.c_str());
+    std::string error;
+    if (!RasterRenderer::info(path, minLon, minLat, maxLon, maxLat, maxLevel, error)) {
+        LOGW("GlobeEngine addRasterLayer 无法解析栅格，跳过 path=%s error=%s", path.c_str(), error.c_str());
+        {
+            std::lock_guard<std::mutex> lock(addErrMtx_);
+            lastAddError_ = error;
+        }
         return -1;
+    }
+    {
+        std::lock_guard<std::mutex> lock(addErrMtx_);
+        lastAddError_.clear();
     }
     // 栅格层：overlay=true（alpha 混合、缺失瓦片透明）+ raster=true（Renderer 据此后置于矢量之前绘制）；
     // urlTemplate 空（不联网），瓦片由 TileLoader 调 RasterRenderer 按四至即时生成。numThreads=2（GDAL 全局串行，无需多绪）。
     auto layer = std::make_unique<TileLayer>(cacheDir, "", maxLevel, /*overlay=*/true, /*numThreads=*/2);
     layer->raster = true;
     layer->rasterPath = path;
-    layer->loader->setRasterSource(path);
-    layers_.push_back(std::move(layer));
-    const int index = static_cast<int>(layers_.size()) - 1;
+    // 四至随源路径一并下传：TileLoader 在派发端对无交集瓦片直接剪枝（免空白瓦进 GDAL 空转）
+    layer->loader->setRasterSource(path, true, minLon, minLat, maxLon, maxLat);
+    // 临界区只包住 push_back+取 index（上方 info() 的 GDAL 打开/建 VRT 耗时大，必须留在锁外免饿死 GL）
+    int index = -1;
+    {
+        std::lock_guard<std::mutex> lock(layersMtx_);
+        layers_.push_back(std::move(layer));
+        index = static_cast<int>(layers_.size()) - 1;
+    }
     LOGI("GlobeEngine addRasterLayer index=%d maxLevel=%d extent=[%.6f,%.6f,%.6f,%.6f] path=%s",
          index, maxLevel, minLon, minLat, maxLon, maxLat, path.c_str());
     if (renderCallback_) renderCallback_();
     return index;
+}
+
+std::string GlobeEngine::rasterAddError() const {
+    std::lock_guard<std::mutex> lock(addErrMtx_);
+    return lastAddError_;
+}
+
+int GlobeEngine::addRasterImageLayer(const std::string &cacheDir, const std::string &path) {
+    if (path.empty()) {
+        std::lock_guard<std::mutex> lock(addErrMtx_);
+        lastAddError_ = "文件路径为空";
+        return -1;
+    }
+    auto layer = std::make_unique<RasterImageLayer>(path);
+    // 边长帽取当前 GL_MAX_TEXTURE_SIZE（surface 未创建时 Renderer 保守报 2048）；
+    // 像素帽 ~24M（RGBA ≈96MB）防 native OOM——超限由 GDAL 沿 overviews 等比降采样，未超则原生分辨率直读。
+    // cacheDir 透传给加载器作 sidecar 目录：二次启动命中时免 GDAL 直读位图（容量被双帽封顶）。
+    layer->loader = std::make_unique<RasterImageLoader>(path, renderer_.maxTextureSize(),
+                                                        24LL * 1000 * 1000, cacheDir);
+    layer->loader->start(); // 后台线程整幅读取，UI 线程零 GDAL
+    int index = -1;
+    {
+        std::lock_guard<std::mutex> lock(layersMtx_); // 锁内仅 push_back+取 index（同上口径）
+        rasterImageLayers_.push_back(std::move(layer));
+        index = static_cast<int>(rasterImageLayers_.size()) - 1;
+    }
+    LOGI("GlobeEngine addRasterImageLayer index=%d cache=%s path=%s", index,
+         cacheDir.empty() ? "off" : cacheDir.c_str(), path.c_str());
+    if (renderCallback_) renderCallback_();
+    return index;
+}
+
+void GlobeEngine::setRasterImageVisible(int index, bool visible) {
+    if (index < 0 || static_cast<size_t>(index) >= rasterImageLayers_.size()) return;
+    rasterImageLayers_[static_cast<size_t>(index)]->visible = visible;
+    LOGI("GlobeEngine setRasterImageVisible index=%d visible=%d", index, visible ? 1 : 0);
+    if (renderCallback_) renderCallback_();
+}
+
+bool GlobeEngine::hasRasterImageLoading() const {
+    // 仅统计可见层（口径同 hasVectorLoading：隐藏层不计入，免隐藏层慢读取长亮提示胶囊）
+    for (const auto &rl : rasterImageLayers_) {
+        if (!rl->visible) continue;
+        if (rl->loader && rl->loader->hasPendingOrReady()) return true;
+        if (rl->uploading.load()) return true; // 已接管、位图待/正在上传纹理
+    }
+    return false;
+}
+
+std::string GlobeEngine::rasterImageError(int index) const {
+    if (index < 0 || static_cast<size_t>(index) >= rasterImageLayers_.size()) return std::string();
+    const RasterImageLayer &rl = *rasterImageLayers_[static_cast<size_t>(index)];
+    if (rl.geomReady) return std::string(); // 已成功接管位图（上传/绘制侧自会呈现或下帧重试），不再报错
+    return rl.loader ? rl.loader->error() : std::string();
 }
 
 int GlobeEngine::addVectorLayer(const std::string &path, const VectorStyle &style,
@@ -131,8 +248,12 @@ int GlobeEngine::addVectorLayer(const std::string &path, const VectorStyle &styl
         layer->iconH = iconH;
     }
     layer->loader->start(); // 后台线程读文件 + 重投影 + earcut 三角剖分，就绪后由 GL 线程上传
-    vectorLayers_.push_back(std::move(layer));
-    const int index = static_cast<int>(vectorLayers_.size()) - 1;
+    int index = -1;
+    {
+        std::lock_guard<std::mutex> lock(layersMtx_); // 锁内仅 push_back+取 index（同上口径）
+        vectorLayers_.push_back(std::move(layer));
+        index = static_cast<int>(vectorLayers_.size()) - 1;
+    }
     LOGI("GlobeEngine addVectorLayer index=%d hasExtent=%d extent=[%.6f,%.6f,%.6f,%.6f] path=%s",
          index, hasExtent ? 1 : 0, minLon, minLat, maxLon, maxLat, path.c_str());
     // 新层异步加载中，主动请求一帧启动绘制（加载就绪后 drawVectorLayers 会持续请求重绘直到上传）。
@@ -251,6 +372,7 @@ int GlobeEngine::addOverlayLayer(const VectorStyle &style,
         layer->iconW = iconW;
         layer->iconH = iconH;
     }
+    std::lock_guard<std::mutex> lock(layersMtx_); // 锁内仅 push_back+取 index（同上口径；叠加层随测量/轨迹高频增建，竞争窗口更密）
     vectorLayers_.push_back(std::move(layer));
     const int index = static_cast<int>(vectorLayers_.size()) - 1;
     LOGI("GlobeEngine addOverlayLayer index=%d", index);
@@ -456,20 +578,19 @@ bool GlobeEngine::featureGeometry(int layerIndex, long long fid, int &outType,
                                   std::vector<int> &outRingsPerFeature) const {
     if (layerIndex < 0 || layerIndex >= static_cast<int>(vectorLayers_.size())) return false;
     const VectorGeometry &g = vectorLayers_[static_cast<size_t>(layerIndex)]->geom;
-    // 定位命中要素的拾取图元（pickVector 命中回传的 fid 即来自此）
-    const PickPrimitive *found = nullptr;
-    for (const auto &pp : g.pickPrims) {
-        if (pp.fid == fid) { found = &pp; break; }
-    }
-    if (found == nullptr) return false;
-
-    // pickPrims 坐标为「相对图层原点」的 RTC 世界坐标：加回原点得绝对世界坐标，再墨卡托反投影为经纬度
-    // （与 screenToGeo 同口径：经度环绕到 [-180,180)、纬度夹取到墨卡托有效范围）。
-    const double ox = g.originWx, oy = g.originWy;
     outLonLat.clear();
     outRingCounts.clear();
     outRingsPerFeature.clear();
-    const std::vector<float> &c = found->coords;
+
+    // 同 fid 多派生的聚合：VectorReader 将 MultiPolygon / MultiLineString / GeometryCollection
+    // 展平为多个共享同一 fid 的 PickPrimitive（每个子几何一个）。旧实现命中首个即 break，
+    // 选中高亮/量算只回第一块几何 → 飞地类要素仅显一块、面积不完整。
+    // 现逐 pp 摊平到同一 lonlat 缓冲：
+    //   Point   每 pp 取首点对，多派生依次 push（无 ringCounts/ringsPerFeature）；
+    //   Line    逐 range 展平，每段 push 一个顶点数到 ringCounts（宿主拆段同口径）；
+    //   Polygon 逐 pp 当独立子面，每 pp 写入一个 ringsPerFeature 项（外环+各洞数）。
+    // 类型取首个匹配 pp（异类派生同 fid 极罕见，不混排）；无任何匹配返回 false。
+    const double ox = g.originWx, oy = g.originWy;
     auto pushLonLat = [&](float rx, float ry) {
         double lon = 0.0, lat = 0.0;
         MercatorProjection::worldToLonLat(ox + rx, oy + ry, lon, lat);
@@ -478,29 +599,35 @@ bool GlobeEngine::featureGeometry(int layerIndex, long long fid, int &outType,
         outLonLat.push_back(lon);
         outLonLat.push_back(MercatorProjection::clampLatitude(lat));
     };
-    // 逐环/段摊平：ranges 为空（点）时直接取 coords 首点对；否则按 (起始点对, 点对数) 区间遍历
-    auto pushRanges = [&]() {
-        int rings = 0;
-        for (const auto &rg : found->ranges) {
-            const int start = rg.first, count = rg.second;
-            for (int i = 0; i < count; ++i) pushLonLat(c[(start + i) * 2], c[(start + i) * 2 + 1]);
-            outRingCounts.push_back(count);
-            ++rings;
+    int aggType = -1;
+    for (const auto &pp : g.pickPrims) {
+        if (pp.fid != fid) continue;
+        const int t = (pp.type == PickType::Point) ? 0
+                    : (pp.type == PickType::Line)  ? 1 : 2;
+        if (aggType < 0) aggType = t;
+        else if (t != aggType) continue;
+        const std::vector<float> &c = pp.coords;
+        if (t == 0) { // Point
+            if (c.size() >= 2) pushLonLat(c[0], c[1]);
+        } else if (t == 1) { // Line
+            for (const auto &rg : pp.ranges) {
+                const int start = rg.first, count = rg.second;
+                for (int i = 0; i < count; ++i) pushLonLat(c[(start + i) * 2], c[(start + i) * 2 + 1]);
+                outRingCounts.push_back(count);
+            }
+        } else { // Polygon：ranges[0] 外环、其余洞环，逐环写入 ringCounts，本 pp 环数写入 ringsPerFeature
+            int rings = 0;
+            for (const auto &rg : pp.ranges) {
+                const int start = rg.first, count = rg.second;
+                for (int i = 0; i < count; ++i) pushLonLat(c[(start + i) * 2], c[(start + i) * 2 + 1]);
+                outRingCounts.push_back(count);
+                ++rings;
+            }
+            if (rings > 0) outRingsPerFeature.push_back(rings);
         }
-        return rings;
-    };
-
-    if (found->type == PickType::Point) {
-        if (c.size() < 2) return false;
-        outType = 0;
-        pushLonLat(c[0], c[1]);
-    } else if (found->type == PickType::Line) {
-        outType = 1;
-        pushRanges();  // 每段一条折线，outRingCounts 记各段顶点数
-    } else {           // Polygon：ranges[0] 外环、其余洞环
-        outType = 2;
-        outRingsPerFeature.push_back(pushRanges());
     }
+    if (aggType < 0) return false;
+    outType = aggType;
     return true;
 }
 
@@ -532,6 +659,37 @@ bool GlobeEngine::pickVector(double sxPx, double syPx, int &outLayerIndex, long 
     // 2D 正交下的射线∩椭球反算不适用于平面 RTC 判据，不可复用。
     if (navigator_.viewMode() == Navigator::ViewMode::MODE_3D)
         return pickVector3D(sxPx, syPx, outLayerIndex, outFid);
+
+    // 2D GPU 拾取（PickID color-attachment）：UI 线程设请求→触发 GL 线程下一帧渲染拾取 pass→
+    // glReadPixels 解码回 (layerIndex, fid)。超时 100ms 回退 CPU 逐要素命中检测（避免 ANR）。
+    // 仅在有 renderCallback_（= requestRender 注入）时走 GPU 路径；否则直接 CPU。
+    if (renderCallback_) {
+        {
+            std::lock_guard<std::mutex> lk(pickMtx_);
+            pickPending_ = true;
+            pickX_ = sxPx;
+            pickY_ = syPx;
+            pickDone_ = false;
+        }
+        renderCallback_();
+        {
+            std::unique_lock<std::mutex> lk(pickMtx_);
+            pickCv_.wait_for(lk, std::chrono::milliseconds(100),
+                             [this] { return pickDone_; });
+        }
+        std::lock_guard<std::mutex> lk(pickMtx_);
+        pickPending_ = false;
+        if (pickDone_ && pickResultLayer_ >= 0) {
+            outLayerIndex = pickResultLayer_;
+            outFid = pickResultFid_;
+            return true;
+        }
+        // 超时或 GPU 未命中 → CPU 回退（CPU 也覆盖点要素，GPU pass 不画点）
+    }
+    return pickVectorCpu(sxPx, syPx, outLayerIndex, outFid);
+}
+
+bool GlobeEngine::pickVectorCpu(double sxPx, double syPx, int &outLayerIndex, long long &outFid) const {
     // 屏幕点 → 世界坐标（与相机同口径），再转各图层「相对原点」坐标做命中检测
     double wx = 0.0, wy = 0.0;
     navigator_.screenToWorld(sxPx, syPx, wx, wy);
@@ -829,7 +987,21 @@ void GlobeEngine::setRenderCallback(std::function<void()> cb) {
 }
 
 void GlobeEngine::releaseGl() {
+    // 与 drawFrame 同口径持锁：GL 上下文销毁回收资源时同样遍历层容器，须与 UI 线程 add* 互斥
+    std::lock_guard<std::mutex> lock(layersMtx_);
     renderer_.release();
+}
+
+void GlobeEngine::setTerrainTile(int z, int x, int y, const std::vector<uint8_t> &bytes) {
+    // 转发到 Renderer DEM 缓存（须 GL 线程调用，与 buildGlobeTileMesh 同上下文）。
+    // 不持 layersMtx_：terrainCache_ 是 Renderer 私有成员，只在 GL 线程访问（与瓦片纹理缓存同口径）。
+    renderer_.setTerrainTile(z, x, y, bytes);
+    if (renderCallback_) renderCallback_(); // 触发重绘使地形抬升即时生效
+}
+
+void GlobeEngine::clearTerrain() {
+    renderer_.clearTerrain();
+    if (renderCallback_) renderCallback_();
 }
 
 } // namespace globecore

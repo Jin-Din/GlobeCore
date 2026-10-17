@@ -5,20 +5,26 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "geom/Matrix4.h"
 #include "globe/Tessellator.h"
+#include "globe/GeographicQuadtree.h"
+#include "layer/RasterImageLayer.h"
 #include "layer/TileLayer.h"
 #include "layer/VectorLayer.h"
 #include "navigator/Navigator.h"
 #include "render/FontAtlas.h"
 #include "render/ShaderProgram.h"
 #include "render/Texture.h"
+#include "rhi/RHI.h"
+#include "terrain/QuantizedMesh.h"
 
 namespace globecore {
 
@@ -41,7 +47,8 @@ namespace globecore {
 class Renderer {
 public:
     Renderer(const Navigator &navigator, const std::vector<std::unique_ptr<TileLayer>> &layers,
-             const std::vector<std::unique_ptr<VectorLayer>> &vectorLayers);
+             const std::vector<std::unique_ptr<VectorLayer>> &vectorLayers,
+             const std::vector<std::unique_ptr<RasterImageLayer>> &rasterImageLayers);
     ~Renderer();
 
     Renderer(const Renderer &) = delete;
@@ -74,6 +81,41 @@ public:
     /// 设置标注字体文件路径并加载字形图集（[path] 为空则自动探测系统 CJK 字体）。可在任意线程调用
     /// （FontAtlas::load 内部持锁、纯 CPU）；未加载成功时矢量标注不绘制，不影响其它渲染。
     void setFontPath(const std::string &path);
+
+    /// 当前设备 GL_MAX_TEXTURE_SIZE（onSurfaceCreated 时查询；上下文未建立时保守报 2048）。
+    /// 供 [GlobeEngine::addRasterImageLayer] 在 UI 线程取全幅位图边长帽（非精确只影响降采样档位，无正确性风险）。
+    int maxTextureSize() const { return maxTextureSize_; }
+
+    // ==================== 地形 DEM 通路（quantized-mesh 高度缓存） ====================
+
+    /// 注入/更新一块 quantized-mesh 地形瓦片（解码 bytes → 存入 LRU 缓存）。
+    /// 供 buildGlobeTileMesh 在生成球面网格时采样高度（替代 alt=0 贴地）。
+    /// bytes 为空则清除该 tile 的缓存。须在 GL 线程调用（与 buildGlobeTileMesh 同帧/上下文）。
+    void setTerrainTile(int z, int x, int y, const std::vector<uint8_t> &bytes);
+
+    /// 清除全部地形缓存（上下文重建/换地形源时调用）。
+    void clearTerrain();
+
+    // ==================== 大气/光照（#10） ====================
+
+    /// 设置固定日光方向（ECEF 单位向量，指向太阳）。仅 3D 通路消费：驱动球面瓦片片元着色器的
+    /// Lambert 漫反射 + 边缘 rim glow（青蓝大气边缘光）。默认不调用——此时日光每帧跟随相机
+    /// （日下点在视野中心偏屏幕上方 30°，看到的区域始终被照亮）；一旦调用本方法即切换为
+    /// 固定太阳模式。UI 线程写、GL 线程读，非阻塞；内部自动归一化（长度过小时保持默认方向）。
+    void setSunDirection(const Vec3 &dir);
+
+private:
+    /// 日光方向（ECEF 归一向量，指向太阳）。renderGlobeLayer3D 每帧传给 uSunDir uniform。
+    Vec3 sunDir_{1.0, 0.0, 0.3};
+
+    /// 日光是否跟随相机（默认 true）：onDrawFrame3D 每帧把日下点放在视野中心偏屏幕上方 30°，
+    /// 保证「看到的地方就是照到的地方」。外部调用 setSunDirection 后置 false，改用固定太阳方向。
+    bool sunFollowCamera_ = true;
+
+private:
+    /// 查询某球面瓦片在给定经纬度处的地形高度（米，椭球面以上）。
+    /// 缓存未命中返回 0.0（等同无地形）。供 buildGlobeTileMesh 逐顶点调用。
+    double sampleTerrainHeight(const GlobeTile &tile, double lon, double lat) const;
 
 private:
     /// 瓦片 (z,x,y) 打包为唯一键
@@ -157,10 +199,17 @@ private:
     /// 为缺失瓦片向上查找最近的有效祖先纹理（level-1..0）；命中返回其缓存条目并输出祖先级别，否则 nullptr
     TileTexEntry *findAncestorEntry(TexMap &texMap, int level, int tx, int ty, int &outAncestorLevel);
 
-    /// LRU 淘汰：某层缓存条目超过 kMaxCachedTiles 时，按 lastUsed 升序释放最久未用的纹理（须在 GL 线程）
+    /// LRU 淘汰：某层有效纹理累计字节超过 kMaxTextureBytesPerLayer 时，先驱逐无纹理占位条目，
+    /// 再按 lastUsed 升序释放最久未用的有效纹理，直到总字节降到预算以下（须在 GL 线程）。
     void evictTileTextures(TexMap &texMap);
 
     void clearTileTextures();
+
+    /// 回收被宿主移除（[TileLayer::removed]）图层的全部瓦片纹理（必须 GL 线程）：逐层检查
+    /// discardTextures 标志（exchange 消费，一次性），仅释放该层自己的 TexMap——其它层纹理不受影响。
+    /// 每帧绘制前调用（在 layerTextures_ 与 layers_ 扩容对齐之后），口径同矢量层在 drawVectorLayers 内
+    /// 就地回收 dead 层的做法。
+    void discardRemovedLayerTextures();
 
     /// 在所有瓦片层之后叠加绘制定位标记：地理坐标 → 世界坐标（与瓦片同一 RTC 口径），
     /// 按「世界单位/像素」换算出屏幕固定半径，用 color 程序画：先移动方向箭头（若 heading>=0）、
@@ -183,11 +232,26 @@ private:
     /// glDrawArrays（顶点不随相机变化，零逐帧 CPU 重建/上传）。无图标的层由 [drawVectorLayers] 画圆。
     void drawVectorIcons(double cwx, double cwy, double hw, const Matrix4 &ortho);
 
-    /// 流式上传某矢量层的 CPU 几何（[VectorLayer::geom]）为 chunk VBO：按每帧时间预算推进
+public:
+    // ==================== GPU 拾取通路（PickID color-attachment，2D 正交通路） ====================
+
+    /// 2D GPU 拾取 pass：把全部可见矢量层以 PickID 着色器渲到离屏 FBO（每要素编码唯一
+    /// RGBA8 = pack(layerIndex, primIndex)），glReadPixels 读点击位置像素解码回 (layerIndex, primIndex)
+    /// → pickPrims[primIndex].fid。替代 2D CPU 逐要素命中检测（巨层 O(N) → O(1) 像素查表）。
+    /// 须在 GL 线程、onDrawFrame 渲完常规帧后调用（复用本帧算好的 ortho/uOffset/visible 状态）。
+    /// @param sxPx  屏幕点击 X（像素，左上原点）
+    /// @param syPx  屏幕点击 Y
+    /// @return      (layerIndex, fid)；未命中返回 (-1, -1)
+    std::pair<int, long long> renderPickPass2D(double sxPx, double syPx);
+
+    /// 确保 PickFBO 与视口同尺寸（懒创建/重建）。仅在 GL 线程调用。返回是否就绪。
+    bool ensurePickFbo();
+
+private:
     /// [VectorLayer::uploadStage]/[VectorLayer::uploadPos] 游标（fill→outline→line 三阶段、每片约
     /// 4MB），巨层不再单帧冻结秒级；全部完成后置 glReady 并清 streamingUpload。
     /// 每片上传即新建 chunk VBO；旧 chunk 由 drainReady 换几何/resetVectorGl 统一清理，不误删失效名。
-    void uploadVectorChunks(VectorLayer &vl);
+    void uploadVectorChunks(VectorLayer &vl, int layerIndex);
 
     /// GL 上下文重建：把全部矢量层的 chunk 列表/iconVbo 作废清零、glReady 置 false（保留 CPU 几何），
     /// 使下一帧据 geom 重新流式上传（延续 onSurfaceCreated 的瓦片纹理/VBO 重建口径）。
@@ -196,11 +260,41 @@ private:
     /// 释放全部矢量层的 GL VBO（须在 GL 线程调用）。
     void releaseVectorGl();
 
+    // ==================== 全幅栅格贴图通路（tif 整幅直读，非分瓦） ====================
+
+    /// 2D：逐可见全幅栅格层 drain→上传纹理后，以其 WGS84 四至烘焙单位四边形绘制
+    /// （texProgram_ + vboUnitQuad_，四角 lonLatToWorld 后 double 减相机中心转 float，同瓦片 RTC 口径；
+    /// alpha 混合，透明区露出底图）。绘制趟次：底图+栅格瓦片趟之后、矢量层之前（与瓦片栅格同层级）。
+    /// 返回是否仍有层在途（待 drain/待上传）需再画一帧。
+    bool drawRasterImages2D(double cwx, double cwy, const Matrix4 &ortho);
+
+    /// 3D：同上但沿经纬度 16×16 细分网格贴球面（globeTexProgram_，pos3+uv2 交错布局同瓦片网格；
+    /// uv 全图 0..1，CPU 端 geographicToCartesian 减眼点 RTC）。开深度（背半球自然剔除），
+    /// 网格抬升 30m 贴地常量盖过瓦片球面网格弦垂（防共面深度剔除）。
+    bool drawRasterImages3D(const Navigator::Camera3D &cam, const Matrix4 &viewProjRtc);
+
+    /// 某全幅层位图就绪则从 loader 接管（CPU rgba 常驻，供上下文重建懒重传）并就地上传纹理，
+    /// 返回 true 表示纹理有效可绘。接管/上传各一次性发生，失败（OOM）下帧自然重试。
+    bool prepareRasterImageTex(RasterImageLayer &rl);
+
+    /// 生成全幅图层的球面细分网格（G×G 四边格 Triangle Strip 逐行顶点对，布局同 buildGlobeTileMesh 的
+    /// pos3+uv2+color4=9f）：经纬范围取图层四至，uv 全图 [0,1]，位置 double 减眼点转 float。
+    void buildRasterImageGlobeMesh(const RasterImageLayer &rl, const Vec3 &eye,
+                                   std::vector<float> &verts) const;
+
+    /// GL 上下文重建：abandon 各全幅层纹理句柄（rgba 常驻，据其懒重传）。
+    void resetRasterImageGl();
+
+    /// 释放全部全幅层纹理（须在 GL 线程调用）。
+    void releaseRasterImageGl();
+
     const Navigator &nav_;
     // 图层向量（由 GlobeEngine 持有，本类引用）：按加入顺序绘制，底图在前、注记 overlay 在后
     const std::vector<std::unique_ptr<TileLayer>> &layers_;
     // 矢量图层向量（由 GlobeEngine 持有，本类引用）：绘制在底图瓦片层与注记 overlay 层之间
     const std::vector<std::unique_ptr<VectorLayer>> &vectorLayers_;
+    // 全幅栅格图层向量（由 GlobeEngine 持有，本类引用）：与瓦片栅格同层级（底图趟后、矢量前）
+    const std::vector<std::unique_ptr<RasterImageLayer>> &rasterImageLayers_;
 
     // 占位（纯色）绘制通路
     ShaderProgram colorProgram_;
@@ -259,6 +353,7 @@ private:
 
     // 3D 瓦片纹理通路：顶点 [x,y,z,u,v(,r,g,b,a)]（与占位通路共用交错缓冲， stride=9 floats），
     // uUvOffset/uUvScale 同 2D 做祖先子矩形映射；uMvp 传 viewProjRtc（顶点已相对眼点）。
+    // uEye/uSunDir/uAmbient 驱动 3D 专用片元着色器（kGlobeTexFragmentSrc）：Lambert 漫反射 + rim glow。
     ShaderProgram globeTexProgram_;
     GLint g3APos_ = -1;
     GLint g3ATexCoord_ = -1;
@@ -266,12 +361,19 @@ private:
     GLint g3UTexture_ = -1;
     GLint g3UUvOffset_ = -1;
     GLint g3UUvScale_ = -1;
+    GLint g3UEye_ = -1;       // 眼点 ECEF（顶点求球面法向用）
+    GLint g3USunDir_ = -1;   // 日光方向（归一，由 setSunDirection 设置）
+    GLint g3UAmbient_ = -1;  // 环境光底（kGlobeAmbient）
 
     // 3D 占位通路：同布局取 pos3+color4，画无图无祖先瓦片的棋盘深色（overlay 层跳过）。
+    // 同样用 kGlobeColorFragmentSrc 做 Lambert + rim glow，与纹理瓦片光照一致。
     ShaderProgram globeColorProgram_;
     GLint gc3APos_ = -1;
     GLint gc3AColor_ = -1;
     GLint gc3UMvp_ = -1;
+    GLint gc3UEye_ = -1;
+    GLint gc3USunDir_ = -1;
+    GLint gc3UAmbient_ = -1;
 
     // 3D 矢量面填充通路（P2.a）：pos3+color4 = 7f/v，uMvp 传 viewProjRtc，uOffset=anchor−eye（平移零重建）；
     // uAnchor=图层固定锚点（绝对 ECEF）、uVecAlt=贴地高度（每帧连续）：顶点纯几何 alt=0 一次烘焙，
@@ -349,22 +451,31 @@ private:
     GLuint vboGlobeMesh_ = 0;              // 3D 网格动态 VBO（Pass A 批量一次上传；Pass B 逐瓦片重传）
     std::vector<GlobeTile> globeTilesScratch_; // 可见叶瓦片 scratch（逐层复用，避免反复堆分配）
     std::vector<float> globeMeshScratch_;      // 单瓦片网格 scratch（Pass B 逐瓦片上传用）
+    GeographicQuadtree geoQuadtree_;           // #11 带帧间一致性的地理四叉树（替代 Tessellator 全量重建）
 
     // 字形图集：CPU 侧 RGBA 缓冲与字形表常驻（[fontAtlas_]），GL 纹理（[atlasTex_]）在图集脏/上下文重建后重传。
     FontAtlas fontAtlas_;
     Texture atlasTex_;
 
     // 每层各一份持久纹理 LRU 缓存（索引与 layers_ 对齐；addTileLayer 后在 onDrawFrame 内按需 resize）
-    std::vector<TexMap> layerTextures_;
+    // 用 deque 而非 vector：TexMap(unordered_map) 装 move-only 的 TileTexEntry，其扩容 resize 在 MSVC
+    // 下会走强异常保证的「复制搬迁」路径（MSVC 的 _Hash 拷贝构造是真实体、is_copy_constructible 恒为
+    // true，即便 value 不可拷贝，直到实例化才报 pair 拷贝被删除）。deque 增长不搬迁已有元素，绕开该缺陷；
+    // libc++(Android/鸿蒙) 把 unordered_map 拷贝构造 =default→deleted，本就不会触发，故各端语义一致。
+    std::deque<TexMap> layerTextures_;
     uint64_t frameTick_ = 0;                       // 帧计数，用于 LRU lastUsed 标记
-    // 单层 LRU 上限。对齐 参考实现 RenderResourceCache 的「按字节预算」口径：参考实现 默认兑底 256MB
-    // = 1024×256×256px RGBA。取 1024 与 参考实现 默认量级一致，且需大于 kMaxTiles(640) 以容纳「叶自身 + 近景祖先链」
+    // 单层纹理字节预算（对齐参考实现 RenderResourceCache 的「按字节预算」口径：参考实现默认兑底 256MB
+    // = 1024×256×256px RGBA）。取 256MiB 与原按张数口径量级一致；按字节计更准确：
+    // 512² 高分瓦片不再因张数少而漏网、256² 旧瓦不再因张数多被误留。需容纳「叶自身 + 近景祖先链」
     // 去重后的工作集，避免「驱逐→下帧 miss→重请求→图源限流(429)」风暴（曾只剩棋盘）。
     // native OOM 已由 TileLoader.ready_ 高水位背压堆主，不靠本值；本值只决定远景能否驻留清晰。设备显存偏紧时可下调。
-    static constexpr size_t kMaxCachedTiles = 1024;
+    static constexpr size_t kMaxTextureBytesPerLayer = 256ull * 1024 * 1024;
 
     int viewportWidth_ = 0;
     int viewportHeight_ = 0;
+
+    // 设备 GL 纹理边长上限：onSurfaceCreated 查询；上下文未建立（UI 线程早期 add 图层）保守 2048
+    int maxTextureSize_ = 2048;
 
     // 定位标记状态：UI 线程 setLocationMarker 写、GL 线程 drawLocationMarker 读
     mutable std::mutex markerMtx_;
@@ -379,6 +490,46 @@ private:
     int markerIconW_ = 0;
     int markerIconH_ = 0;
     Texture markerIconTex_;
+
+    // ==================== GPU 拾取通路成员 ====================
+    // 拾取着色器（2D）：面填充（aPos+aPickId）与线/描边（aPos+aMiter+aPickId）两路，
+    // 片元直接输出 PickID 颜色到离屏 FBO；glReadPixels 读回解码。
+    ShaderProgram pickColorProgram_;
+    GLint pkAPos_ = -1;
+    GLint pkAPickId_ = -1;
+    GLint pkUMvp_ = -1;
+    GLint pkUOffset_ = -1;
+    ShaderProgram pickLineProgram_;
+    GLint pkLAPos_ = -1;
+    GLint pkLAMiter_ = -1;
+    GLint pkLAPickId_ = -1;
+    GLint pkLUMvp_ = -1;
+    GLint pkLUOffset_ = -1;
+    GLint pkLUHalfWidthWorld_ = -1;
+    // 离屏拾取 FBO（RGBA8 颜色纹理附件，与视口同尺寸；上下文重建后重建）
+    GLuint pickFbo_ = 0;
+    GLuint pickTex_ = 0;
+    int pickW_ = 0;
+    int pickH_ = 0;
+    // 上一帧 2D 相机参数快照（renderPickPass2D 复用，免重新计算）
+    double lastCwx_ = 0.0;
+    double lastCwy_ = 0.0;
+    double lastHw_ = 0.0;
+    Matrix4 lastOrtho_;
+
+    // ==================== 地形 DEM 缓存（quantized-mesh 解码后的高度采样数据） ====================
+    // 以 tileKey(z,x,y) 索引 quantized-mesh 解码数据，buildGlobeTileMesh 逐顶点采样高度。
+    // LRU 淘汰防无界增长（单瓦片约 1-2k 顶点 × ~48B ≈ 100KB，缓存上限 ~16MB）。
+    std::unordered_map<uint64_t, QuantizedMeshData> terrainCache_;
+    std::deque<uint64_t> terrainLru_; // 最近使用顺序（front=最旧）
+    static constexpr size_t kMaxTerrainTiles = 160; // ~160 tiles × ~100KB ≈ 16MB
+
+    // ==================== #9 RHI 抽象层 ====================
+    // 后端无关渲染硬件接口：onSurfaceCreated 中由 RHIFactory 创建（默认 GLES2Backend），
+    // 封装深度/混合/视口/清除等状态切换与 draw call，使渲染逻辑与具体图形后端解耦。
+    // 现有 ShaderProgram/Texture 薄封装保留不动，RHI 在更高层抽象状态管理流程，
+    // 逐步替代散落在各 draw 函数中的直接 GL 调用。Vulkan 后端经编译守卫可选启用。
+    std::unique_ptr<RHIBackend> rhi_;
 };
 
 } // namespace globecore

@@ -51,8 +51,9 @@ class Tessellator {
 public:
     /// 单次构建的叶瓦片上限。coverage-first 下配额满时粗叶作占位保留（无缝隙不留洞），且 DFS 近侧优先
     /// 递归——故本上限只约束「地平线附近多粗」，不影响中心带锐度（近景细级先被锁定）。
-    /// 取值需≤纹理缓存 kMaxCachedTiles：否则叶数超缓存→「驱逐→下帧 miss→重请求→图源限流(429)」冲刷
-    /// （曾只剩棋盘）。native OOM 已由 TileLoader.ready_ 高水位背堆主，不再靠本值防洪。
+    /// 取值需使单帧叶瓦片纹理总字节 ≤ 纹理缓存预算 kMaxTextureBytesPerLayer：640×256²×RGBA8≈160MiB < 256MiB，
+    /// 故本值在预算内安全。若上调本值或瓦片像素增大，须同步核验字节预算——否则叶数超预算→
+    /// 「驱逐→下帧 miss→重请求→图源限流(429)」冲刷（曾只剩棋盘）。native OOM 已由 TileLoader.ready_ 高水位背堆主。
     static constexpr int kMaxTiles = 640;
 
     /**
