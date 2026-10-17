@@ -1,0 +1,22 @@
+[globecore][I] proj.db loaded OK from: D:/gcd-build/proj
+[globecore][I] curl_global_init ok, version=libcurl/8.1.2-DEV Schannel zlib/1.3.2
+[globecore][I] GDAL registered: 3.7.0
+[globecore][I] GlobeEngine created
+[globecore][I] FontAtlas: 字体加载成功 C:/Windows/Fonts/msyh.ttc (19704352 bytes, ascent=38.5 descent=-9.5)
+[globecore][I] Renderer GL_MAX_TEXTURE_SIZE=16384
+[globecore][I] ShaderProgram linked ok (program=3)
+[globecore][I] ShaderProgram linked ok (program=6)
+[globecore][I] ShaderProgram linked ok (program=9)
+[globecore][I] ShaderProgram linked ok (program=12)
+[globecore][I] ShaderProgram linked ok (program=15)
+[globecore][I] ShaderProgram linked ok (program=18)
+[globecore][I] ShaderProgram linked ok (program=21)
+[globecore][I] ShaderProgram linked ok (program=24)
+[globecore][I] ShaderProgram linked ok (program=27)
+[globecore][I] ShaderProgram linked ok (program=30)
+[globecore][I] ShaderProgram linked ok (program=33)
+[globecore][I] ShaderProgram linked ok (program=36)
+[globecore][I] Renderer::onSurfaceCreated ok
+[globecore][I] globecore build id = v0.1.3-20261006-004
+[globecore][I] Renderer::onSurfaceChanged 844 x 740
+[globecore][I] Renderer::onSurfaceChanged 844 x 733

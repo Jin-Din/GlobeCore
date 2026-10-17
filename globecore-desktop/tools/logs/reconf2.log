@@ -1,0 +1,9 @@
+-- globecore-desktop: GLOBECORE_ENGINE_ROOT=/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp
+-- globecore-desktop: 第三方库目录=/home/dtalp/globecore-linux/GlobeCore/build-scripts/out/linux/x86_64
+-- globecore-desktop: 依赖模式 = find_package（未在 /home/dtalp/globecore-linux/GlobeCore/build-scripts/out/linux/x86_64 找到静态库）
+-- globecore-desktop: Qt5=5.15.13
+-- globecore-desktop: GL 后端 = 系统 GLESv2 + EGL (Mesa)
+-- globecore-desktop: Linux 三方头影子 = /home/dtalp/globecore-linux/GlobeCore/globecore-desktop/build-linux/linuxinc (gdal→/usr/include/gdal, proj→/usr/include, curl→/usr/include/x86_64-linux-gnu/curl)
+-- Configuring done (1.8s)
+-- Generating done (0.0s)
+-- Build files have been written to: /home/dtalp/globecore-linux/GlobeCore/globecore-desktop/build-linux

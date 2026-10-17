@@ -1,0 +1,60 @@
+[globecore][I] curl_global_init ok, version=libcurl/8.5.0 OpenSSL/3.0.13 zlib/1.3 brotli/1.1.0 zstd/1.5.5 libidn2/2.3.7 libpsl/0.21.2 (+libidn2/2.3.7) libssh/0.10.6/openssl/zlib nghttp2/1.59.0 librtmp/2.3 OpenLDAP/2.6.10
+[globecore][I] GDAL registered: 3.8.4
+[globecore][I] GlobeEngine created
+[globecore][I] Renderer GL_MAX_TEXTURE_SIZE=16384
+[globecore][I] ShaderProgram linked ok (program=3)
+[globecore][I] ShaderProgram linked ok (program=6)
+[globecore][I] ShaderProgram linked ok (program=9)
+[globecore][I] ShaderProgram linked ok (program=12)
+[globecore][I] ShaderProgram linked ok (program=15)
+[globecore][I] ShaderProgram linked ok (program=18)
+[globecore][I] ShaderProgram linked ok (program=21)
+[globecore][I] ShaderProgram linked ok (program=24)
+[globecore][I] ShaderProgram linked ok (program=27)
+[globecore][I] ShaderProgram linked ok (program=30)
+[globecore][I] ShaderProgram linked ok (program=33)
+[globecore][I] ShaderProgram linked ok (program=36)
+[globecore][I] Renderer::onSurfaceCreated ok
+[globecore][I] globecore build id = v0.1.3-20261006-004
+[globecore][I] Renderer::onSurfaceChanged 1002 x 758
+[globecore][I] TileCache baseDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] TileLoader started threads=4
+[globecore][I] TileLoader urlTemplate set (len=55, net=on)
+[globecore][I] GlobeEngine addTileLayer maxLevel=20 overlay=0 net=on
+[globecore][I] GlobeEngine addVectorLayer index=0 hasExtent=0 extent=[0.000000,0.000000,0.000000,0.000000] path=/home/dtalp/globecore-linux/GlobeCore/globecore-desktop/tools/sample.geojson
+[globecore][I] TileLoader process z=12 x=3372 y=1552 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] TileLoader process z=10 x=843 y=388 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] TileLoader process z=11 x=1686 y=776 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] TileLoader process z=12 x=3369 y=1553 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] [VecReload] readVectorFile 完成 open=19ms read=2ms features=3 verts=7 bbox=[116.400000,39.890000,116.440000,39.910000] path=/home/dtalp/globecore-linux/GlobeCore/globecore-desktop/tools/sample.geojson
+[globecore][I] [VecReload] buildGeometry(serial): fill=3 outlineSeg=1 lineSeg=1 pts=1 labels=0 | ear=0.0 fill=0.0 outline=0.0 pick=0.0 ms
+[globecore][I] [VecReload] VectorLoader 就绪: /home/dtalp/globecore-linux/GlobeCore/globecore-desktop/tools/sample.geojson extent=0 features=3 read=21ms build=0ms total=21ms fillVert=3 lineVert=4 rerun=0
+[globecore][I] [GlobeVec] 3D 流式上传完成: feats=3 fillChunks=1 outlineChunks=1 lineChunks=1 pointChunks=1 iconChunks=0 pts=1 cost=0ms
+[globecore][I] TileLoader process z=12 x=3369 y=1549 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] TileLoader process z=12 x=3369 y=1550 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] TileLoader process z=12 x=3369 y=1551 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] TileLoader process z=12 x=3370 y=1549 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] TileLoader process z=12 x=3371 y=1549 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] TileLoader process z=12 x=3370 y=1550 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] TileLoader process z=12 x=3370 y=1551 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] TileLoader process z=12 x=3371 y=1550 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] TileLoader process z=12 x=3371 y=1551 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] TileLoader process z=12 x=3375 y=1549 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] TileLoader process z=12 x=3370 y=1550 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] TileLoader process z=12 x=3374 y=1549 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] TileLoader process z=12 x=3373 y=1549 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] TileLoader process z=12 x=3372 y=1549 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] TileLoader process z=12 x=3375 y=1550 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] TileLoader process z=12 x=3375 y=1551 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] TileLoader process z=12 x=3374 y=1550 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] TileLoader process z=12 x=3374 y=1551 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] TileLoader process z=12 x=3373 y=1550 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] TileLoader process z=12 x=3372 y=1550 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] TileLoader process z=12 x=3373 y=1551 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] TileLoader process z=12 x=3372 y=1551 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] TileLoader process z=12 x=3369 y=1554 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] TileLoader process z=12 x=3369 y=1552 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] TileLoader process z=12 x=3370 y=1554 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] TileLoader process z=12 x=3371 y=1554 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] TileLoader process z=12 x=3370 y=1553 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke
+[globecore][I] TileLoader process z=12 x=3369 y=1554 raster=- net=on cacheDir=/home/dtalp/.local/share/ZYS/GlobeCoreDesktop/tiles/smoke

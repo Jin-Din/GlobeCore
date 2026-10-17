@@ -1,0 +1,11 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    { "type": "Feature", "properties": { "name": "A" },
+      "geometry": { "type": "Point", "coordinates": [116.40, 39.90] } },
+    { "type": "Feature", "properties": { "name": "B" },
+      "geometry": { "type": "LineString", "coordinates": [[116.40, 39.90], [116.42, 39.89]] } },
+    { "type": "Feature", "properties": { "name": "C" },
+      "geometry": { "type": "Polygon", "coordinates": [[[116.42, 39.89], [116.44, 39.89], [116.44, 39.91], [116.42, 39.89]]] } }
+  ]
+}

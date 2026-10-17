@@ -1,0 +1,250 @@
+INFO    : aqtinstall(aqt) v3.3.0 on Python 3.12.10 [CPython MSC v.1943 64 bit (AMD64)]
+INFO    : Downloading qtbase...
+INFO    : Downloading qtsvg...
+INFO    : Downloading qttranslations...
+INFO    : Downloading qtactiveqt...
+INFO    : Redirected: mirrors.sau.edu.cn
+INFO    : Redirected: mirrors.sau.edu.cn
+INFO    : Redirected: mirrors.sau.edu.cn
+INFO    : Redirected: mirrors.sau.edu.cn
+INFO    : Finished installation of qtsvg-Windows-Windows_10-MSVC2019-Windows-Windows_10-X86_64.7z in 2.87734020
+INFO    : Downloading qtdeclarative...
+INFO    : Finished installation of qtactiveqt-Windows-Windows_10-MSVC2019-Windows-Windows_10-X86_64.7z in 4.42797990
+INFO    : Redirected: mirrors.sau.edu.cn
+INFO    : Finished installation of qttranslations-Windows-Windows_10-MSVC2019-Windows-Windows_10-X86_64.7z in 5.04136580
+INFO    : Downloading qtgraphicaleffects...
+INFO    : Downloading qtmultimedia...
+INFO    : Redirected: mirrors.sau.edu.cn
+INFO    : Redirected: mirrors.sau.edu.cn
+INFO    : Finished installation of qtgraphicaleffects-Windows-Windows_10-MSVC2019-Windows-Windows_10-X86_64.7z in 2.66111370
+INFO    : Downloading qtwinextras...
+INFO    : Finished installation of qtmultimedia-Windows-Windows_10-MSVC2019-Windows-Windows_10-X86_64.7z in 5.26165450
+INFO    : Redirected: mirrors.sau.edu.cn
+INFO    : Downloading qttools...
+INFO    : Redirected: mirrors.sau.edu.cn
+INFO    : Finished installation of qtwinextras-Windows-Windows_10-MSVC2019-Windows-Windows_10-X86_64.7z in 4.74449120
+INFO    : Downloading qtimageformats...
+INFO    : Redirected: mirrors.sau.edu.cn
+INFO    : Finished installation of qtimageformats-Windows-Windows_10-MSVC2019-Windows-Windows_10-X86_64.7z in 4.94690910
+INFO    : Downloading qtsensors...
+INFO    : Redirected: mirrors.sau.edu.cn
+INFO    : Finished installation of qtsensors-Windows-Windows_10-MSVC2019-Windows-Windows_10-X86_64.7z in 3.18616500
+INFO    : Downloading qtwebsockets...
+INFO    : Redirected: mirrors.sau.edu.cn
+INFO    : Finished installation of qtwebsockets-Windows-Windows_10-MSVC2019-Windows-Windows_10-X86_64.7z in 2.97970530
+INFO    : Downloading qtwebchannel...
+INFO    : Redirected: mirrors.sau.edu.cn
+INFO    : Finished installation of qtwebchannel-Windows-Windows_10-MSVC2019-Windows-Windows_10-X86_64.7z in 3.04514810
+INFO    : Finished installation of qtdeclarative-Windows-Windows_10-MSVC2019-Windows-Windows_10-X86_64.7z in 23.83974790
+INFO    : Downloading qtlocation...
+INFO    : Downloading qtserialport...
+INFO    : Redirected: mirrors.sau.edu.cn
+INFO    : Redirected: mirrors.sau.edu.cn
+INFO    : Finished installation of qtserialport-Windows-Windows_10-MSVC2019-Windows-Windows_10-X86_64.7z in 2.53582710
+INFO    : Downloading qtquickcontrols...
+INFO    : Redirected: mirrors.sau.edu.cn
+INFO    : Finished installation of qtlocation-Windows-Windows_10-MSVC2019-Windows-Windows_10-X86_64.7z in 5.40398130
+INFO    : Downloading qtquickcontrols2...
+INFO    : Finished installation of qtquickcontrols-Windows-Windows_10-MSVC2019-Windows-Windows_10-X86_64.7z in 4.52510900
+INFO    : Redirected: mirrors.sau.edu.cn
+INFO    : Downloading qtwebview...
+INFO    : Redirected: mirrors.sau.edu.cn
+INFO    : Finished installation of qtwebview-Windows-Windows_10-MSVC2019-Windows-Windows_10-X86_64.7z in 2.53698330
+INFO    : Downloading qtserialbus...
+INFO    : Finished installation of qtquickcontrols2-Windows-Windows_10-MSVC2019-Windows-Windows_10-X86_64.7z in 5.47635550
+INFO    : Finished installation of qtbase-Windows-Windows_10-MSVC2019-Windows-Windows_10-X86_64.7z in 37.87762410
+INFO    : Redirected: mirrors.sau.edu.cn
+INFO    : Downloading qt3d...
+INFO    : Downloading qtconnectivity...
+INFO    : Finished installation of qtserialbus-Windows-Windows_10-MSVC2019-Windows-Windows_10-X86_64.7z in 2.87051450
+INFO    : Redirected: mirrors.sau.edu.cn
+INFO    : Finished installation of qttools-Windows-Windows_10-MSVC2019-Windows-Windows_10-X86_64.7z in 29.82887030
+INFO    : Redirected: mirrors.sau.edu.cn
+INFO    : Downloading qtscxml...
+INFO    : Downloading qtxmlpatterns...
+INFO    : Redirected: mirrors.sau.edu.cn
+INFO    : Finished installation of qtconnectivity-Windows-Windows_10-MSVC2019-Windows-Windows_10-X86_64.7z in 3.37466020
+INFO    : Redirected: mirrors.sau.edu.cn
+INFO    : Downloading qtspeech...
+INFO    : Finished installation of qtscxml-Windows-Windows_10-MSVC2019-Windows-Windows_10-X86_64.7z in 3.08808720
+INFO    : Redirected: mirrors.sau.edu.cn
+INFO    : Downloading qtgamepad...
+INFO    : Finished installation of qtspeech-Windows-Windows_10-MSVC2019-Windows-Windows_10-X86_64.7z in 2.54140040
+INFO    : Redirected: mirrors.sau.edu.cn
+INFO    : Finished installation of qtxmlpatterns-Windows-Windows_10-MSVC2019-Windows-Windows_10-X86_64.7z in 4.87468760
+INFO    : Finished installation of qtgamepad-Windows-Windows_10-MSVC2019-Windows-Windows_10-X86_64.7z in 2.37504920
+INFO    : Downloading qtremoteobjects...
+INFO    : Downloading d3dcompiler_47...
+INFO    : Redirected: mirrors.sau.edu.cn
+INFO    : Redirected: mirrors.sau.edu.cn
+INFO    : Finished installation of qtremoteobjects-Windows-Windows_10-MSVC2019-Windows-Windows_10-X86_64.7z in 3.46420490
+INFO    : Finished installation of qt3d-Windows-Windows_10-MSVC2019-Windows-Windows_10-X86_64.7z in 10.40415000
+INFO    : Finished installation of d3dcompiler_47-x64.7z in 4.45078700
+INFO    : Downloading opengl32sw...
+INFO    : Redirected: mirrors.sau.edu.cn
+INFO    : Finished installation of opengl32sw-64-mesa_12_0_rc2.7z in 16.71940930
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\bin\qmake.exe
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\libEGL.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\libEGLd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\libGLESv2.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\libGLESv2d.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt53DAnimation.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt53DAnimationd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt53DCore.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt53DCored.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt53DExtras.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt53DExtrasd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt53DInput.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt53DInputd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt53DLogic.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt53DLogicd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt53DQuick.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt53DQuickAnimation.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt53DQuickAnimationd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt53DQuickd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt53DQuickExtras.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt53DQuickExtrasd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt53DQuickInput.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt53DQuickInputd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt53DQuickRender.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt53DQuickRenderd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt53DQuickScene2D.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt53DQuickScene2Dd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt53DRender.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt53DRenderd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5AccessibilitySupport.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5AccessibilitySupportd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5AxBase.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5AxBased.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5AxContainer.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5AxContainerd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5AxServer.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5AxServerd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Bluetooth.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Bluetoothd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Bootstrap.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Concurrent.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Concurrentd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Core.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Cored.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5DBus.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5DBusd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Designer.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5DesignerComponents.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5DesignerComponentsd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Designerd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5DeviceDiscoverySupport.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5DeviceDiscoverySupportd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5EdidSupport.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5EdidSupportd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5EglSupport.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5EglSupportd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5EventDispatcherSupport.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5EventDispatcherSupportd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5FbSupport.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5FbSupportd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5FontDatabaseSupport.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5FontDatabaseSupportd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Gamepad.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Gamepadd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Gui.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Guid.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Help.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Helpd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Location.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Locationd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Multimedia.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Multimediad.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5MultimediaQuick.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5MultimediaQuickd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5MultimediaWidgets.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5MultimediaWidgetsd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Network.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Networkd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Nfc.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Nfcd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5OpenGL.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5OpenGLd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5OpenGLExtensions.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5OpenGLExtensionsd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5PacketProtocol.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5PacketProtocold.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5PlatformCompositorSupport.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5PlatformCompositorSupportd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Positioning.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Positioningd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5PositioningQuick.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5PositioningQuickd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5PrintSupport.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5PrintSupportd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Qml.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Qmld.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5QmlDebug.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5QmlDebugd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5QmlDevTools.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5QmlModels.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5QmlModelsd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5QmlWorkerScript.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5QmlWorkerScriptd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Quick.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5QuickControls2.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5QuickControls2d.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Quickd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5QuickParticles.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5QuickParticlesd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5QuickShapes.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5QuickShapesd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5QuickTemplates2.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5QuickTemplates2d.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5QuickTest.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5QuickTestd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5QuickWidgets.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5QuickWidgetsd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5RemoteObjects.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5RemoteObjectsd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Scxml.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Scxmld.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Sensors.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Sensorsd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5SerialBus.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5SerialBusd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5SerialPort.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5SerialPortd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Sql.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Sqld.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Svg.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Svgd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Test.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Testd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5TextToSpeech.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5TextToSpeechd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5ThemeSupport.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5ThemeSupportd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5UiTools.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5UiToolsd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5VulkanSupport.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5VulkanSupportd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5WebChannel.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5WebChanneld.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5WebSockets.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5WebSocketsd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5WebView.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5WebViewd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Widgets.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Widgetsd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5WindowsUIAutomationSupport.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5WindowsUIAutomationSupportd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5WinExtras.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5WinExtrasd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Xml.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5Xmld.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5XmlPatterns.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\Qt5XmlPatternsd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\qtfreetype.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\qtfreetyped.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\qtlibpng.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\qtlibpngd.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\qtmain.prl
+INFO    : Patching D:\Qt5\5.15.2\msvc2019_64\lib\qtmaind.prl
+INFO    : Finished installation
+INFO    : Time elapsed: 68.46617750 second

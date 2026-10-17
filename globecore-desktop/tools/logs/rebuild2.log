@@ -1,0 +1,205 @@
+[1/34] Automatic MOC for target globecore
+[2/34] Building CXX object CMakeFiles/globecore.dir/globecore_autogen/mocs_compilation.cpp.o
+[3/34] Building CXX object CMakeFiles/globecore.dir/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/globe/MercatorProjection.cpp.o
+[4/34] Building CXX object CMakeFiles/globecore.dir/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/globe/Wgs84Globe.cpp.o
+[5/34] Building CXX object CMakeFiles/globecore.dir/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/layer/TileCache.cpp.o
+[6/34] Building CXX object CMakeFiles/globecore.dir/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/globe/Tessellator.cpp.o
+[7/34] Building CXX object CMakeFiles/globecore.dir/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/navigator/Navigator.cpp.o
+[8/34] Building CXX object CMakeFiles/globecore.dir/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/layer/RasterImageLoader.cpp.o
+[9/34] Building CXX object CMakeFiles/globecore.dir/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/net/HttpClient.cpp.o
+[10/34] Building CXX object CMakeFiles/globecore.dir/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/layer/VectorLoader.cpp.o
+In file included from /home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/layer/VectorLoader.cpp:6:
+/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/layer/VectorLoader.cpp: In member function ‘void globecore::VectorLoader::run()’:
+/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/layer/VectorLoader.cpp:127:18: warning: format ‘%lld’ expects argument of type ‘long long int’, but argument 4 has type ‘std::chrono::duration<long int, std::ratio<1, 1000> >::rep’ {aka ‘long int’} [-Wformat=]
+  127 |             LOGI("[VecReload] 抢占中断(读后): %s read=%lldms 已过期，按最新范围重跑",
+      |                  ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  128 |                  path_.c_str(), std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
+      |                                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      |                                                                                                     |
+      |                                                                                                     std::chrono::duration<long int, std::ratio<1, 1000> >::rep {aka long int}
+/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/util/Log.h:29:31: note: in definition of macro ‘LOGI’
+   29 | #define LOGI(...) gc_log("I", __VA_ARGS__)
+      |                               ^~~~~~~~~~~
+/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/layer/VectorLoader.cpp:127:58: note: format string is defined here
+  127 |             LOGI("[VecReload] 抢占中断(读后): %s read=%lldms 已过期，按最新范围重跑",
+      |                                                       ~~~^
+      |                                                          |
+      |                                                          long long int
+      |                                                       %ld
+/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/layer/VectorLoader.cpp:136:18: warning: format ‘%lld’ expects argument of type ‘long long int’, but argument 4 has type ‘std::chrono::duration<long int, std::ratio<1, 1000> >::rep’ {aka ‘long int’} [-Wformat=]
+  136 |             LOGI("[VecReload] 抢占中断(建后): %s build=%lldms 过期结果丢弃，按最新范围重跑",
+      |                  ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  137 |                  path_.c_str(), std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count());
+      |                                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      |                                                                                                     |
+      |                                                                                                     std::chrono::duration<long int, std::ratio<1, 1000> >::rep {aka long int}
+/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/util/Log.h:29:31: note: in definition of macro ‘LOGI’
+   29 | #define LOGI(...) gc_log("I", __VA_ARGS__)
+      |                               ^~~~~~~~~~~
+/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/layer/VectorLoader.cpp:136:59: note: format string is defined here
+  136 |             LOGI("[VecReload] 抢占中断(建后): %s build=%lldms 过期结果丢弃，按最新范围重跑",
+      |                                                        ~~~^
+      |                                                           |
+      |                                                           long long int
+      |                                                        %ld
+/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/layer/VectorLoader.cpp:161:14: warning: format ‘%lld’ expects argument of type ‘long long int’, but argument 6 has type ‘std::chrono::duration<long int, std::ratio<1, 1000> >::rep’ {aka ‘long int’} [-Wformat=]
+  161 |         LOGI("[VecReload] VectorLoader 就绪: %s extent=%d features=%zu read=%lldms build=%lldms total=%lldms fillVert=%zu lineVert=%zu rerun=%d",
+      |              ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  162 |              path_.c_str(), hasExtent ? 1 : 0, r.features.size(),
+  163 |              std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count(),
+      |              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      |                                                                                  |
+      |                                                                                  std::chrono::duration<long int, std::ratio<1, 1000> >::rep {aka long int}
+/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/util/Log.h:29:31: note: in definition of macro ‘LOGI’
+   29 | #define LOGI(...) gc_log("I", __VA_ARGS__)
+      |                               ^~~~~~~~~~~
+/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/layer/VectorLoader.cpp:161:80: note: format string is defined here
+  161 |         LOGI("[VecReload] VectorLoader 就绪: %s extent=%d features=%zu read=%lldms build=%lldms total=%lldms fillVert=%zu lineVert=%zu rerun=%d",
+      |                                                                             ~~~^
+      |                                                                                |
+      |                                                                                long long int
+      |                                                                             %ld
+/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/layer/VectorLoader.cpp:161:14: warning: format ‘%lld’ expects argument of type ‘long long int’, but argument 7 has type ‘std::chrono::duration<long int, std::ratio<1, 1000> >::rep’ {aka ‘long int’} [-Wformat=]
+  161 |         LOGI("[VecReload] VectorLoader 就绪: %s extent=%d features=%zu read=%lldms build=%lldms total=%lldms fillVert=%zu lineVert=%zu rerun=%d",
+      |              ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+......
+  164 |              std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count(),
+      |              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      |                                                                                  |
+      |                                                                                  std::chrono::duration<long int, std::ratio<1, 1000> >::rep {aka long int}
+/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/util/Log.h:29:31: note: in definition of macro ‘LOGI’
+   29 | #define LOGI(...) gc_log("I", __VA_ARGS__)
+      |                               ^~~~~~~~~~~
+/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/layer/VectorLoader.cpp:161:93: note: format string is defined here
+  161 |         LOGI("[VecReload] VectorLoader 就绪: %s extent=%d features=%zu read=%lldms build=%lldms total=%lldms fillVert=%zu lineVert=%zu rerun=%d",
+      |                                                                                          ~~~^
+      |                                                                                             |
+      |                                                                                             long long int
+      |                                                                                          %ld
+/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/layer/VectorLoader.cpp:161:14: warning: format ‘%lld’ expects argument of type ‘long long int’, but argument 8 has type ‘std::chrono::duration<long int, std::ratio<1, 1000> >::rep’ {aka ‘long int’} [-Wformat=]
+  161 |         LOGI("[VecReload] VectorLoader 就绪: %s extent=%d features=%zu read=%lldms build=%lldms total=%lldms fillVert=%zu lineVert=%zu rerun=%d",
+      |              ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+......
+  165 |              std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t0).count(),
+      |              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      |                                                                                  |
+      |                                                                                  std::chrono::duration<long int, std::ratio<1, 1000> >::rep {aka long int}
+/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/util/Log.h:29:31: note: in definition of macro ‘LOGI’
+   29 | #define LOGI(...) gc_log("I", __VA_ARGS__)
+      |                               ^~~~~~~~~~~
+/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/layer/VectorLoader.cpp:161:106: note: format string is defined here
+  161 |         LOGI("[VecReload] VectorLoader 就绪: %s extent=%d features=%zu read=%lldms build=%lldms total=%lldms fillVert=%zu lineVert=%zu rerun=%d",
+      |                                                                                                       ~~~^
+      |                                                                                                          |
+      |                                                                                                          long long int
+      |                                                                                                       %ld
+[11/34] Building CXX object CMakeFiles/globecore.dir/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/vector/GdalBootstrap.cpp.o
+[12/34] Building CXX object CMakeFiles/globecore.dir/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/render/ShaderProgram.cpp.o
+[13/34] Building CXX object CMakeFiles/globecore.dir/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/render/Texture.cpp.o
+[14/34] Building CXX object CMakeFiles/globecore.dir/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/layer/TileLoader.cpp.o
+[15/34] Building CXX object CMakeFiles/globecore.dir/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/vector/KmlStyle.cpp.o
+[16/34] Building CXX object CMakeFiles/globecore.dir/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/bridge/srs.cpp.o
+[17/34] Building CXX object CMakeFiles/globecore.dir/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/core/GlobeEngine.cpp.o
+[18/34] Building CXX object CMakeFiles/globecore.dir/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/vector/VectorReader.cpp.o
+In file included from /home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/vector/VectorReader.cpp:16:
+/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/vector/VectorReader.cpp: In function ‘globecore::VectorReadResult globecore::readVectorFile(const std::string&, const std::string&, bool, double, double, double, double, int, const std::unordered_map<long long int, std::__cxx11::basic_string<char> >*)’:
+/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/vector/VectorReader.cpp:776:10: warning: format ‘%lld’ expects argument of type ‘long long int’, but argument 3 has type ‘std::chrono::duration<long int, std::ratio<1, 1000> >::rep’ {aka ‘long int’} [-Wformat=]
+  776 |     LOGI("[VecReload] readVectorFile 完成 open=%lldms read=%lldms features=%zu verts=%lld bbox=[%.6f,%.6f,%.6f,%.6f] path=%s",
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  777 |          std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count(),
+      |          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      |                                                                              |
+      |                                                                              std::chrono::duration<long int, std::ratio<1, 1000> >::rep {aka long int}
+/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/util/Log.h:29:31: note: in definition of macro ‘LOGI’
+   29 | #define LOGI(...) gc_log("I", __VA_ARGS__)
+      |                               ^~~~~~~~~~~
+/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/vector/VectorReader.cpp:776:51: note: format string is defined here
+  776 |     LOGI("[VecReload] readVectorFile 完成 open=%lldms read=%lldms features=%zu verts=%lld bbox=[%.6f,%.6f,%.6f,%.6f] path=%s",
+      |                                                ~~~^
+      |                                                   |
+      |                                                   long long int
+      |                                                %ld
+/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/vector/VectorReader.cpp:776:10: warning: format ‘%lld’ expects argument of type ‘long long int’, but argument 4 has type ‘std::chrono::duration<long int, std::ratio<1, 1000> >::rep’ {aka ‘long int’} [-Wformat=]
+  776 |     LOGI("[VecReload] readVectorFile 完成 open=%lldms read=%lldms features=%zu verts=%lld bbox=[%.6f,%.6f,%.6f,%.6f] path=%s",
+      |          ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+  777 |          std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count(),
+  778 |          std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count(),
+      |          ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      |                                                                              |
+      |                                                                              std::chrono::duration<long int, std::ratio<1, 1000> >::rep {aka long int}
+/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/util/Log.h:29:31: note: in definition of macro ‘LOGI’
+   29 | #define LOGI(...) gc_log("I", __VA_ARGS__)
+      |                               ^~~~~~~~~~~
+/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/vector/VectorReader.cpp:776:63: note: format string is defined here
+  776 |     LOGI("[VecReload] readVectorFile 完成 open=%lldms read=%lldms features=%zu verts=%lld bbox=[%.6f,%.6f,%.6f,%.6f] path=%s",
+      |                                                            ~~~^
+      |                                                               |
+      |                                                               long long int
+      |                                                            %ld
+[19/34] Building CXX object CMakeFiles/globecore.dir/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/raster/RasterRenderer.cpp.o
+[20/34] Building CXX object CMakeFiles/globecore.dir/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/bridge/gdal_info.cpp.o
+[21/34] Building CXX object CMakeFiles/globecore.dir/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/vector/VectorBuilder.cpp.o
+[22/34] Building CXX object CMakeFiles/globecore.dir/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/bridge/layer_info.cpp.o
+[23/34] Building CXX object CMakeFiles/globecore.dir/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/render/FontAtlas.cpp.o
+[24/34] Building CXX object CMakeFiles/globecore.dir/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/bridge/vector_io.cpp.o
+[25/34] Building CXX object CMakeFiles/globecore.dir/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/render/Renderer.cpp.o
+In file included from /home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/render/Renderer.cpp:10:
+/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/render/Renderer.cpp: In member function ‘void globecore::Renderer::uploadVectorChunks(globecore::VectorLayer&)’:
+/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/render/Renderer.cpp:1948:14: warning: format ‘%lld’ expects argument of type ‘long long int’, but argument 8 has type ‘std::chrono::duration<long int, std::ratio<1, 1000> >::rep’ {aka ‘long int’} [-Wformat=]
+ 1948 |         LOGI("[VecReload] 流式上传完成: feats=%zu fillChunks=%zu outlineChunks=%zu lineChunks=%zu pts=%zu cost=%lldms",
+      |              ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+......
+ 1951 |              std::chrono::duration_cast<std::chrono::milliseconds>(
+      |              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ 1952 |                  std::chrono::steady_clock::now() - vl.uploadStartedAt).count());
+      |                  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      |                                                                              |
+      |                                                                              std::chrono::duration<long int, std::ratio<1, 1000> >::rep {aka long int}
+/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/util/Log.h:29:31: note: in definition of macro ‘LOGI’
+   29 | #define LOGI(...) gc_log("I", __VA_ARGS__)
+      |                               ^~~~~~~~~~~
+/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/render/Renderer.cpp:1948:115: note: format string is defined here
+ 1948 |         LOGI("[VecReload] 流式上传完成: feats=%zu fillChunks=%zu outlineChunks=%zu lineChunks=%zu pts=%zu cost=%lldms",
+      |                                                                                                                ~~~^
+      |                                                                                                                   |
+      |                                                                                                                   long long int
+      |                                                                                                                %ld
+/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/render/Renderer.cpp: In member function ‘void globecore::Renderer::uploadGlobeVecChunks(globecore::VectorLayer&)’:
+/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/render/Renderer.cpp:2654:14: warning: format ‘%lld’ expects argument of type ‘long long int’, but argument 10 has type ‘std::chrono::duration<long int, std::ratio<1, 1000> >::rep’ {aka ‘long int’} [-Wformat=]
+ 2654 |         LOGI("[GlobeVec] 3D 流式上传完成: feats=%zu fillChunks=%zu outlineChunks=%zu lineChunks=%zu pointChunks=%zu iconChunks=%zu pts=%zu cost=%lldms",
+      |              ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+......
+ 2657 |              std::chrono::duration_cast<std::chrono::milliseconds>(
+      |              ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+ 2658 |                  std::chrono::steady_clock::now() - vl.uploadStartedAt).count());
+      |                  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      |                                                                              |
+      |                                                                              std::chrono::duration<long int, std::ratio<1, 1000> >::rep {aka long int}
+/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/util/Log.h:29:31: note: in definition of macro ‘LOGI’
+   29 | #define LOGI(...) gc_log("I", __VA_ARGS__)
+      |                               ^~~~~~~~~~~
+/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/render/Renderer.cpp:2654:148: note: format string is defined here
+ 2654 |         LOGI("[GlobeVec] 3D 流式上传完成: feats=%zu fillChunks=%zu outlineChunks=%zu lineChunks=%zu pointChunks=%zu iconChunks=%zu pts=%zu cost=%lldms",
+      |                                                                                                                                                 ~~~^
+      |                                                                                                                                                    |
+      |                                                                                                                                                    long long int
+      |                                                                                                                                                 %ld
+[26/34] Building CXX object CMakeFiles/globecore.dir/home/dtalp/globecore-linux/GlobeCore/globecore/src/main/cpp/render/ImageDecoder.cpp.o
+[27/34] Linking CXX static library libglobecore.a
+[28/34] Automatic MOC for target globecore-desktop
+[29/34] Building CXX object CMakeFiles/globecore-desktop.dir/globecore-desktop_autogen/mocs_compilation.cpp.o
+[30/34] Building CXX object CMakeFiles/globecore-desktop.dir/src/host/MapWidget.cpp.o
+/home/dtalp/globecore-linux/GlobeCore/globecore-desktop/src/host/MapWidget.cpp: In function ‘QPointF {anonymous}::pointOf(const QWheelEvent*)’:
+/home/dtalp/globecore-linux/GlobeCore/globecore-desktop/src/host/MapWidget.cpp:30:19: warning: ‘const QPointF& QWheelEvent::posF() const’ is deprecated: Use position() [-Wdeprecated-declarations]
+   30 |     return e->posF();
+      |            ~~~~~~~^~
+In file included from /usr/include/x86_64-linux-gnu/qt5/QtGui/QMouseEvent:1,
+                 from /home/dtalp/globecore-linux/GlobeCore/globecore-desktop/src/host/MapWidget.cpp:7:
+/usr/include/x86_64-linux-gnu/qt5/QtGui/qevent.h:238:27: note: declared here
+  238 |     inline const QPointF &posF() const { return p; }
+      |                           ^~~~
+[31/34] Building CXX object CMakeFiles/globecore-desktop.dir/src/app/main.cpp.o
+[32/34] Building CXX object CMakeFiles/globecore-desktop.dir/src/app/MainWindow.cpp.o
+[33/34] Building CXX object CMakeFiles/globecore-desktop.dir/src/app/LayerPanel.cpp.o
+[34/34] Linking CXX executable globecore-desktop
+BUILD_EXIT=0

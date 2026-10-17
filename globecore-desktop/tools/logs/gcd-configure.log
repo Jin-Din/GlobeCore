@@ -1,0 +1,27 @@
+-- The CXX compiler identification is MSVC 19.29.30159.0
+-- Detecting CXX compiler ABI info
+-- Detecting CXX compiler ABI info - done
+-- Check for working CXX compiler: C:/Program Files (x86)/Microsoft Visual Studio/2019/Community/VC/Tools/MSVC/14.29.30133/bin/Hostx64/x64/cl.exe - skipped
+-- Detecting CXX compile features
+-- Detecting CXX compile features - done
+-- globecore-desktop: GLOBECORE_ENGINE_ROOT=D:/Android/MobileMap/GlobeCore/globecore/src/main/cpp
+-- globecore-desktop: 第三方库目录=D:/Android/MobileMap/GlobeCore/build-scripts/out/windows/x64
+-- globecore-desktop: 依赖模式 = find_package（未在 D:/Android/MobileMap/GlobeCore/build-scripts/out/windows/x64 找到静态库）
+-- Found GDAL: D:/vcpkg-2023/installed/x64-windows/lib/gdal.lib (found version "3.7.0")
+-- Found CURL: D:/vcpkg-2023/installed/x64-windows/share/curl/CURLConfig.cmake (found version "8.1.2-DEV")
+-- Found SQLite3: D:/vcpkg-2023/installed/x64-windows/lib/sqlite3.lib (found version "3.42.0")
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD
+-- Performing Test CMAKE_HAVE_LIBC_PTHREAD - Failed
+-- Looking for pthread_create in pthreads
+-- Looking for pthread_create in pthreads - not found
+-- Looking for pthread_create in pthread
+-- Looking for pthread_create in pthread - not found
+-- Found Threads: TRUE
+-- Found TIFF: D:/vcpkg-2023/installed/x64-windows/lib/tiff.lib (found version "4.5.0")
+-- Found ZLIB: D:/vcpkg-2023/installed/x64-windows/lib/zlib.lib (found version "1.2.13")
+-- globecore-desktop: Qt5=5.15.2
+-- globecore-desktop: GL 后端 = ANGLE (GLES2)
+-- globecore-desktop: 使用 Windows 配置版 GDAL/PROJ/curl 头 = D:/gcd-3rdp
+-- Configuring done (1.5s)
+-- Generating done (0.1s)
+-- Build files have been written to: D:/gcd-build
