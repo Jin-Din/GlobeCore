@@ -124,7 +124,9 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         bridge/srs.cpp
         bridge/gdal_info.cpp
         bridge/layer_info.cpp
-        bridge/vector_io.cpp)
+        bridge/vector_io.cpp
+        # GeoPackage 工程数据读写（0.4.0.0：工程模块空间数据存储/导出）
+        bridge/geopackage_io.cpp)
 
 find_library(log-lib log)
 
