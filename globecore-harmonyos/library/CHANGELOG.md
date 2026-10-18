@@ -2,6 +2,11 @@
 
 本项目遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) 与[语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.1.3]
+
+### Changed
+- 同步 Android 端 0.1.4.0 引擎改动：栅格/底图瓦片缓存入库时间（`added_at`）与相关工作。
+
 ## [0.1.2]
 
 ### Changed
