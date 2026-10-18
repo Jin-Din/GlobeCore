@@ -1,16 +1,22 @@
 # GlobeCore
 
-本项目是一套**独立实现**的 **C++ 共享渲染引擎，双平台产物**：Android 侧 Kotlin + **JNI/AAR**，
-HarmonyOS NEXT 侧 ArkTS + **NAPI/HAR**（0.1.1.0 新增，工程见 `globecore-harmonyos/`，鸿蒙集成细节见文末同名章节）。
+本项目是一套**独立实现**的 **C++ 共享渲染引擎，四平台产物**：
+
+| 平台 | 宿主 | 桥接 | 产物 |
+|------|------|------|------|
+| **Android** | Kotlin + `GLSurfaceView` | JNI | AAR（`com.zys:globecore`） |
+| **HarmonyOS NEXT** | ArkTS + `XComponent` | NAPI | HAR（`@zys/globecore`） |
+| **Windows** | Qt5 `QOpenGLWidget` | 直接 C++ 调用（无 JNI/NAPI 编解码层） | 可执行 exe |
+| **Linux**（含麒麟/UOS/龙芯） | Qt5 `QOpenGLWidget` | 同上 | 可执行二进制 |
+
 门面层（`NativeMapView` 等）只做接口转发，相机、瓦片网格、取瓦片与缓存、矢量读取/三角剖分、
 OpenGL ES 2.0 绘制全部在 native 完成，并内联编译了 GDAL/OGR、PROJ、libcurl 全套第三方静态库能力。
 
-当前版本 **0.1.2.0**：修复 KML/KMZ 矢量渲染色两处问题（无名/非 styleUrl 型 KML 未按原文件配色、
-图层管理改整层样式不生效），Android 与 HarmonyOS 两端共用引擎源同步更新，API/ABI 兼容 0.1.1.0。
+当前版本 **0.1.4.0**：着色器精度修复（顶点阶段归一化法向/视线方向，修复真机 3D 光照无过渡问题）。
 
 ## 它是干什么的
 
-一句话：**给手机 App 一个能显示 2D 地图 / 3D 地球、能直接读 shp·tif·kml、能离线用的地图渲染内核**。
+一句话：**给手机 App 和桌面应用一个能显示 2D 地图 / 3D 地球、能直接读 shp·tif·kml、能离线用的地图渲染内核**。
 瓦片下载与缓存、坐标系转换、几何三角剖分、GL 着色器都不用自己写——`NativeMapView` 摆进布局，调几个
 方法就有地图；GDAL/OGR、PROJ、libcurl 全部静态链进产物，宿主**无需 NDK/CMake、不接任何在线地图厂商
 SDK**。
@@ -32,11 +38,12 @@ SDK**。
 | 数据元信息 | 文件四至（非 WGS84 自动重投影）、坐标系描述、字段名清单、GDAL 版本与已注册驱动清单 | `NativeLayerInfo` |
 | 交互手势 | 平移 / 捏合缩放（聚焦缩放）/ 单击取点 / 松手惯性滑行；双指旋转与双指俯仰（tilt，钳 [0,80]）仅 3D 生效，识别器可摘出复用 | `MapGestures` / `setOnTapListener` |
 | 运行开销 | OpenGL ES 2.0；按需渲染（静止不重绘，省电）；门面方法只做 native 状态更新，可任意线程调用（含 Surface 创建前） | — |
-| 双平台 | 同一套 C++ 引擎源两侧共用（鸿蒙经 `GLOBECORE_ENGINE_ROOT` 直接引用，不复制不搬迁）：Android JNI/AAR，HarmonyOS NEXT NAPI/HAR，类名/方法名/参数序逐项对齐 | — |
+| 多平台 | 同一套 C++ 引擎源四侧共用（鸿蒙/桌面经 `GLOBECORE_ENGINE_ROOT` 直接引用，不复制不搬迁）：Android JNI/AAR，HarmonyOS NEXT NAPI/HAR，Windows/Linux Qt5 Widgets 可执行程序 | — |
 
 ### 适合这些场景
 
 - **离线可用的移动端 GIS**（外业调查、样地、国土/林业巡检）：瓦片缓存 + 本地 shp/tif 直读，无网也能出图
+- **离线可用的桌面 GIS**（内网数据浏览、现场核查、大屏展示）：同一引擎跑 Windows/Linux，无需额外开发
 - 已有自建 WMTS / 高德 / OSM 等**任意 XYZ 图源**，只想快速塞进 App、不想写渲染层与缓存层
 - 需要**读 GIS 文件并做属性交互**：点选要素、展示字段、SQL 查询、属性改写回写
 - 需要 2D 地图与 3D 地球在**同一视图、同一相机**之间来回切换
@@ -46,12 +53,12 @@ SDK**。
 
 - 不带业务 UI（图层树、底图切换面板、工具条等由宿主自绘；仓库内两端 demo 仅作调用示例）
 - 不内置地理编码、路径规划、POI 检索；几何编辑需宿主经叠加层自行驱动（库侧只到属性写回）
-- 不提供 iOS / 桌面产物，也不做服务端矢量切片（瓦片要么在线取、要么由本地栅格现切）
+- 不提供 iOS 产物，也不做服务端矢量切片（瓦片要么在线取、要么由本地栅格现切）
 - 不依赖、未链接、未衍生任何第三方地球渲染引擎源码（详见文末「许可与第三方声明」）
 
 > 看完这段决定要用 → 直接跳「API 概览与快速上手」（Kotlin 最小用例）或「鸿蒙 HarmonyOS NEXT
-> 集成」（ArkTS 最小用例）；想先跑起来看效果 → 两端 demo 见「功能演示 App」与「演示工程
-> globecore-harmonyos」。
+> 集成」（ArkTS 最小用例）或「桌面宿主」（Qt5 Widgets 最小用例）；想先跑起来看效果 → 两端 demo 见「功能演示 App」与「演示工程
+> globecore-harmonyos」，桌面 demo 见 `globecore-desktop/`。
 
 ## 仓库结构
 
@@ -65,7 +72,10 @@ GlobeCore/
 ├── globecore-android/               # 功能演示 App（MainActivity 菜单逐项体验，project 依赖库模块）
 ├── globecore-harmonyos/             # HarmonyOS NEXT 工程（DevEco Studio 打开；library HAR + entry 演示 HAP）
 │   └── library/src/main/cpp/        #   鸿蒙专属源（EGL/XComponent/NAPI）+ 经 GLOBECORE_ENGINE_ROOT 引用引擎源
-├── build-scripts/                   # 第三方静态库编译脚本（WSL/Linux；--target android|ohos 分派 NDK）
+├── globecore-desktop/               # 桌面宿主工程（Windows/Linux，Qt5 Widgets）
+│   ├── CMakeLists.txt               #   依赖定位 + GL 后端选择 + 引擎源引用
+│   └── src/                         #   QOpenGLWidget 宿主 + 图层面板 + 主窗口
+├── build-scripts/                   # 第三方静态库编译脚本（WSL/Linux；--target android|ohos|windows|linux）
 └── gradle/ + 根构建脚本             # 独立 Gradle 工程（Gradle 9.4.1 / AGP 9.2.1）
 ```
 
@@ -482,7 +492,8 @@ hdc file send D:\data\sample.shp /data/app/el2/100/base/com.zys.globecore.harmon
 
 ## 版本说明
 
-- **0.1.2.0（当前发布）**：修复两处 KML/KMZ 渲染色问题——① 无名/非 styleUrl 型 KML/KMZ（ArcGIS、
+- **0.1.4.0（当前发布）**：着色器精度修复——顶点着色器中 `vNormal`/`vViewDir` 归一化移至顶点阶段，避免 `mediump` varying 插值大数值 ECEF 坐标丢精度，修复真机 3D 光照无明暗过渡问题（模拟器 SwiftShader 不受影响）。
+- **0.1.2.0**：修复两处 KML/KMZ 渲染色问题——① 无名/非 styleUrl 型 KML/KMZ（ArcGIS、
   MapInfo 导出）按「几何前两个顶点坐标签名」兜底取色，避免要素全无名时按名映射恒空而不按原文件配色；
   ② 图层管理改「整层样式」生效：新增 `hasFillColor`/`hasLineColor` 按通道覆盖标志，仅在整层未显式设该
   通道时才用 KML 源色覆盖，使填充/描边颜色可被整层样式覆盖、线宽统一。改动落在 `vector/`（`KmlStyle`、
