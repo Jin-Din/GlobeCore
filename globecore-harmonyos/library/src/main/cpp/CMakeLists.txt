@@ -97,6 +97,18 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         ${GLOBECORE_ENGINE_ROOT}/globe/MercatorProjection.cpp
         ${GLOBECORE_ENGINE_ROOT}/globe/Wgs84Globe.cpp
         ${GLOBECORE_ENGINE_ROOT}/globe/Tessellator.cpp
+        # 带帧间一致性的地理四叉树（相机微动复用上帧叶集 + 极冠外推覆盖 85°~90°）
+        ${GLOBECORE_ENGINE_ROOT}/globe/GeographicQuadtree.cpp
+        # RHI 抽象层：后端无关渲染接口 + GLES2/Vulkan 双后端（Vulkan 经 GLOBECORE_VULKAN_BACKEND 守卫）
+        ${GLOBECORE_ENGINE_ROOT}/rhi/RHIFactory.cpp
+        ${GLOBECORE_ENGINE_ROOT}/rhi/GLES2Backend.cpp
+        ${GLOBECORE_ENGINE_ROOT}/rhi/VulkanBackend.cpp
+        # quantized-mesh 地形 DEM 解码器（量化顶点+三角索引→高度采样）
+        ${GLOBECORE_ENGINE_ROOT}/terrain/QuantizedMesh.cpp
+        # binary glTF (.glb) v2 解码器
+        ${GLOBECORE_ENGINE_ROOT}/gltf/GltfDecoder.cpp
+        # 3D Tiles tileset.json 解析器
+        ${GLOBECORE_ENGINE_ROOT}/layer/TilesetJson.cpp
         # 瓦片缓存/加载器 + 矢量加载器
         ${GLOBECORE_ENGINE_ROOT}/layer/TileCache.cpp
         ${GLOBECORE_ENGINE_ROOT}/layer/TileLoader.cpp
@@ -110,6 +122,12 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         ${GLOBECORE_ENGINE_ROOT}/vector/VectorReader.cpp
         ${GLOBECORE_ENGINE_ROOT}/vector/KmlStyle.cpp
         ${GLOBECORE_ENGINE_ROOT}/vector/VectorBuilder.cpp
+        # MVT/PBF 矢量瓦片解码器（手写 protobuf wire-format）
+        ${GLOBECORE_ENGINE_ROOT}/vector/MvtDecoder.cpp
+        # Mapbox Style JSON 解析+映射
+        ${GLOBECORE_ENGINE_ROOT}/vector/MapboxStyle.cpp
+        # 轻量 JSON 解析器（无外部依赖，递归下降）
+        ${GLOBECORE_ENGINE_ROOT}/util/JsonParser.cpp
         # 栅格渲染器（GDAL 重投影即时生成瓦片 PNG）
         ${GLOBECORE_ENGINE_ROOT}/raster/RasterRenderer.cpp
         # OpenGL ES 渲染器、着色器、纹理、图片解码、字形图集
@@ -117,6 +135,8 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         ${GLOBECORE_ENGINE_ROOT}/render/ShaderProgram.cpp
         ${GLOBECORE_ENGINE_ROOT}/render/Texture.cpp
         ${GLOBECORE_ENGINE_ROOT}/render/ImageDecoder.cpp
+        # KTX2/ETC2/ASTC 纹理压缩解码
+        ${GLOBECORE_ENGINE_ROOT}/render/Ktx2Decoder.cpp
         ${GLOBECORE_ENGINE_ROOT}/render/FontAtlas.cpp
         # 数据 IO 桥核心（PROJ/GDAL）：JNI 导出段在 __OHOS__ 下编译为空，仅余 gcbridge 核心
         ${GLOBECORE_ENGINE_ROOT}/bridge/srs.cpp
