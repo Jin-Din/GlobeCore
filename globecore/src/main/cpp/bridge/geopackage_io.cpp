@@ -205,8 +205,10 @@ static bool writeGeoPackage(const std::string &filePath, const std::string &proj
         LOGE("工程 JSON 解析失败: %s", filePath.c_str());
     }
 
-    // 删除旧文件（如果存在）
-    remove(filePath.c_str());
+    // 原子写：先写 <path>.tmp 临时文件，全部成功后 rename 原子替换正式文件；
+    // 中途失败/进程被杀只留 .tmp 残片，正式工程文件（唯一副本）不受影响
+    const std::string tmpPath = filePath + ".tmp";
+    remove(tmpPath.c_str());
 
     // 创建 GeoPackage 数据集
     GDALDriver *driver = GetGDALDriverManager()->GetDriverByName("GPKG");
@@ -215,7 +217,7 @@ static bool writeGeoPackage(const std::string &filePath, const std::string &proj
         return false;
     }
 
-    GDALDataset *ds = driver->Create(filePath.c_str(), 0, 0, 0, GDT_Unknown, nullptr);
+    GDALDataset *ds = driver->Create(tmpPath.c_str(), 0, 0, 0, GDT_Unknown, nullptr);
     if (ds == nullptr) {
         LOGE("GeoPackage 创建失败: %s", filePath.c_str());
         return false;
@@ -239,6 +241,8 @@ static bool writeGeoPackage(const std::string &filePath, const std::string &proj
             if (tracks.isArray()) {
                 for (const JsonValue &t : tracks.arr) {
                     OGRFeature *feat = OGRFeature::CreateFeature(layer->GetLayerDefn());
+                    const long long recId = jsonInt(t, "id", 0);
+                    if (recId > 0) feat->SetFID((GIntBig) recId);  // 持久化记录 id：重写不重编号（分组引用/Media 目录按 id 命名）
                     setFieldStr(feat, "name", jsonStr(t, "name"));
                     setFieldStr(feat, "date", jsonStr(t, "date"));
                     setFieldStr(feat, "color", jsonStr(t, "color"));
@@ -277,6 +281,8 @@ static bool writeGeoPackage(const std::string &filePath, const std::string &proj
             if (measures.isArray()) {
                 for (const JsonValue &m : measures.arr) {
                     OGRFeature *feat = OGRFeature::CreateFeature(layer->GetLayerDefn());
+                    const long long recId = jsonInt(m, "id", 0);
+                    if (recId > 0) feat->SetFID((GIntBig) recId);
                     std::string type = jsonStr(m, "type");
                     setFieldStr(feat, "name", jsonStr(m, "name"));
                     setFieldStr(feat, "date", jsonStr(m, "date"));
@@ -327,6 +333,8 @@ static bool writeGeoPackage(const std::string &filePath, const std::string &proj
             if (photos.isArray()) {
                 for (const JsonValue &p : photos.arr) {
                     OGRFeature *feat = OGRFeature::CreateFeature(layer->GetLayerDefn());
+                    const long long recId = jsonInt(p, "id", 0);
+                    if (recId > 0) feat->SetFID((GIntBig) recId);
                     setFieldStr(feat, "name", jsonStr(p, "name"));
                     setFieldInt(feat, "timestamp", jsonInt(p, "timestamp"));
                     // attachments 数组整体序列化为 JSON 字符串存列；
@@ -367,6 +375,8 @@ static bool writeGeoPackage(const std::string &filePath, const std::string &proj
             if (groups.isArray()) {
                 for (const JsonValue &g : groups.arr) {
                     OGRFeature *feat = OGRFeature::CreateFeature(layer->GetLayerDefn());
+                    const long long recId = jsonInt(g, "id", 0);
+                    if (recId > 0) feat->SetFID((GIntBig) recId);
                     setFieldStr(feat, "name", jsonStr(g, "name"));
                     setFieldInt(feat, "created_time", jsonInt(g, "createdTime"));
                     setFieldBool(feat, "visible", jsonBool(g, "visible", true));
@@ -395,6 +405,8 @@ static bool writeGeoPackage(const std::string &filePath, const std::string &proj
             if (plots.isArray()) {
                 for (const JsonValue &s : plots.arr) {
                     OGRFeature *feat = OGRFeature::CreateFeature(layer->GetLayerDefn());
+                    const long long recId = jsonInt(s, "id", 0);
+                    if (recId > 0) feat->SetFID((GIntBig) recId);
                     std::string plotType = jsonStr(s, "plotType");
                     setFieldStr(feat, "name", jsonStr(s, "name"));
                     setFieldStr(feat, "plot_type", plotType);
@@ -470,6 +482,11 @@ static bool writeGeoPackage(const std::string &filePath, const std::string &proj
     }
 
     GDALClose(ds);
+    // POSIX rename 原子替换已存在目标；失败时保留 .tmp 供排查，正式文件仍是上次完整副本
+    if (rename(tmpPath.c_str(), filePath.c_str()) != 0) {
+        LOGE("GeoPackage 替换正式文件失败（.tmp 已保留）: %s -> %s", tmpPath.c_str(), filePath.c_str());
+        return false;
+    }
     LOGI("GeoPackage 写入成功: %s", filePath.c_str());
     return true;
 }
