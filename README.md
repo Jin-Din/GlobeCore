@@ -12,7 +12,7 @@
 门面层（`NativeMapView` 等）只做接口转发，相机、瓦片网格、取瓦片与缓存、矢量读取/三角剖分、
 OpenGL ES 2.0 绘制全部在 native 完成，并内联编译了 GDAL/OGR、PROJ、libcurl 全套第三方静态库能力。
 
-当前版本 **0.1.4.0**：着色器精度修复（顶点阶段归一化法向/视线方向，修复真机 3D 光照无过渡问题）。
+当前版本 **0.1.4.0**：GeoPackage 工程读写（`geopackage_io`，七表结构 + JSON 桥接 + 原子写 + SetFID 记录 id 持久化）、着色器精度修复（顶点阶段归一化法向/视线方向，修复真机 3D 光照无过渡问题）、瓦片缓存 MBTiles 单文件后端（含 `added_at` 入库时间列）。
 
 ## 它是干什么的
 
@@ -27,7 +27,7 @@ SDK**。
 |---|---|---|
 | 视图 | 2D 平面墨卡托（正交）/ 3D WGS84 球体（透视，可旋转、俯仰、地平裁剪），两模式共用一套相机，切换保持视角连续 | `setViewMode` / `setCamera` / `getCamera` |
 | 底图 | 任意 XYZ 瓦片图源（`{z}/{x}/{y}` URL 模板）多层叠加；注记层透明混合置顶；超出图源最大级别拉伸末级纹理（无限放大不出 404 占位块）；URL 传空即纯离线读缓存 | `addTileLayer` |
-| 缓存 | 瓦片按 `<cacheDir>/<z>/<x>_<y>.tile` 落盘，与既有 app 的缓存目录布局互通；2D/3D 纹理缓存同键复用；取瓦片走 native 后台线程池，就绪异步上屏 | 同上（`cacheDir`） |
+| 缓存 | 瓦片缓存双后端：`cacheDir` 以 `.mbtiles` 结尾走 SQLite **MBTiles 单文件**（WAL、标准 tiles/metadata 表、TMS y 翻转、扩展列 `added_at` 入库时间，老库自动 ALTER 补列），否则按 `<cacheDir>/<z>/<x>_<y>.tile` 目录落盘；2D/3D 纹理缓存同键复用；取瓦片走 native 后台线程池，就绪异步上屏 | 同上（`cacheDir`） |
 | 本地影像 | tif/img 等 GDAL 可打开格式：native 重投影后按全球墨卡托即时切片并回写缓存复用，级别由栅格分辨率自动推算 | `addRasterLayer` |
 | 矢量 | shp/kml/kmz/dwg/dxf 等 OGR 可打开格式**直读文件**→ 重投影 WGS84 → earcut 三角剖分；面填充/描边/线/点/图标 billboard/文字标注（字形图集，可复用系统 CJK 字体，零 APK 增量） | `addVectorLayer` / `VectorStyle` / `setFontPath` |
 | 大数据矢量 | 按屏幕范围增量重载（Swap-on-ready，重载期无空窗）、单次要素预算、加载中状态轮询、按级别隐藏、样式变更就地换层不闪图 | `updateVectorExtent` / `hasVectorLoading` / `setVectorMinLevel` / `setVectorLayerVisible` / `removeVectorLayer` |
@@ -492,7 +492,11 @@ hdc file send D:\data\sample.shp /data/app/el2/100/base/com.zys.globecore.harmon
 
 ## 版本说明
 
-- **0.1.4.0（当前发布）**：着色器精度修复——顶点着色器中 `vNormal`/`vViewDir` 归一化移至顶点阶段，避免 `mediump` varying 插值大数值 ECEF 坐标丢精度，修复真机 3D 光照无明暗过渡问题（模拟器 SwiftShader 不受影响）。
+- **0.1.4.0（当前发布）**：三项合入——
+  ① **GeoPackage 工程读写**：新增 `bridge/geopackage_io.cpp`，OGR GPKG 驱动实现工程文件（七表：tracks / measures / photos / media_groups / survey_plots / project_meta / layer_refs）整体读写，Kotlin/ArkTS 侧以 JSON 跨桥传输；写入整文件 tmp+rename **原子替换**，五张要素表 **SetFID 落盘**使记录 id 持久化（重写不重编号），读侧缺列宽容回退、写侧整文件重建自动升级 schema；
+  ② **着色器精度修复**：顶点着色器中 `vNormal`/`vViewDir` 归一化移至顶点阶段，避免 `mediump` varying 插值大数值 ECEF 坐标丢精度，修复真机 3D 光照无明暗过渡问题（模拟器 SwiftShader 不受影响）；
+  ③ **瓦片缓存 MBTiles 后端**：`TileCache` baseDir 以 `.mbtiles` 结尾即走 SQLite 单文件后端（WAL、TMS y 翻转、标准 tiles/metadata 表），tiles 表带扩展列 `added_at`（入库时间 Unix 秒，新建即带、老库打开自动 ALTER 补列、旧行 NULL=未知）；目录式 `<z>/<x>_<y>.tile` 旧布局保留可用，双后端按路径后缀分派。
+- **0.1.3.x**：tif/img 栅格加载专项与稳定性修复——手写 PNG 编码器取代缺失的 GDAL PNG 驱动（栅格瓦片可生成可落盘）、投影栅格 LOCAL_CS 退化修复与四至单一口径（`raster/RasterSrsRepair.h`）、新增 `removeTileLayer` 删层墓碑回收、读带统一 WGS84 VRT 口径；修复图层容器 UI/GL 线程竞争崩溃（`GlobeEngine::layersMtx_`），瓦片加载改「级别最细优先 + 祖先链深度帽」排序（叶子先出图）；另含 RHI 抽象层（GLES2 默认，Vulkan 骨架经 `GLOBECORE_VULKAN_BACKEND` 编译守卫）与 terrain/gltf/MVT/KTX2 模块骨架。技术明细见仓库内 `版本迭代.md`（本地文件）。
 - **0.1.2.0**：修复两处 KML/KMZ 渲染色问题——① 无名/非 styleUrl 型 KML/KMZ（ArcGIS、
   MapInfo 导出）按「几何前两个顶点坐标签名」兜底取色，避免要素全无名时按名映射恒空而不按原文件配色；
   ② 图层管理改「整层样式」生效：新增 `hasFillColor`/`hasLineColor` 按通道覆盖标志，仅在整层未显式设该
