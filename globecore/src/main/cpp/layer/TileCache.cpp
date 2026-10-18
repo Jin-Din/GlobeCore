@@ -4,6 +4,7 @@
 
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <sys/stat.h>
 #include <utility>
 
@@ -67,13 +68,14 @@ bool TileCache::openSqlite(const std::string &path) {
     sqlite3_exec(db, "PRAGMA journal_mode=WAL", nullptr, nullptr, nullptr);
     sqlite3_exec(db, "PRAGMA synchronous=NORMAL", nullptr, nullptr, nullptr);
     sqlite3_busy_timeout(db, 5000); // 遇锁忙等 5s
-    // 建标准 MBTiles 表结构（幂等）
+    // 建标准 MBTiles 表结构（幂等）；added_at 为非标扩展列：入库时间（Unix 秒），老库由下方 ALTER 补列
     const char *kCreateTiles =
         "CREATE TABLE IF NOT EXISTS tiles ("
         "  zoom_level INTEGER,"
         "  tile_column INTEGER,"
         "  tile_row INTEGER,"
         "  tile_data BLOB,"
+        "  added_at INTEGER,"
         "  PRIMARY KEY (zoom_level, tile_column, tile_row))";
     const char *kCreateMetadata =
         "CREATE TABLE IF NOT EXISTS metadata (name TEXT, value TEXT)";
@@ -90,6 +92,23 @@ bool TileCache::openSqlite(const std::string &path) {
     if (err) sqlite3_free(err);
     sqlite3_exec(db, kCreateIdx, nullptr, nullptr, &err);
     if (err) sqlite3_free(err);
+    // 老库补 added_at 列（PRAGMA table_info 逐列核对，缺则 ALTER；旧行该列为 NULL 视为未知）
+    bool hasAddedAt = false;
+    sqlite3_stmt *info = nullptr;
+    if (sqlite3_prepare_v2(db, "PRAGMA table_info(tiles)", -1, &info, nullptr) == SQLITE_OK) {
+        while (sqlite3_step(info) == SQLITE_ROW) {
+            const unsigned char *col = sqlite3_column_text(info, 1);
+            if (col && std::strcmp(reinterpret_cast<const char *>(col), "added_at") == 0) {
+                hasAddedAt = true;
+                break;
+            }
+        }
+        sqlite3_finalize(info);
+    }
+    if (!hasAddedAt) {
+        sqlite3_exec(db, "ALTER TABLE tiles ADD COLUMN added_at INTEGER", nullptr, nullptr, &err);
+        if (err) sqlite3_free(err);
+    }
     db_ = db;
     return true;
 }
@@ -174,7 +193,7 @@ bool TileCache::writeTile(int z, int x, int y, const std::vector<uint8_t> &bytes
         sqlite3 *db = static_cast<sqlite3 *>(db_);
         sqlite3_stmt *stmt = nullptr;
         const char *sql =
-            "INSERT OR REPLACE INTO tiles (zoom_level, tile_column, tile_row, tile_data) VALUES (?,?,?,?)";
+            "INSERT OR REPLACE INTO tiles (zoom_level, tile_column, tile_row, tile_data, added_at) VALUES (?,?,?,?,?)";
         if (sqlite3_prepare_v2(db, sql, -1, &stmt, nullptr) != SQLITE_OK) {
             LOGW("TileCache sqlite prepare(write) failed: %s", sqlite3_errmsg(db));
             return false;
@@ -183,6 +202,7 @@ bool TileCache::writeTile(int z, int x, int y, const std::vector<uint8_t> &bytes
         sqlite3_bind_int(stmt, 2, x);
         sqlite3_bind_int(stmt, 3, tmsY(z, y));
         sqlite3_bind_blob(stmt, 4, bytes.data(), static_cast<int>(bytes.size()), SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt, 5, static_cast<sqlite3_int64>(time(nullptr))); // 入库时间（Unix 秒）
         int rc = sqlite3_step(stmt);
         sqlite3_finalize(stmt);
         return rc == SQLITE_DONE;

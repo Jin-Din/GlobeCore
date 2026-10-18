@@ -12,7 +12,8 @@ namespace globecore {
  * 瓦片磁盘缓存：支持文件式（`<baseDir>/<z>/<x>_<y>.tile`）与 MBTiles/SQLite 两种后端。
  *
  * 当 [setBaseDir] 传入的路径以 `.mbtiles` 结尾时启用 SQLite 后端（标准 MBTiles 格式，
- * tiles 表 zoom_level/tile_column/tile_row/tile_data BLOB + metadata 表），单文件聚合
+ * tiles 表 zoom_level/tile_column/tile_row/tile_data BLOB + metadata 表，另加非标扩展列
+ * added_at 记录入库时间 Unix 秒，老库打开时自动 ALTER 补列、旧行为 NULL），单文件聚合
  * 海量小瓦片，B-tree 索引查找 O(log N) 优于文件系统路径拼接+fopen 的 O(1)+inode 开销，
  * 且便于离线地图包整包导入导出。否则保持文件系统后端（向后兼容已有缓存）。
  *
