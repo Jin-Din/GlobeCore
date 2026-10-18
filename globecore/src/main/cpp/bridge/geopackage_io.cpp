@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 #include <cmath>
+#include <fstream>
 
 #include "gdal/ogrsf_frmts.h"
 #include "gdal/gdal_priv.h"
@@ -315,7 +316,26 @@ static bool writeGeoPackage(const std::string &filePath, const std::string &proj
     }
 
     // ---- photos 图层 ----
+    // photo_data BLOB：主照片本体随工程入库（分享单文件自包含）。
+    // 写入优先级：photo_path 文件存在 → 读文件；文件缺失 → 从旧库（替换前的 filePath）
+    // 同 fid 继承 BLOB（本体被清理后数据仍在）；两者皆无 → NULL。
+    // 旧库只读打开，与 .tmp 新建互不冲突。
     {
+        OGRLayer *legacyPhotos = nullptr;
+        GDALDataset *legacyDs = nullptr;
+        if (!filePath.empty()) {
+            GDALDataset *probe = static_cast<GDALDataset *>(
+                    GDALOpenEx(filePath.c_str(), GDAL_OF_VECTOR | GDAL_OF_READONLY, nullptr, nullptr, nullptr));
+            if (probe != nullptr) {
+                legacyPhotos = probe->GetLayerByName("photos");
+                if (legacyPhotos != nullptr) {
+                    legacyDs = probe;  // 保持打开直到写完
+                } else {
+                    GDALClose(probe);
+                }
+            }
+        }
+
         OGRSpatialReference *srs = makeWgs84();
         OGRLayer *layer = ds->CreateLayer("photos", srs, wkbPoint, nullptr);
         srs->Release();
@@ -323,11 +343,12 @@ static bool writeGeoPackage(const std::string &filePath, const std::string &proj
             createLayerFields(layer, {
                     {"name",        OFTString},
                     {"photo_path",  OFTString},
+                    {"photo_data",  OFTBinary},
                     {"timestamp",   OFTInteger64},
                     {"attachments", OFTString},
                     {"visible",     OFTInteger},
                     {"group_id",    OFTInteger64},
-            }, {256, 1024, 0, 0, 0, 0});
+            }, {256, 0, 0, 0, 0, 0, 0});
 
             const JsonValue &photos = root.at("photos");
             if (photos.isArray()) {
@@ -339,12 +360,47 @@ static bool writeGeoPackage(const std::string &filePath, const std::string &proj
                     setFieldInt(feat, "timestamp", jsonInt(p, "timestamp"));
                     // attachments 数组整体序列化为 JSON 字符串存列；
                     // photo_path 列继续写入（= 首个附件 path），供 QGIS 直接查看主照片
+                    std::string mainPath;
                     const JsonValue &atts = p.at("attachments");
                     if (atts.isArray() && !atts.arr.empty()) {
                         std::string attsJson;
                         writeJsonValue(attsJson, atts);
                         setFieldStr(feat, "attachments", attsJson);
-                        setFieldStr(feat, "photo_path", jsonStr(atts.arr[0], "path"));
+                        mainPath = jsonStr(atts.arr[0], "path");
+                        setFieldStr(feat, "photo_path", mainPath);
+                    }
+                    // 主照片 BLOB：文件本体优先，缺失时从旧库同 fid 继承
+                    std::vector<GByte> blob;
+                    if (!mainPath.empty()) {
+                        std::ifstream f(mainPath, std::ios::binary);
+                        if (f) {
+                            f.seekg(0, std::ios::end);
+                            std::streamoff sz = f.tellg();
+                            if (sz > 0) {
+                                blob.resize(static_cast<size_t>(sz));
+                                f.seekg(0, std::ios::beg);
+                                f.read(reinterpret_cast<char *>(blob.data()), sz);
+                                blob.resize(static_cast<size_t>(f.gcount()));
+                            }
+                        }
+                    }
+                    if (!blob.empty()) {
+                        feat->SetField(layer->GetLayerDefn()->GetFieldIndex("photo_data"),
+                                       (int) blob.size(), blob.data());
+                    } else if (legacyPhotos != nullptr && recId > 0) {
+                        OGRFeature *old = legacyPhotos->GetFeature((GIntBig) recId);
+                        if (old != nullptr) {
+                            int bi = old->GetFieldIndex("photo_data");
+                            if (bi >= 0 && !old->IsFieldNull(bi)) {
+                                int oldSize = 0;
+                                GByte *oldData = old->GetFieldAsBinary(bi, &oldSize);
+                                if (oldData != nullptr && oldSize > 0) {
+                                    feat->SetField(layer->GetLayerDefn()->GetFieldIndex("photo_data"),
+                                                   oldSize, oldData);
+                                }
+                            }
+                            OGRFeature::DestroyFeature(old);
+                        }
                     }
                     setFieldBool(feat, "visible", jsonBool(p, "visible", true));
                     setFieldInt(feat, "group_id", jsonInt(p, "groupId", -1));
@@ -359,6 +415,7 @@ static bool writeGeoPackage(const std::string &filePath, const std::string &proj
                 }
             }
         }
+        if (legacyDs != nullptr) GDALClose(legacyDs);
     }
 
     // ---- media_groups 图层（非空间表，fid 即 id）----
@@ -877,4 +934,46 @@ Java_com_zys_mobilemap_project_GeoPackageWriter_nativeReadGeoPackage(
     std::string json = readGeoPackage(fpStr);
     if (json.empty()) return nullptr;
     return env->NewStringUTF(json.c_str());
+}
+
+// 按 fid 惰性读取单张主照片 BLOB（photo_data）；库无该列（老库未重写）或无记录返回 nullptr。
+// 打开工程不读 BLOB，仅在显示照片且回退时调用，避免秒级 IO。
+extern "C"
+JNIEXPORT jbyteArray JNICALL
+Java_com_zys_mobilemap_project_GeoPackageWriter_nativeReadPhotoBlob(
+        JNIEnv *env, jobject /*thiz*/, jstring filePath, jlong fid) {
+
+    if (filePath == nullptr || fid <= 0) return nullptr;
+
+    const char *fp = env->GetStringUTFChars(filePath, nullptr);
+    if (fp == nullptr) return nullptr;
+    std::string fpStr(fp);
+    env->ReleaseStringUTFChars(filePath, fp);
+
+    GDALAllRegister();
+    GDALDataset *ds = static_cast<GDALDataset *>(
+            GDALOpenEx(fpStr.c_str(), GDAL_OF_VECTOR | GDAL_OF_READONLY, nullptr, nullptr, nullptr));
+    if (ds == nullptr) return nullptr;
+
+    jbyteArray result = nullptr;
+    OGRLayer *layer = ds->GetLayerByName("photos");
+    if (layer != nullptr) {
+        OGRFeature *feat = layer->GetFeature((GIntBig) fid);
+        if (feat != nullptr) {
+            int bi = feat->GetFieldIndex("photo_data");
+            if (bi >= 0 && !feat->IsFieldNull(bi)) {
+                int size = 0;
+                GByte *data = feat->GetFieldAsBinary(bi, &size);
+                if (data != nullptr && size > 0) {
+                    result = env->NewByteArray(size);
+                    if (result != nullptr) {
+                        env->SetByteArrayRegion(result, 0, size, reinterpret_cast<const jbyte *>(data));
+                    }
+                }
+            }
+            OGRFeature::DestroyFeature(feat);
+        }
+    }
+    GDALClose(ds);
+    return result;
 }
