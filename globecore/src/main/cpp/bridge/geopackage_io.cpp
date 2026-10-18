@@ -188,9 +188,10 @@ static void createLayerFields(OGRLayer *layer, const std::vector<std::pair<const
 /**
  * 创建 GeoPackage 文件并写入工程数据。
  * 表结构：
- *   - tracks:        LineString, name, date, color, hidden
- *   - measures:      Geometry(Point/LineString/Polygon), name, date, type, result, color, hidden, closed
- *   - photos:        Point, name, photo_path, timestamp
+ *   - tracks:        LineString, name, date, color, hidden, line_width
+ *   - measures:      Geometry(Point/LineString/Polygon), name, date, type, result, color, hidden, closed, line_width
+ *   - photos:        Point, name, photo_path, timestamp, attachments(JSON), visible, group_id
+ *   - media_groups:  (非空间) name, created_time, visible（fid 即 id）
  *   - survey_plots:  Geometry(Point/Polygon), name, plot_type, attributes(JSON)
  *   - project_meta:  key, value
  *   - layer_refs:    layer_path
@@ -227,11 +228,12 @@ static bool writeGeoPackage(const std::string &filePath, const std::string &proj
         srs->Release();
         if (layer != nullptr) {
             createLayerFields(layer, {
-                    {"name",   OFTString},
-                    {"date",   OFTString},
-                    {"color",  OFTString},
-                    {"hidden", OFTInteger},
-            }, {256, 64, 16, 0});
+                    {"name",       OFTString},
+                    {"date",       OFTString},
+                    {"color",      OFTString},
+                    {"hidden",     OFTInteger},
+                    {"line_width", OFTInteger},
+            }, {256, 64, 16, 0, 0});
 
             const JsonValue &tracks = root.at("tracks");
             if (tracks.isArray()) {
@@ -241,6 +243,7 @@ static bool writeGeoPackage(const std::string &filePath, const std::string &proj
                     setFieldStr(feat, "date", jsonStr(t, "date"));
                     setFieldStr(feat, "color", jsonStr(t, "color"));
                     setFieldBool(feat, "hidden", jsonBool(t, "hidden"));
+                    setFieldInt(feat, "line_width", jsonInt(t, "lineWidth", 3));
                     std::vector<double> pts;
                     jsonPoints(t, pts);
                     feat->SetGeometryDirectly(pointsToLine(pts));
@@ -260,14 +263,15 @@ static bool writeGeoPackage(const std::string &filePath, const std::string &proj
         srs->Release();
         if (layer != nullptr) {
             createLayerFields(layer, {
-                    {"name",   OFTString},
-                    {"date",   OFTString},
-                    {"type",   OFTString},
-                    {"result", OFTString},
-                    {"color",  OFTString},
-                    {"hidden", OFTInteger},
-                    {"closed", OFTInteger},
-            }, {256, 64, 64, 512, 16, 0, 0});
+                    {"name",       OFTString},
+                    {"date",       OFTString},
+                    {"type",       OFTString},
+                    {"result",     OFTString},
+                    {"color",      OFTString},
+                    {"hidden",     OFTInteger},
+                    {"closed",     OFTInteger},
+                    {"line_width", OFTInteger},
+            }, {256, 64, 64, 512, 16, 0, 0, 0});
 
             const JsonValue &measures = root.at("measures");
             if (measures.isArray()) {
@@ -281,6 +285,7 @@ static bool writeGeoPackage(const std::string &filePath, const std::string &proj
                     setFieldStr(feat, "color", jsonStr(m, "color"));
                     setFieldBool(feat, "hidden", jsonBool(m, "hidden"));
                     setFieldBool(feat, "closed", jsonBool(m, "closed"));
+                    setFieldInt(feat, "line_width", jsonInt(m, "lineWidth", 3));
 
                     std::vector<double> pts;
                     jsonPoints(m, pts);
@@ -310,24 +315,63 @@ static bool writeGeoPackage(const std::string &filePath, const std::string &proj
         srs->Release();
         if (layer != nullptr) {
             createLayerFields(layer, {
-                    {"name",       OFTString},
-                    {"photo_path", OFTString},
-                    {"timestamp",  OFTInteger64},
-            }, {256, 1024, 0});
+                    {"name",        OFTString},
+                    {"photo_path",  OFTString},
+                    {"timestamp",   OFTInteger64},
+                    {"attachments", OFTString},
+                    {"visible",     OFTInteger},
+                    {"group_id",    OFTInteger64},
+            }, {256, 1024, 0, 0, 0, 0});
 
             const JsonValue &photos = root.at("photos");
             if (photos.isArray()) {
                 for (const JsonValue &p : photos.arr) {
                     OGRFeature *feat = OGRFeature::CreateFeature(layer->GetLayerDefn());
                     setFieldStr(feat, "name", jsonStr(p, "name"));
-                    setFieldStr(feat, "photo_path", jsonStr(p, "photoPath"));
                     setFieldInt(feat, "timestamp", jsonInt(p, "timestamp"));
+                    // attachments 数组整体序列化为 JSON 字符串存列；
+                    // photo_path 列继续写入（= 首个附件 path），供 QGIS 直接查看主照片
+                    const JsonValue &atts = p.at("attachments");
+                    if (atts.isArray() && !atts.arr.empty()) {
+                        std::string attsJson;
+                        writeJsonValue(attsJson, atts);
+                        setFieldStr(feat, "attachments", attsJson);
+                        setFieldStr(feat, "photo_path", jsonStr(atts.arr[0], "path"));
+                    }
+                    setFieldBool(feat, "visible", jsonBool(p, "visible", true));
+                    setFieldInt(feat, "group_id", jsonInt(p, "groupId", -1));
                     double lon = p.at("lon").numVal;
                     double lat = p.at("lat").numVal;
                     double alt = p.at("alt").numVal;
                     feat->SetGeometryDirectly(new OGRPoint(lon, lat, alt));
                     if (layer->CreateFeature(feat) != OGRERR_NONE) {
                         LOGE("photos 要素写入失败");
+                    }
+                    OGRFeature::DestroyFeature(feat);
+                }
+            }
+        }
+    }
+
+    // ---- media_groups 图层（非空间表，fid 即 id）----
+    {
+        OGRLayer *layer = ds->CreateLayer("media_groups", nullptr, wkbNone, nullptr);
+        if (layer != nullptr) {
+            createLayerFields(layer, {
+                    {"name",         OFTString},
+                    {"created_time", OFTInteger64},
+                    {"visible",      OFTInteger},
+            }, {256, 0, 0});
+
+            const JsonValue &groups = root.at("mediaGroups");
+            if (groups.isArray()) {
+                for (const JsonValue &g : groups.arr) {
+                    OGRFeature *feat = OGRFeature::CreateFeature(layer->GetLayerDefn());
+                    setFieldStr(feat, "name", jsonStr(g, "name"));
+                    setFieldInt(feat, "created_time", jsonInt(g, "createdTime"));
+                    setFieldBool(feat, "visible", jsonBool(g, "visible", true));
+                    if (layer->CreateFeature(feat) != OGRERR_NONE) {
+                        LOGE("media_groups 要素写入失败");
                     }
                     OGRFeature::DestroyFeature(feat);
                 }
@@ -443,6 +487,13 @@ static std::string getFieldStr(OGRFeature *feat, const char *name) {
 static long long getFieldInt(OGRFeature *feat, const char *name) {
     int idx = feat->GetFieldIndex(name);
     if (idx < 0 || !feat->IsFieldSet(idx) || feat->IsFieldNull(idx)) return 0;
+    return (long long) feat->GetFieldAsInteger64(idx);
+}
+
+/** 带默认值的整列读取：旧版 gpkg 缺列时回默认值（读侧兼容） */
+static long long getFieldIntDef(OGRFeature *feat, const char *name, long long def) {
+    int idx = feat->GetFieldIndex(name);
+    if (idx < 0 || !feat->IsFieldSet(idx) || feat->IsFieldNull(idx)) return def;
     return (long long) feat->GetFieldAsInteger64(idx);
 }
 
@@ -562,6 +613,7 @@ static void readSpatialLayer(GDALDataset *ds, const char *layerName, std::string
             outStrField(out, "date", getFieldStr(feat, "date"), first);
             outStrField(out, "color", getFieldStr(feat, "color"), first);
             outBoolField(out, "hidden", getFieldInt(feat, "hidden") != 0, first);
+            outIntField(out, "lineWidth", getFieldIntDef(feat, "line_width", 3), first);
         } else if (strcmp(kind, "measures") == 0) {
             outStrField(out, "date", getFieldStr(feat, "date"), first);
             outStrField(out, "type", getFieldStr(feat, "type"), first);
@@ -569,10 +621,39 @@ static void readSpatialLayer(GDALDataset *ds, const char *layerName, std::string
             outStrField(out, "color", getFieldStr(feat, "color"), first);
             outBoolField(out, "hidden", getFieldInt(feat, "hidden") != 0, first);
             outBoolField(out, "closed", getFieldInt(feat, "closed") != 0, first);
+            outIntField(out, "lineWidth", getFieldIntDef(feat, "line_width", 3), first);
         } else if (strcmp(kind, "photos") == 0) {
             // photos 的 lon/lat/alt 由几何提取（下方单独处理）
-            outStrField(out, "photoPath", getFieldStr(feat, "photo_path"), first);
-            outIntField(out, "timestamp", getFieldInt(feat, "timestamp"), first);
+            long long ts = getFieldInt(feat, "timestamp");
+            outIntField(out, "timestamp", ts, first);
+            outBoolField(out, "visible", getFieldIntDef(feat, "visible", 1) != 0, first);
+            outIntField(out, "groupId", getFieldIntDef(feat, "group_id", -1), first);
+            // attachments：优先 attachments 列 JSON（原样嵌入）；空且 photo_path 非空时
+            // 回退生成单元素 attachments（name 取文件名、path=photo_path、time=timestamp）
+            std::string atts = getFieldStr(feat, "attachments");
+            if (atts.empty() || atts[0] != '[') {
+                std::string photoPath = getFieldStr(feat, "photo_path");
+                if (!photoPath.empty()) {
+                    size_t pos = photoPath.find_last_of("/\\");
+                    std::string fname = (pos == std::string::npos) ? photoPath : photoPath.substr(pos + 1);
+                    std::string fb = "[{\"name\":\"";
+                    jsonEscape(fb, fname.c_str());
+                    fb += "\",\"path\":\"";
+                    jsonEscape(fb, photoPath.c_str());
+                    fb += "\",\"time\":";
+                    char buf[32];
+                    snprintf(buf, sizeof(buf), "%lld", ts);
+                    fb += buf;
+                    fb += "}]";
+                    atts = fb;
+                } else {
+                    atts = "[]";
+                }
+            }
+            if (!first) out += ",";
+            first = false;
+            out += "\"attachments\":";
+            out += atts;
         } else if (strcmp(kind, "survey_plots") == 0) {
             outStrField(out, "plotType", getFieldStr(feat, "plot_type"), first);
             // attributes 为 JSON 字符串，原样嵌入输出（非转义字符串）
@@ -678,6 +759,30 @@ static std::string readGeoPackage(const std::string &filePath) {
     {
         bool firstElem = true;
         readSpatialLayer(ds, "photos", out, firstElem, "photos");
+    }
+    out += "]";
+
+    // ---- media_groups ----
+    out += ",\"mediaGroups\":[";
+    {
+        OGRLayer *groups = ds->GetLayerByName("media_groups");
+        bool firstElem = true;
+        if (groups != nullptr) {
+            groups->ResetReading();
+            OGRFeature *feat;
+            while ((feat = groups->GetNextFeature()) != nullptr) {
+                if (!firstElem) out += ",";
+                firstElem = false;
+                out += "{";
+                bool first = true;
+                outIntField(out, "id", (long long) feat->GetFID(), first);
+                outStrField(out, "name", getFieldStr(feat, "name"), first);
+                outIntField(out, "createdTime", getFieldInt(feat, "created_time"), first);
+                outBoolField(out, "visible", getFieldIntDef(feat, "visible", 1) != 0, first);
+                out += "}";
+                OGRFeature::DestroyFeature(feat);
+            }
+        }
     }
     out += "]";
 
