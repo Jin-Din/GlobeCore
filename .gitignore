@@ -63,6 +63,11 @@ globecore-harmonyos/local.properties
 操作说明.md
 版本迭代.md
 
+# HAR 构建与发布：本地工具/文档不入仓（发布脚本涉及维护者本机 ohpm 私钥环境）
+HAR发布指南.md
+build-har.ps1
+publish-har.ps1
+
 .kotlin
 
 # 构建工具临时日志（aqtinstall 等）

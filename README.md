@@ -12,7 +12,7 @@
 门面层（`NativeMapView` 等）只做接口转发，相机、瓦片网格、取瓦片与缓存、矢量读取/三角剖分、
 OpenGL ES 2.0 绘制全部在 native 完成，并内联编译了 GDAL/OGR、PROJ、libcurl 全套第三方静态库能力。
 
-当前版本 **0.1.4.0**：GeoPackage 工程读写（`geopackage_io`，七表结构 + JSON 桥接 + 原子写 + SetFID 记录 id 持久化）、着色器精度修复（顶点阶段归一化法向/视线方向，修复真机 3D 光照无过渡问题）、瓦片缓存 MBTiles 单文件后端（含 `added_at` 入库时间列）。
+当前版本 **0.1.4.0**：GeoPackage 工程读写（`geopackage_io`，七表结构 + JSON 桥接 + 原子写 + SetFID 记录 id 持久化）、着色器精度修复（顶点阶段归一化法向/视线方向，修复真机 3D 光照无过渡问题）、瓦片缓存 MBTiles 单文件后端（含 `added_at` 入库时间列）。tag 后追加（未重新打版）：鸿蒙 HAR 构建补齐引擎源清单（修复 so 链接缺符号）、photos 表新增 `photo_data` BLOB（主照片随工程文件入库）。
 
 ## 它是干什么的
 
@@ -28,7 +28,7 @@ SDK**。
 | 视图 | 2D 平面墨卡托（正交）/ 3D WGS84 球体（透视，可旋转、俯仰、地平裁剪），两模式共用一套相机，切换保持视角连续 | `setViewMode` / `setCamera` / `getCamera` |
 | 底图 | 任意 XYZ 瓦片图源（`{z}/{x}/{y}` URL 模板）多层叠加；注记层透明混合置顶；超出图源最大级别拉伸末级纹理（无限放大不出 404 占位块）；URL 传空即纯离线读缓存 | `addTileLayer` |
 | 缓存 | 瓦片缓存双后端：`cacheDir` 以 `.mbtiles` 结尾走 SQLite **MBTiles 单文件**（WAL、标准 tiles/metadata 表、TMS y 翻转、扩展列 `added_at` 入库时间，老库自动 ALTER 补列），否则按 `<cacheDir>/<z>/<x>_<y>.tile` 目录落盘；2D/3D 纹理缓存同键复用；取瓦片走 native 后台线程池，就绪异步上屏 | 同上（`cacheDir`） |
-| 本地影像 | tif/img 等 GDAL 可打开格式：native 重投影后按全球墨卡托即时切片并回写缓存复用，级别由栅格分辨率自动推算 | `addRasterLayer` |
+| 本地影像 | tif/img 等 GDAL 可打开格式，双通路：`addRasterLayer` native 重投影后按全球墨卡托即时切片并回写缓存复用（级别由栅格分辨率自动推算）；`addRasterImageLayer` 整幅直读单张贴图按 WGS84 四至贴面（UI 线程零 GDAL 立即返回，超 GL 纹理/内存帽沿 overviews 降采样，全幅 sidecar 磁盘缓存二次打开秒级就绪） | `addRasterLayer` / `addRasterImageLayer` |
 | 矢量 | shp/kml/kmz/dwg/dxf 等 OGR 可打开格式**直读文件**→ 重投影 WGS84 → earcut 三角剖分；面填充/描边/线/点/图标 billboard/文字标注（字形图集，可复用系统 CJK 字体，零 APK 增量） | `addVectorLayer` / `VectorStyle` / `setFontPath` |
 | 大数据矢量 | 按屏幕范围增量重载（Swap-on-ready，重载期无空窗）、单次要素预算、加载中状态轮询、按级别隐藏、样式变更就地换层不闪图 | `updateVectorExtent` / `hasVectorLoading` / `setVectorMinLevel` / `setVectorLayerVisible` / `removeVectorLayer` |
 | 拾取与属性 | 单击命中 `[layerIndex, fid]`；回取要素 WGS84 几何用于选中高亮；屏幕点→经纬度（采集/测量加点）；范围过滤 + 字段白名单 + 几何简化读取、按 FID 全字段回取、属性 SQL 查询、要素计数、按 FID 写回源文件 | `pickVector` / `featureGeometry` / `screenToGeo` / `NativeVector` |
@@ -57,7 +57,7 @@ SDK**。
 - 不依赖、未链接、未衍生任何第三方地球渲染引擎源码（详见文末「许可与第三方声明」）
 
 > 看完这段决定要用 → 直接跳「API 概览与快速上手」（Kotlin 最小用例）或「鸿蒙 HarmonyOS NEXT
-> 集成」（ArkTS 最小用例）或「桌面宿主」（Qt5 Widgets 最小用例）；想先跑起来看效果 → 两端 demo 见「功能演示 App」与「演示工程
+> 集成」（ArkTS 最小用例）或「桌面宿主」（Qt5 Widgets）；想先跑起来看效果 → 两端 demo 见「功能演示 App」与「演示工程
 > globecore-harmonyos」，桌面 demo 见 `globecore-desktop/`。
 
 ## 仓库结构
@@ -78,6 +78,11 @@ GlobeCore/
 ├── build-scripts/                   # 第三方静态库编译脚本（WSL/Linux；--target android|ohos|windows|linux）
 └── gradle/ + 根构建脚本             # 独立 Gradle 工程（Gradle 9.4.1 / AGP 9.2.1）
 ```
+
+> 若干本地文件**不入仓**：`操作说明.md`、`版本迭代.md`、`HAR发布指南.md`（HAR ohpm 发布
+> 操作手册）与 `build-har.ps1` / `publish-har.ps1`（HAR 本地构建/发布脚本，涉及维护者本机
+> ohpm 私钥环境）仅存于维护者工作区，克隆本仓库不会得到；上述排除不影响「0 → 1 从零构建」
+> 与各端集成流程。
 
 ## 0 → 1 从零构建
 
@@ -179,7 +184,8 @@ bash build-all.sh
    gradlew.bat :globecore:assembleRelease
    ```
 
-   产物：`globecore/build/outputs/aar/globecore-release.aar`。
+   产物：`globecore/build/outputs/aar/globecore-release.aar`（另自动产出同名带版本号副本
+   `outputs/aar-versioned/globecore-<version>-release.aar`，便于宿主按版本落 `libs/` 管理）。
    首次构建会由 CMake 全量编译 native 内核并静态链接 GDAL 链。
 
 构建环境：JDK 21+（wrapper 自动解析）、Android SDK（compileSdk 37）、NDK `28.2.13676358`、
@@ -211,7 +217,7 @@ android {
     }
 }
 dependencies {
-    implementation("com.zys:globecore:0.1.2.0")   // 自动下载；传递依赖（androidx core-ktx）随之带入
+    implementation("com.zys:globecore:0.1.4.0")   // 自动下载；传递依赖（androidx core-ktx）随之带入
 }
 ```
 
@@ -224,8 +230,9 @@ dependencies {
 > 其余（`NativeSrs.initProjData` 初始化、宿主自行声明 `INTERNET` 权限、`NativeMapView` 用法）与
 > 「AAR 三步曲」的第二~四步完全一致。
 >
-> 发布由 `.github/workflows/publish-maven.yml` 完成（推 `v*` tag 或手动 dispatch：下载 Release 里的
-> `.a` 预置包 → 编 AAR → 部署到 `gh-pages:/maven`）。
+> 发布方式：**本地手工部署**（仓库 CI workflow 已移除，推 `v*` tag 不会触发自动发布）——本地编 AAR
+> 后 overlay 部署到 `gh-pages:/maven` 分支（保留历史版本目录，Gradle `publish` 产物拷入 gh-pages
+> worktree 提交推送）。
 
 ## 备选：手动引入 AAR 文件（无网络仓库时的“三步曲”）
 
@@ -390,23 +397,26 @@ HarmonyOS NEXT（API 12 / 5.0.0，纯血鸿蒙，无 AOSP 兼容层）下引擎�
 | 日志 | `android/log` | hilog（`Log.h` 按 `__OHOS__` 分派，引擎其余代码零平台 `#ifdef`） |
 | GL 宿主 | Kotlin `GLSurfaceView` 转发 surface 生命周期 | `XComponent(SURFACE)` + native EGL 渲染线程（`ohos/EglContext`、`ohos/XComponentBridge`），渲染后端仍为 GLES（向下兼容 ES 2.0 绘制指令，`render/` 层零重写） |
 | 桥接 | JNI（`GlobeEngineJni.cpp`） | NAPI（`ohos/napi_*.cpp`，导出清单与 JNI 一一对应） |
-| 门面 | Kotlin `com.zys.globecore` | ArkTS HAR `globecore-harmonyos`（`globecore-harmonyos/library`，类名/方法名/参数序完整对齐） |
+| 门面 | Kotlin `com.zys.globecore` | ArkTS HAR `@zys/globecore`（`globecore-harmonyos/library`，类名/方法名/参数序完整对齐） |
 | 资源 | AAR `assets/proj` | HAR `resources/rawfile/proj`（均经 `NativeSrs.initProjData` 解压到沙箱 `filesDir/proj`） |
-| 产物 | AAR（`com.zys:globecore`） | HAR（`globecore-harmonyos`，so 名 `libglobecore.so`） |
+| 产物 | AAR（`com.zys:globecore`） | HAR（`@zys/globecore`，so 名 `libglobecore.so`） |
 
 ### 集成三步曲（对齐 Android 侧口径）
 
-**第一步：引入 HAR** —— 把 `globecore-harmonyos.har`（DevEco `Build Module → Make Module HAR` 产出）放入宿主，
-`oh-package.json5` 声明依赖（源码仓库直接引用时也可 `file:` 指向 `library` 模块）：
+**第一步：引入 HAR** —— 包名 **`@zys/globecore`**。ohpm 仓已发布（当前 0.1.3），宿主 `oh-package.json5` 直接按版本引用：
 
 ```json5
 // oh-package.json5
 {
   "dependencies": {
-    "globecore-harmonyos": "file:./libs/globecore-harmonyos.har"
+    "@zys/globecore": "0.1.3"
   }
 }
 ```
+
+无 ohpm 环境时备选：把 DevEco `Build Module → Make Module HAR` 产出的
+`@zys-globecore-<版本>.har` 放入宿主后 `file:` 引用；源码仓库直接引用时 `file:` 指向
+`library` 模块（仓库内演示工程 entry 即 `"@zys/globecore": "file:../library"`）。
 
 **第二步：声明权限** —— 取瓦片走 native libcurl，宿主 `module.json5` 自行声明（HAR 不携权限）：
 
@@ -420,7 +430,7 @@ HarmonyOS NEXT（API 12 / 5.0.0，纯血鸿蒙，无 AOSP 兼容层）下引擎�
 **第三步：启动初始化** —— Ability `onCreate` 里调一次（幂等；首次坐标转换/栅格重投影之前）：
 
 ```typescript
-import { NativeSrs } from 'globecore-harmonyos';
+import { NativeSrs } from '@zys/globecore';
 
 // 解压 HAR rawfile/proj 到 filesDir/proj 并配置 PROJ 搜索路径（this.context 为 UIAbilityContext）
 NativeSrs.initProjData(this.context);
@@ -439,7 +449,7 @@ NativeSrs.convert(116.4, 39.9, 'EPSG:4326', 'EPSG:3857')  // 非 null 即成功
 `aboutToAppear` 已创建）：
 
 ```typescript
-import { NativeMapView, Camera, ViewMode } from 'globecore-harmonyos';
+import { NativeMapView, Camera, ViewMode } from '@zys/globecore';
 
 @Entry
 @Component
@@ -490,12 +500,34 @@ hdc file send D:\data\sample.shp /data/app/el2/100/base/com.zys.globecore.harmon
   「文件已存在即跳过」）。
 - **日志查看**：`hdc shell hilog | findstr GlobeCore`（引擎 `Log.h` 鸿蒙分支统一走 hilog，TAG=globecore）。
 
+## 桌面宿主（globecore-desktop）
+
+Windows / Linux（含麒麟/UOS/龙芯）第四宿主：Qt5 Widgets + `QOpenGLWidget` **直接调用引擎 C++ 核心**
+（无 JNI/NAPI 编解码薄层）。引擎侧仅「加分支」适配：`Log.h` 加 `GLOBECORE_DESKTOP` 分支（stderr）、
+部分 JNI 导出段加 `!GLOBECORE_DESKTOP` 守卫，移动端行为零影响。GL 后端：Windows 必走 **ANGLE**
+（原生桌面 GL 无 `ARB_ES2_compatibility`，GLSL ES 着色器编不过）；Linux 走 Mesa GLES2 或 glew。
+
+```bash
+# Windows（Git-Bash；VS2019 + Qt 5.15.2 + ANGLE + vcpkg 三方，项目内自包含布局）
+cd globecore-desktop && bash tools/gcd-rebuild.sh && bash tools/gcd-deploy.sh
+
+# Linux / WSLg / 麒麟 / UOS（系统包 GDAL/PROJ/curl/sqlite；勿在 /mnt 挂载盘构建）
+cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build build-linux -j8
+```
+
+两端均已实测跑通 XYZ 底图、3D 球面、GDAL 矢量（含 KML/KMZ）、栅格 GeoTIFF（含投影重投影 VRT、
+超大栅格 sidecar 缓存）与中文标注。目录结构、GL 后端决策、三方库来源、冒烟工具与已知格式缺口
+详见 **`globecore-desktop/README.md`**。
+
 ## 版本说明
 
 - **0.1.4.0（当前发布）**：三项合入——
   ① **GeoPackage 工程读写**：新增 `bridge/geopackage_io.cpp`，OGR GPKG 驱动实现工程文件（七表：tracks / measures / photos / media_groups / survey_plots / project_meta / layer_refs）整体读写，Kotlin/ArkTS 侧以 JSON 跨桥传输；写入整文件 tmp+rename **原子替换**，五张要素表 **SetFID 落盘**使记录 id 持久化（重写不重编号），读侧缺列宽容回退、写侧整文件重建自动升级 schema；
   ② **着色器精度修复**：顶点着色器中 `vNormal`/`vViewDir` 归一化移至顶点阶段，避免 `mediump` varying 插值大数值 ECEF 坐标丢精度，修复真机 3D 光照无明暗过渡问题（模拟器 SwiftShader 不受影响）；
   ③ **瓦片缓存 MBTiles 后端**：`TileCache` baseDir 以 `.mbtiles` 结尾即走 SQLite 单文件后端（WAL、TMS y 翻转、标准 tiles/metadata 表），tiles 表带扩展列 `added_at`（入库时间 Unix 秒，新建即带、老库打开自动 ALTER 补列、旧行 NULL=未知）；目录式 `<z>/<x>_<y>.tile` 旧布局保留可用，双后端按路径后缀分派。
+  v0.1.4.0 tag 后追加（未重新打版）：鸿蒙 HAR CMake 补齐 11 个落后引擎源（修复 `libglobecore.so`
+  链接缺符号）；`geopackage_io` photos 表新增 `photo_data` BLOB 列（主照片随工程文件入库，
+  分享单文件自带照片，文件缺失时读侧回退库内 BLOB）。
 - **0.1.3.x**：tif/img 栅格加载专项与稳定性修复——手写 PNG 编码器取代缺失的 GDAL PNG 驱动（栅格瓦片可生成可落盘）、投影栅格 LOCAL_CS 退化修复与四至单一口径（`raster/RasterSrsRepair.h`）、新增 `removeTileLayer` 删层墓碑回收、读带统一 WGS84 VRT 口径；修复图层容器 UI/GL 线程竞争崩溃（`GlobeEngine::layersMtx_`），瓦片加载改「级别最细优先 + 祖先链深度帽」排序（叶子先出图）；另含 RHI 抽象层（GLES2 默认，Vulkan 骨架经 `GLOBECORE_VULKAN_BACKEND` 编译守卫）与 terrain/gltf/MVT/KTX2 模块骨架。技术明细见仓库内 `版本迭代.md`（本地文件）。
 - **0.1.2.0**：修复两处 KML/KMZ 渲染色问题——① 无名/非 styleUrl 型 KML/KMZ（ArcGIS、
   MapInfo 导出）按「几何前两个顶点坐标签名」兜底取色，避免要素全无名时按名映射恒空而不按原文件配色；
@@ -510,8 +542,8 @@ hdc file send D:\data\sample.shp /data/app/el2/100/base/com.zys.globecore.harmon
   （对齐 MobileMap-android），首点即出点给出即时点击反馈。引擎与桥接层零改动。
 - **0.1.1.0**：新增 HarmonyOS NEXT 双平台支持（`globecore-harmonyos` 工程 + `build-scripts --target ohos`）；
   Android 侧仅 `Log.h` 平台分派适配，API/ABI/产物与 0.1.0.0 完全兼容；三方库版本未变更。
-  GitHub Release tag `v0.1.1.0` 与 Maven `com.zys:globecore:0.1.1.0` 发布随本次改造一并打点（发布流程
-  见 `.github/workflows/publish-maven.yml`）。
+  GitHub Release tag `v0.1.1.0` 与 Maven `com.zys:globecore:0.1.1.0` 发布随本次改造一并打点
+  （当时走 `.github/workflows/publish-maven.yml` 自动发布；该 workflow 现已移除，改为本地手工部署）。
 - **0.1.0.0**：Android 单平台首个正式版（AAR + Maven 仓 + prebuilt-libs 产物包）。
 
 ## 许可与第三方声明
