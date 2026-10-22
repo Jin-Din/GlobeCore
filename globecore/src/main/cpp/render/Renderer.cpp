@@ -1472,16 +1472,24 @@ bool Renderer::renderLayer(size_t layerIndex, double cwx, double cwy, double hw,
     // 露出深色清屏背景形成「黑边」。外扩后邻块重叠约 1px，彻底盖住缝隙；放大显示下拉伸 <0.5% 不可见。
     const float texelPad = tileWorld * (0.5f / 256.0f);
 
-    // 请求可见叶瓦片及其近段祖先链的纹理（异步，深度经 kAncestorChainDepth 限帽，不再无界追到 z0——
-    // 理由见文件顶部常量定义）。对齐 参考实现 沿金字塔路径 getTexture + retrieveTopLevelTiles 的兜底意图：
-    // 保证加载途中有祖先可拉伸、不露黑洞。getTexture 命中缓存即返回，不会重复请求。
+    // @Jin: 请求可见叶瓦片及其近段祖先链纹理（深度经 kAncestorChainDepth 限帽，不无限追到 z0）。
+    // @Jin: 对齐金字塔路径的兜底意图，保证加载途中有祖先可拉伸、不露黑洞。
+    // @Jin: getTexture/request 命中本地纹理或在途表时为廉价 no-op，不会重复请求。
+    // @Jin: 首屏先投递 z-2、再 z-1 祖先请求，让后台线程优先拿到少量粗瓦并快速铺满屏幕。
+    // @Jin: getTexture/request 内部按 key 去重，可见叶循环里重复计算同一父瓦只会成为廉价 no-op。
+    for (int k = kAncestorChainDepth; k >= 1; --k) {
+        const int ancestorLevel = level - k;
+        if (ancestorLevel < 0) continue;
+        for (int ty = tyMin; ty <= tyMax; ++ty) {
+            for (int tx = txMin; tx <= txMax; ++tx) {
+                getTexture(texMap, loader, ancestorLevel, tx >> k, ty >> k);
+            }
+        }
+    }
+    // @Jin: 粗瓦全部入队后再投递可见叶子；粗瓦完成后队列自动切到叶子，视觉上由完整低清变高清。
     for (int ty = tyMin; ty <= tyMax; ++ty) {
         for (int tx = txMin; tx <= txMax; ++tx) {
             getTexture(texMap, loader, level, tx, ty);
-            // 祖先链：level-1 .. level-kAncestorChainDepth；(tx,ty) 右移 k 位即第 k 级祖先的行列
-            for (int L = level - 1, k = 1; L >= 0 && k <= kAncestorChainDepth; --L, ++k) {
-                getTexture(texMap, loader, L, tx >> k, ty >> k);
-            }
         }
     }
 
@@ -1733,22 +1741,22 @@ bool Renderer::renderGlobeLayer3D(size_t layerIndex, const Navigator::Camera3D &
         }
     }
 
-    // 请求策略（对齐 参考实现「每枚可见叶都请求自身那一层级」）：
-    //  · 自身纹理：对「全部」可见叶请求（近景 z16、向地平线平滑降到粗级）——远景因此显示自己真正的影像，
-    //    而非被全球粗级(z=0..3)拉伸，这正是 参考实现 远景更清晰的根因（也是上一版「只请求近景 192 叶」致糊的教训）。
-    //  · 祖先链：仅对近景预算叶（z 降序前段）铺，作渐进加载期的兜底；链是数量倍增器，远景叶不铺链——
-    //    其祖先多为已被近景链铺过并缓存的共享粗级，findAncestorEntry 向上走即可命中。
-    // OOM 安全性：worker 仅 4 线程（在途下载天然 ≤4，等价 参考实现 RetrievalLanes 的并发闸），且 TileLoader.ready_
-    // 有高水位背压（超 kMaxReadyTiles 丢弃本次交付、字节已落盘下帧读盘秒得），故数千叶也不会撑爆 native 堆。
-    for (size_t i = 0; i < globeTilesScratch_.size(); ++i) {
-        const GlobeTile &t = globeTilesScratch_[i];
-        getTexture(texMap, loader, t.z, t.x, t.y);
-        if (i < leafBudget) {
-            // 祖先链同 2D：深度帽 kAncestorChainDepth（链本就是数量倍增器，见常量定义与下方请求策略注释）
-            for (int L = t.z - 1, k = 1; L >= 0 && k <= kAncestorChainDepth; --L, ++k) {
-                getTexture(texMap, loader, L, t.x >> k, t.y >> k);
+    // @Jin: 3D 请求策略：先对近景预算叶铺祖先粗瓦，再对全部可见叶请求自身纹理。
+    // @Jin: 自身纹理覆盖全部可见叶，使近景与远景都能逐步替换为真实影像；祖先链只给近景预算叶铺，避免数量倍增。
+    // @Jin: TileLoader 的在途去重、ready_ 高水位和按帧上传预算共同限制并发、内存与 GL 峰值。
+    // @Jin: 3D 首屏同样先投递近景叶集的祖先粗瓦（从更粗的 z-k 开始），避免 worker 先被零散高清叶占满。
+    for (int k = kAncestorChainDepth; k >= 1; --k) {
+        for (size_t i = 0; i < leafBudget; ++i) {
+            const GlobeTile &t = globeTilesScratch_[i];
+            const int ancestorLevel = t.z - k;
+            if (ancestorLevel >= 0) {
+                getTexture(texMap, loader, ancestorLevel, t.x >> k, t.y >> k);
             }
         }
+    }
+    // @Jin: 祖先粗瓦入队后再请求全部可见叶；近景叶变清晰，远景仍可复用共享祖先纹理。
+    for (const GlobeTile &t : globeTilesScratch_) {
+        getTexture(texMap, loader, t.z, t.x, t.y);
     }
 
     // Pass A 占位：无图且无祖先的瓦片画棋盘深色贴球面（首帧/断网时呈现球体轮廓）；

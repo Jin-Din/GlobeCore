@@ -237,23 +237,27 @@ void TileLoader::cancelPending() {
 void TileLoader::workerLoop() {
     while (true) {
         Request req{0, 0, 0};
+        bool preferCoarseOnlineTile = false;
+        {
+            std::lock_guard<std::mutex> urlLock(urlMtx_); // @Jin: 出队优先级只读取数据源类型，先拿 url 锁快照避免与 setUrlTemplate/setRasterSource 竞争。
+            preferCoarseOnlineTile = !urlTemplate_.empty() && rasterPath_.empty();
+        }
         {
             std::unique_lock<std::mutex> lk(mtx_);
             cv_.wait(lk, [this] { return stop_ || !queue_.empty(); });
             if (stop_) return;
             if (queue_.empty()) continue;
-            // 出队策略：级别最细（z 最大）优先，同级取最新（靠队尾）。
-            // 旧 LIFO 被祖先链反转成「最粗祖先最先处理」：叶子与其 z-1..0 链交替入队，LIFO 从队尾
-            // 取即最后入队的深层祖先，首屏被粗级巨瓦堵死（无塔栅格源低级别粗瓦源窗口≈整幅，
-            // 单块实测 6.4s/16.2s），用户真正在看的叶子最后才出。
-            // 现改为：当前可见级叶子先出先画（首屏秒开），粗级祖先自动让位空闲时间——即
-            // 「本层级读取完成后，后台再缓存其他层」；同级优先最新保留旧 LIFO 的手势跟手性
-            // （连续手势下同为新视角的当前级瓦排队尾，仍先于旧视角拿worker）。队首陈旧项
-            // 仍由 kMaxQueue 超限丢弃兜底。队列 ≤kMaxQueue(1200)，逐块线性扫描相对单块
-            // 毫秒～秒级的取字节耗时可忽。
+            // @Jin: 出队策略按数据源区分：在线标准 XYZ 首屏先取 z-1/z-2 祖先粗瓦，用少量瓦片快速铺满屏幕；
+            // @Jin: 粗瓦请求完成后会从队列消失，worker 自然转入可见级叶子，形成“先完整低清、再局部变清”。
+            // @Jin: 本地 GDAL 栅格仍保持最细叶子优先，因为无金字塔粗瓦可能触发整幅重投影，单块曾实测数秒以上。
+            // @Jin: 同级都取下标更大的新请求，保留连续手势期间当前视口优先的跟手性。
             size_t best = 0;
             for (size_t i = 1; i < queue_.size(); ++i) {
-                if (queue_[i].z >= queue_[best].z) best = i; // 同级：下标越大越新
+                if (preferCoarseOnlineTile) {
+                    if (queue_[i].z <= queue_[best].z) best = i; // @Jin: 在线图源低 z 优先，同级取更新。
+                } else {
+                    if (queue_[i].z >= queue_[best].z) best = i; // @Jin: 本地栅格高 z 优先，同级取更新。
+                }
             }
             req = queue_[best];
             queue_.erase(queue_.begin() + static_cast<std::ptrdiff_t>(best));
