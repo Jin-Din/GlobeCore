@@ -29,6 +29,8 @@ SDK**。
 | 底图 | 任意 XYZ 瓦片图源（`{z}/{x}/{y}` URL 模板）多层叠加；注记层透明混合置顶；超出图源最大级别拉伸末级纹理（无限放大不出 404 占位块）；URL 传空即纯离线读缓存 | `addTileLayer` |
 | 缓存 | 瓦片缓存双后端：`cacheDir` 以 `.mbtiles` 结尾走 SQLite **MBTiles 单文件**（WAL、标准 tiles/metadata 表、TMS y 翻转、扩展列 `added_at` 入库时间，老库自动 ALTER 补列），否则按 `<cacheDir>/<z>/<x>_<y>.tile` 目录落盘；2D/3D 纹理缓存同键复用；取瓦片走 native 后台线程池，就绪异步上屏 | 同上（`cacheDir`） |
 | 本地影像 | tif/img 等 GDAL 可打开格式，双通路：`addRasterLayer` native 重投影后按全球墨卡托即时切片并回写缓存复用（级别由栅格分辨率自动推算）；`addRasterImageLayer` 整幅直读单张贴图按 WGS84 四至贴面（UI 线程零 GDAL 立即返回，超 GL 纹理/内存帽沿 overviews 降采样，全幅 sidecar 磁盘缓存二次打开秒级就绪） | `addRasterLayer` / `addRasterImageLayer` |
+| 三维地形 | quantized-mesh v1.0 地形注入（宿主适配数据源，HAR 不绑定具体服务）：墨卡托引擎瓦片 ↔ Cesium 地理网格（EPSG:4326/TMS）由宿主换算 bbox，多块 DEM 按 bbox 全局共享覆盖；索引按规范 high-watermark 解码；DEM 逐帧削峰解码、地形瓦片静态 VBO（LRU），仅 3D 球体生效，2D 正交不抬升 | `setTerrainTile` / `clearTerrain` |
+| 瓦片调度 | 后台线程池取瓦片（先盘后网、原子写盘、失败冷却退避），GL 线程仅异步上传并按帧限额；视口代际（view-generation）在初始化/连续手势时丢弃过期排队与就绪结果、在途同 key 可被新视口复用，显著压低无效请求量与首屏抖动 | `addTileLayer` |
 | 矢量 | shp/kml/kmz/dwg/dxf 等 OGR 可打开格式**直读文件**→ 重投影 WGS84 → earcut 三角剖分；面填充/描边/线/点/图标 billboard/文字标注（字形图集，可复用系统 CJK 字体，零 APK 增量） | `addVectorLayer` / `VectorStyle` / `setFontPath` |
 | 大数据矢量 | 按屏幕范围增量重载（Swap-on-ready，重载期无空窗）、单次要素预算、加载中状态轮询、按级别隐藏、样式变更就地换层不闪图 | `updateVectorExtent` / `hasVectorLoading` / `setVectorMinLevel` / `setVectorLayerVisible` / `removeVectorLayer` |
 | 拾取与属性 | 单击命中 `[layerIndex, fid]`；回取要素 WGS84 几何用于选中高亮；屏幕点→经纬度（采集/测量加点）；范围过滤 + 字段白名单 + 几何简化读取、按 FID 全字段回取、属性 SQL 查询、要素计数、按 FID 写回源文件 | `pickVector` / `featureGeometry` / `screenToGeo` / `NativeVector` |
@@ -36,7 +38,7 @@ SDK**。
 | 定位标记 | 蓝点或自定义罗盘图标 + 方位角箭头，屏幕固定尺寸不随缩放，可由 1Hz 定位回调驱动 | `setLocationMarker` / `setLocationMarkerIcon` |
 | 坐标转换 | PROJ 任意 EPSG / PROJ 文本互转；`proj.db` 与格网改正数随模块分发（Android assets / 鸿蒙 rawfile），宿主一行初始化 | `NativeSrs.initProjData` / `convert` |
 | 数据元信息 | 文件四至（非 WGS84 自动重投影）、坐标系描述、字段名清单、GDAL 版本与已注册驱动清单 | `NativeLayerInfo` |
-| 交互手势 | 平移 / 捏合缩放（聚焦缩放）/ 单击取点 / 松手惯性滑行；双指旋转与双指俯仰（tilt，钳 [0,80]）仅 3D 生效，识别器可摘出复用 | `MapGestures` / `setOnTapListener` |
+| 交互手势 | 平移 / 捏合缩放（聚焦缩放）/ 单击取点 / 松手惯性滑行；双指旋转与双指俯仰（tilt，钳 [0,80]）仅 3D 生效，识别器可摘出复用；多指→单指切换/依次抬指不产生跳变（ArkTS 单指基准+宽限窗口钳制，native `panByPixels` 单帧阈值兜底，2D/3D 通用） | `MapGestures` / `setOnTapListener` |
 | 运行开销 | OpenGL ES 2.0；按需渲染（静止不重绘，省电）；门面方法只做 native 状态更新，可任意线程调用（含 Surface 创建前） | — |
 | 多平台 | 同一套 C++ 引擎源四侧共用（鸿蒙/桌面经 `GLOBECORE_ENGINE_ROOT` 直接引用，不复制不搬迁）：Android JNI/AAR，HarmonyOS NEXT NAPI/HAR，Windows/Linux Qt5 Widgets 可执行程序 | — |
 
@@ -521,6 +523,12 @@ cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build b
 
 ## 版本说明
 
+- **0.1.5.0（开发中，分支 `feature/terrain-pre`，未发版）**：三维地形、手势稳定性与瓦片调度专项——
+  ① **三维地形（quantized-mesh v1.0）**：新增宿主侧 DEM 注入通路 `setTerrainTile/clearTerrain`，引擎按服务瓦片真实 bbox 全局共享并采样多块 DEM（墨卡托渲染瓦片与 EPSG:4326 地理网格边界不重合，改单块粗 DEM 外推为四角/边中点收集全部相交服务瓦片）；`QuantizedMesh` 索引改按规范 **high-watermark** 解码（`index=highest-code; code==0 则 highest++`），修正此前山脊/沟谷整体错位；地形细分提升（24 分格/瓦片），DEM 解码在 GL 线程逐帧削峰（每帧 3 块、余留回队并驱动 WHEN_DIRTY 连续出帧），地形瓦片改 **静态 VBO + LRU512**、着色器以 `uRtcOffset/uTileCenter` 取代逐顶点 `uEye`，稳态浏览零顶点重建零重传；
+  ② **双指缩放抬手跳变修复**：根因为多指→单指切换时残余孤立的单帧巨幅 panBy（真机实测最大约 1643px）。ArkTS 识别器层（`MapGestures`）改为 Up 只删除抬起手指 id 而不全量重建手指表、单指独立平移基准、多指转单指 4 帧宽限窗口（60vp）与常规 100vp 单步钳制、fling 速度钳 6000vp/s 与 dt 钳 32ms；native `Navigator::panByPixels` 增加单帧 >200px 静默丢弃作 2D/3D 通用兜底；
+  ③ **瓦片请求与初始加载优化**：`TileLoader` 新增视口代际 `beginView(signature)`（2D 用可见范围签名、3D 用排序后可见瓦片集签名），视口集合不变的补帧保留队列、集合变化即丢弃未开工排队项与旧就绪字节，在途同 key 若仍被新视口需要则升级代际复用，`drainReady` 只接收当前代际、单帧 32 张上传预算不被旧视口抢占，`hasPendingOrReady` 计入在途任务；在线瓦片层 worker 调为 6、祖先链深度收敛为 2，并增加 cache/network/failed 聚合统计日志。真机（清空缓存冷启动）单层瓦片由约 965 块（横跨 z8~13）降至 204 块（z13 叶 + 两级祖先），二次启动全部命中磁盘缓存（network=0）；
+  ④ **鸿蒙 LITE 构建**：新增 `ohos/lite_gdal_stubs.cpp`，在 `GLOBECORE_LITE=ON` 下以最小桩替代 GDAL/PROJ/KML 依赖链，并补齐对应 CMake 源清单、NAPI 桥接与 `index.d.ts` 声明。
+  > 维护约定：**每次改动定稿后同步更新本版本说明**（与代码提交同批），未发版工作累积在本条，发版时再改版本号与“当前发布”标记。
 - **0.1.4.0（当前发布）**：三项合入——
   ① **GeoPackage 工程读写**：新增 `bridge/geopackage_io.cpp`，OGR GPKG 驱动实现工程文件（七表：tracks / measures / photos / media_groups / survey_plots / project_meta / layer_refs）整体读写，Kotlin/ArkTS 侧以 JSON 跨桥传输；写入整文件 tmp+rename **原子替换**，五张要素表 **SetFID 落盘**使记录 id 持久化（重写不重编号），读侧缺列宽容回退、写侧整文件重建自动升级 schema；
   ② **着色器精度修复**：顶点着色器中 `vNormal`/`vViewDir` 归一化移至顶点阶段，避免 `mediump` varying 插值大数值 ECEF 坐标丢精度，修复真机 3D 光照无明暗过渡问题（模拟器 SwiftShader 不受影响）；
