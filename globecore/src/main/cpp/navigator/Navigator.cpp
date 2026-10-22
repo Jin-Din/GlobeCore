@@ -193,6 +193,20 @@ bool Navigator::screenToGeo3DUnlocked(double sxPx, double syPx, double &outLonDe
 void Navigator::panByPixels(double dxPx, double dyPx) {
     std::lock_guard<std::mutex> lk(mtx_);
     if (viewportWidth_ <= 0 || viewportHeight_ <= 0) return;
+    // @Jin 【双指缩放抬手跳变·native 硬钳制】真机日志确认：缩放收尾会混入一次孤立的异常
+    // 单帧平移（实测 dx/dy 高达 524/620/710px，紧随其后即恢复到 1px 级），把视野猛推
+    // （放大上跳、缩小下跳）。真实手指一帧(~16ms)位移物理上不可能超过数百像素，无论该异常
+    // 来自多指切换的坐标残留、fling 还是上层时序问题，这里作为最终防线直接拒绝整次平移。
+    // 正常快速甩动单帧约 30~70px、fling 单帧 v·dt 也远低于此，故阈值不影响任何合法手势。
+    // @Jin 单帧平移硬上限：真机确认双指手势收尾会混入一次孤立的异常平移（实测 200~1643px，
+    // 2D/3D 均现），把视野猛推（放大上跳、缩小下跳）。其源头是多指切换/fling 的坐标或速度采样
+    // 异常，已在 ArkTS 手势层（单帧 150vp 钳制 + fling 速度/帧间隔上限）治理；此处为最终防线，
+    // 任何单帧超过 200px 的平移直接丢弃。正常拖动单帧仅几~几十 px、最快甩动 fling 单步也远低于
+    // 此值（fling 速度已钳 6000vp/s × 32ms ≈ 192px），不影响任何合法手势。
+    constexpr double kMaxPanDeltaPerFramePx = 200.0;
+    if (std::abs(dxPx) > kMaxPanDeltaPerFramePx || std::abs(dyPx) > kMaxPanDeltaPerFramePx) {
+        return;
+    }
     if (mode_ == ViewMode::MODE_3D) {
         // 3D：把像素位移按「地面米/像素」换算为中心经纬度角位移，绕球滚动（地图跟随手指）。
         // 地面分辨率沿用近正下视角口径：mPerPx = 2·alt·tan(fov/2)/视口高（与 zoom 换算一致）。

@@ -44,11 +44,49 @@ if(NOT DEFINED GLOBECORE_THIRD_PARTY_DIR)
             "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../build-scripts/out/ohos" ABSOLUTE)
 endif()
 set(OHOS_LIBS_DIR ${GLOBECORE_THIRD_PARTY_DIR}/${GLOBECORE_ABI})
+# 布局兼容：上游 build-scripts 把 .a 平铺到 <abi>/，而本地 build-ohos-deps-win.sh 采用
+# install 惯例落在 <abi>/lib/。两个布局都支持，省去手工搬文件。
+if(NOT EXISTS ${OHOS_LIBS_DIR}/libcurl.a AND EXISTS ${OHOS_LIBS_DIR}/lib/libcurl.a)
+    set(OHOS_LIBS_DIR ${OHOS_LIBS_DIR}/lib)
+endif()
+message(STATUS "globecore-harmonyos: OHOS_LIBS_DIR=${OHOS_LIBS_DIR}")
 
+# 注意：curl/sqlite/minizip/expat/z 在 LITE 与非 LITE 下都需要；
+# gdal/proj/kml×6/uriparser 仅非 LITE 需要（LITE 下产物目录里可能根本没有，故一并跳过定义）
 add_library(curl STATIC IMPORTED)
 set_target_properties(curl PROPERTIES IMPORTED_LOCATION ${OHOS_LIBS_DIR}/libcurl.a)
+
+# curl 的 TLS 后端 mbedTLS。两点必须注意：
+# ① 链接顺序：静态库按命令行出现次序解析未定义符号，libcurl.a 引用 mbedtls_*，
+#    所以这三个库必须排在 curl 之后（见下方 GC_3RD_LIBS），放前面会 undefined symbol。
+#    三者内部依赖为 mbedtls → mbedx509 → mbedcrypto，故按此序排列。
+# ② 条件引入：curl 若以 CURL_USE_SSL=OFF 编译（无 TLS 后端），这三个 .a 根本不会产出，
+#    此时直接 add_library 会让 CMake 配置失败。故按文件存在性决定，两种 curl 都能编过。
+set(GC_MBEDTLS_LIBS "")
+foreach(_mb mbedtls mbedx509 mbedcrypto)
+    if(EXISTS ${OHOS_LIBS_DIR}/lib${_mb}.a)
+        add_library(${_mb} STATIC IMPORTED)
+        set_target_properties(${_mb} PROPERTIES IMPORTED_LOCATION ${OHOS_LIBS_DIR}/lib${_mb}.a)
+        list(APPEND GC_MBEDTLS_LIBS ${_mb})
+    endif()
+endforeach()
+if(GC_MBEDTLS_LIBS)
+    message(STATUS "globecore-harmonyos: curl TLS backend = mbedTLS (${GC_MBEDTLS_LIBS})")
+else()
+    message(WARNING "globecore-harmonyos: 未找到 mbedTLS —— curl 大概率是无 SSL 编译的，"
+            "所有 https:// 请求会以 CURLE_UNSUPPORTED_PROTOCOL 失败（底图将取不到）")
+endif()
+
 add_library(sqlite STATIC IMPORTED)
 set_target_properties(sqlite PROPERTIES IMPORTED_LOCATION ${OHOS_LIBS_DIR}/libsqlite3.a)
+add_library(minizip STATIC IMPORTED)
+set_target_properties(minizip PROPERTIES IMPORTED_LOCATION ${OHOS_LIBS_DIR}/libminizip.a)
+add_library(expatstatic STATIC IMPORTED)
+set_target_properties(expatstatic PROPERTIES IMPORTED_LOCATION ${OHOS_LIBS_DIR}/libexpat.a)
+add_library(zstatic STATIC IMPORTED)
+set_target_properties(zstatic PROPERTIES IMPORTED_LOCATION ${OHOS_LIBS_DIR}/libz.a)
+
+if(NOT GLOBECORE_LITE)
 add_library(proj STATIC IMPORTED)
 set_target_properties(proj PROPERTIES IMPORTED_LOCATION ${OHOS_LIBS_DIR}/libproj.a)
 add_library(gdal STATIC IMPORTED)
@@ -67,12 +105,41 @@ add_library(kmlregionator STATIC IMPORTED)
 set_target_properties(kmlregionator PROPERTIES IMPORTED_LOCATION ${OHOS_LIBS_DIR}/libkmlregionator.a)
 add_library(uriparser STATIC IMPORTED)
 set_target_properties(uriparser PROPERTIES IMPORTED_LOCATION ${OHOS_LIBS_DIR}/liburiparser.a)
-add_library(minizip STATIC IMPORTED)
-set_target_properties(minizip PROPERTIES IMPORTED_LOCATION ${OHOS_LIBS_DIR}/libminizip.a)
-add_library(expatstatic STATIC IMPORTED)
-set_target_properties(expatstatic PROPERTIES IMPORTED_LOCATION ${OHOS_LIBS_DIR}/libexpat.a)
-add_library(zstatic STATIC IMPORTED)
-set_target_properties(zstatic PROPERTIES IMPORTED_LOCATION ${OHOS_LIBS_DIR}/libz.a)
+endif() # NOT GLOBECORE_LITE
+
+# ==================== LITE 构建开关（feature/terrain-pre）====================
+# ON = 裁掉 GDAL / PROJ / libkml 依赖链，只保留「在线瓦片 + 三维地形」所需能力。
+#
+# 为什么需要：GDAL 3.7 + PROJ 9 交叉编译成本高（依赖链长、耗时长），而地形验证与在线底图
+# 完全不经过 GDAL。引擎的分层恰好支持这种裁剪——依赖 GDAL/PROJ 的只有下面 8 个 .cpp，
+# 头文件（RasterRenderer.h / VectorReader.h / GdalBootstrap.h / bridge_api.h）全是纯 std 声明，
+# 不含任何 gdal/proj 头。因此 LITE 下不编这 8 个文件、不链对应 .a，改由
+# ohos/lite_gdal_stubs.cpp 提供同名符号的「不可用」实现，调用方零改动。
+#
+# 代价（LITE 下不可用）：本地矢量文件（shp/geojson 文件/kml/dwg）直读、本地 GeoTIFF/img
+# 栅格直读、PROJ 坐标系变换、GDAL 版本/驱动查询。在线瓦片、MVT 矢量瓦片、三维地形均不受影响。
+#
+# 开启方式：hvigor library/build-profile.json5 → externalNativeOptions.arguments 追加
+#           "-DGLOBECORE_LITE=ON"，或命令行自行 cmake 时传入。
+option(GLOBECORE_LITE "裁剪 GDAL/PROJ/KML 依赖链（仅在线瓦片+三维地形）" OFF)
+
+if(GLOBECORE_LITE)
+    message(STATUS "globecore-harmonyos: GLOBECORE_LITE=ON —— 禁用 GDAL/PROJ/KML，改用 lite_gdal_stubs")
+    set(GC_GDAL_SOURCES ohos/lite_gdal_stubs.cpp)
+else()
+    set(GC_GDAL_SOURCES
+            # GDAL 引导 + OGR 矢量读取 + KML 样式
+            ${GLOBECORE_ENGINE_ROOT}/vector/GdalBootstrap.cpp
+            ${GLOBECORE_ENGINE_ROOT}/vector/VectorReader.cpp
+            ${GLOBECORE_ENGINE_ROOT}/vector/KmlStyle.cpp
+            # 栅格渲染器（GDAL 重投影即时生成瓦片 PNG）
+            ${GLOBECORE_ENGINE_ROOT}/raster/RasterRenderer.cpp
+            # 数据 IO 桥核心（PROJ/GDAL）
+            ${GLOBECORE_ENGINE_ROOT}/bridge/srs.cpp
+            ${GLOBECORE_ENGINE_ROOT}/bridge/gdal_info.cpp
+            ${GLOBECORE_ENGINE_ROOT}/bridge/layer_info.cpp
+            ${GLOBECORE_ENGINE_ROOT}/bridge/vector_io.cpp)
+endif()
 
 add_library(${CMAKE_PROJECT_NAME} SHARED
         # ── 鸿蒙专属源（承担 Android 上 GLSurfaceView + JNI_OnLoad 的职责）──
@@ -117,10 +184,7 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         ${GLOBECORE_ENGINE_ROOT}/layer/RasterImageLoader.cpp
         # 网络取瓦片（libcurl 封装）
         ${GLOBECORE_ENGINE_ROOT}/net/HttpClient.cpp
-        # GDAL 引导 + OGR 矢量读取 + KML 样式 + 几何构建
-        ${GLOBECORE_ENGINE_ROOT}/vector/GdalBootstrap.cpp
-        ${GLOBECORE_ENGINE_ROOT}/vector/VectorReader.cpp
-        ${GLOBECORE_ENGINE_ROOT}/vector/KmlStyle.cpp
+        # 几何构建（GdalBootstrap/VectorReader/KmlStyle 见 GC_GDAL_SOURCES，LITE 下由桩替代）
         ${GLOBECORE_ENGINE_ROOT}/vector/VectorBuilder.cpp
         # MVT/PBF 矢量瓦片解码器（手写 protobuf wire-format）
         ${GLOBECORE_ENGINE_ROOT}/vector/MvtDecoder.cpp
@@ -128,8 +192,6 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         ${GLOBECORE_ENGINE_ROOT}/vector/MapboxStyle.cpp
         # 轻量 JSON 解析器（无外部依赖，递归下降）
         ${GLOBECORE_ENGINE_ROOT}/util/JsonParser.cpp
-        # 栅格渲染器（GDAL 重投影即时生成瓦片 PNG）
-        ${GLOBECORE_ENGINE_ROOT}/raster/RasterRenderer.cpp
         # OpenGL ES 渲染器、着色器、纹理、图片解码、字形图集
         ${GLOBECORE_ENGINE_ROOT}/render/Renderer.cpp
         ${GLOBECORE_ENGINE_ROOT}/render/ShaderProgram.cpp
@@ -138,11 +200,8 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         # KTX2/ETC2/ASTC 纹理压缩解码
         ${GLOBECORE_ENGINE_ROOT}/render/Ktx2Decoder.cpp
         ${GLOBECORE_ENGINE_ROOT}/render/FontAtlas.cpp
-        # 数据 IO 桥核心（PROJ/GDAL）：JNI 导出段在 __OHOS__ 下编译为空，仅余 gcbridge 核心
-        ${GLOBECORE_ENGINE_ROOT}/bridge/srs.cpp
-        ${GLOBECORE_ENGINE_ROOT}/bridge/gdal_info.cpp
-        ${GLOBECORE_ENGINE_ROOT}/bridge/layer_info.cpp
-        ${GLOBECORE_ENGINE_ROOT}/bridge/vector_io.cpp)
+        # GDAL/PROJ 依赖源（LITE 下替换为 lite_gdal_stubs.cpp 桩）
+        ${GC_GDAL_SOURCES})
 
 # XComponent 桩生成器感知：本目标直接产出全量引擎库，无需 "世界窗口" 桩 .so
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE GLOBECORE_LIBRARY_FULL)
@@ -160,6 +219,30 @@ find_library(gles-lib libGLESv3.so)
 # hilog_ndk：Log.h 鸿蒙分支。GDAL 依赖链顺序参照 Android：gdal 在其依赖之前。
 # curl.a 内置 zlib 与 libz.a 并存的重复符号：静态归档择一解析，hidden 可见性已隔离对外符号；
 # OHOS 链接器对多重定义默认报错，追加 --allow-multiple-definition 兜底（与 Android lld 行为一致）。
+if(GLOBECORE_LITE)
+    # LITE：在线瓦片 + 三维地形所需最小集合（curl 负责取瓦片与 DEM，sqlite 供 MBTiles）
+    # ${GC_MBEDTLS_LIBS} 紧跟 curl：curl 的 TLS 后端，顺序不可调换（详见上方定义处注释）
+    set(GC_3RD_LIBS curl ${GC_MBEDTLS_LIBS} sqlite minizip expatstatic zstatic)
+else()
+    # 完整：GDAL 依赖链顺序参照 Android——gdal 在其依赖之前
+    set(GC_3RD_LIBS
+            curl
+            ${GC_MBEDTLS_LIBS}
+            gdal
+            proj
+            sqlite
+            kmlengine
+            kmldom
+            kmlbase
+            kmlxsd
+            kmlconvenience
+            kmlregionator
+            uriparser
+            minizip
+            expatstatic
+            zstatic)
+endif()
+
 target_link_libraries(${CMAKE_PROJECT_NAME}
         ${egl-lib}
         ${gles-lib}
@@ -168,20 +251,7 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
         ${native-window-lib}
         ${native-buffer-lib}
         ${hilog-lib}
-        curl
-        gdal
-        proj
-        sqlite
-        kmlengine
-        kmldom
-        kmlbase
-        kmlxsd
-        kmlconvenience
-        kmlregionator
-        uriparser
-        minizip
-        expatstatic
-        zstatic
+        ${GC_3RD_LIBS}
         m
         pthread)
 

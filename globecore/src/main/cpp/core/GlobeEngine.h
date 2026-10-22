@@ -276,7 +276,12 @@ public:
     /// 下帧 buildGlobeTileMesh 在生成该瓦片球面网格时逐顶点采样高度（替代 alt=0 贴地）。
     /// [bytes] 为空则清除该 tile 缓存。须在 GL 线程调用（转发到 Renderer，非线程安全）。
     /// 未注入 DEM 的瓦片保持 alt=0 贴地（零开销，向后兼容）。
-    void setTerrainTile(int z, int x, int y, const std::vector<uint8_t> &bytes);
+    ///
+    /// 【feature/terrain-pre】新增四至参数，语义见 Renderer::setTerrainTile：
+    /// (z,x,y) 是本引擎瓦片网格的缓存键；四至是该地形数据真实覆盖的经纬度范围。
+    /// 标准 quantized-mesh header 不含 bbox，必须由调用方给出。
+    void setTerrainTile(int z, int x, int y, const std::vector<uint8_t> &bytes,
+                        double lonMin, double latMin, double lonMax, double latMax);
 
     /// 清除全部地形缓存（换地形源/上下文重建时调用）。
     void clearTerrain();

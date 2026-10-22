@@ -483,6 +483,38 @@ export class NativeLib {
     }
   }
 
+  // ── 三维地形（feature/terrain-pre）──
+
+  /**
+   * 注入一块 Cesium quantized-mesh v1.0 地形瓦片。
+   *
+   * @param z/x/y   【本引擎瓦片网格】编号 —— 渲染时按 tileKey(z,x,y) 查地形缓存，必须与底图
+   *                瓦片编号一致，否则查不到（表现为该块仍是平的）。
+   * @param bytes   下载的 .terrain 原始字节；传空数组 = 删除该块。
+   * @param bbox    [lonMin, latMin, lonMax, latMax] 该块数据真实覆盖的经纬度四至（度）。
+   *                标准 quantized-mesh header 不含 bbox，必须由调用方按地形服务的分块方案算出；
+   *                当服务网格与引擎网格不同（如 Cesium 地理网格 vs 引擎墨卡托网格）时，
+   *                z/x/y 用引擎编号、四至用服务编号算出的真实范围即可正确采样。
+   *
+   * 线程：可任意线程调用（native 侧只入队，GL 线程下一帧帧首落到地形缓存）。
+   * 仅 3D 球体模式消费地形；2D 平面网格不做高度采样。
+   */
+  static nativeSetTerrainTile(handle: number, z: number, x: number, y: number, bytes: Uint8Array,
+    bbox: number[]): void {
+    if (handle === 0 || bbox.length < 4) {
+      return;
+    }
+    gc.nativeSetTerrainTile(handle, z, x, y, bytes, bbox[0], bbox[1], bbox[2], bbox[3]);
+  }
+
+  /** 清空全部地形缓存（换地形源 / 关闭地形时调用） */
+  static nativeClearTerrain(handle: number): void {
+    if (handle === 0) {
+      return;
+    }
+    gc.nativeClearTerrain(handle);
+  }
+
   // ── PROJ / GDAL 桥（bridge 导出的直通包装，门面见 NativeSrs/NativeLayerInfo/NativeVector）──
 
   static nativeGetProjVersion(): number {

@@ -29,9 +29,40 @@ namespace globecore {
 // 祖先链请求深度帽：叶子只向上请求 4 级。更深的祖先拉伸 >16× 已无兜底价值，而链条请求数是
 // 数量倍增器；尤其无金字塔栅格源，低级别粗瓦源窗口≈整幅（单块秒级～十几秒），砍深度直接减掉
 // 每片叶子的重复全幅读。配合 TileLoader「最细级优先出队」：可见级先出图，祖先垫后且仅 4 级。
-constexpr int kAncestorChainDepth = 4;
+// @Jin: 祖先瓦片只兜底最近 2 级，保留缩放过渡期垫图，同时减少首次浏览时的额外请求量。
+constexpr int kAncestorChainDepth = 2;
 
 namespace {
+
+// @Jin: FNV-1a 视口签名：只把“最终需要的瓦片集合”编码给 TileLoader，集合不变时保留补帧队列，集合变化时立即废弃旧请求。
+uint64_t mixTileViewValue(uint64_t hash, uint64_t value) {
+    hash ^= value;
+    hash *= 1099511628211ULL;
+    return hash;
+}
+
+uint64_t tileViewSignature2D(int level, int txMin, int txMax, int tyMin, int tyMax) {
+    uint64_t hash = 14695981039346656037ULL;
+    hash = mixTileViewValue(hash, 0x32442031ULL); // @Jin: 固定盐值，区分 2D 视口与 3D 瓦片集。
+    hash = mixTileViewValue(hash, static_cast<uint64_t>(level));
+    hash = mixTileViewValue(hash, static_cast<uint64_t>(txMin));
+    hash = mixTileViewValue(hash, static_cast<uint64_t>(txMax));
+    hash = mixTileViewValue(hash, static_cast<uint64_t>(tyMin));
+    hash = mixTileViewValue(hash, static_cast<uint64_t>(tyMax));
+    return hash;
+}
+
+uint64_t tileViewSignature3D(const std::vector<GlobeTile> &tiles) {
+    uint64_t hash = 14695981039346656037ULL;
+    hash = mixTileViewValue(hash, 0x33442031ULL); // @Jin: 固定盐值，区分 3D 视口与 2D 范围。
+    hash = mixTileViewValue(hash, static_cast<uint64_t>(tiles.size()));
+    for (const GlobeTile &t : tiles) {
+        hash = mixTileViewValue(hash, static_cast<uint64_t>(t.z));
+        hash = mixTileViewValue(hash, static_cast<uint64_t>(t.x));
+        hash = mixTileViewValue(hash, static_cast<uint64_t>(t.y));
+    }
+    return hash;
+}
 
 // ── 占位（纯色）着色器：世界坐标顶点 + 颜色，正交投影输出 ──────────────────────
 // uOffset 为 RTC 偏移：矢量顶点存为「相对图层原点」的 float32，着色器做 aPos+uOffset 还原到
@@ -211,15 +242,17 @@ attribute vec2 aTexCoord;
 uniform mat4 uMvp;
 uniform vec2 uUvOffset;
 uniform vec2 uUvScale;
-uniform vec3 uEye;
+uniform vec3 uRtcOffset;   // @Jin 瓦片中心 ECEF − eye：局部坐标还原为眼点相对坐标（唯一逐帧变化量）
+uniform vec3 uTileCenter;  // @Jin 瓦片中心 ECEF：aPos 是相对瓦片中心的静态局部坐标
 varying vec2 vTexCoord;
 varying vec3 vNormal;
 varying vec3 vViewDir;
 void main() {
-    gl_Position = uMvp * vec4(aPos, 1.0);
+    vec3 rtc = aPos + uRtcOffset; // @Jin 眼点相对坐标；静态 VBO + uniform 平移，缓冲零重传
+    gl_Position = uMvp * vec4(rtc, 1.0);
     vTexCoord = uUvOffset + aTexCoord * uUvScale;
-    vNormal = normalize(aPos + uEye);   // 球面法向（表面 ECEF 方向），顶点阶段归一化避免 mediump 插值丢精度
-    vViewDir = normalize(-aPos);        // 表面→眼点的视线方向，同上
+    vNormal = normalize(aPos + uTileCenter); // 球面法向（表面 ECEF 方向），顶点阶段归一化防 mediump 丢精度
+    vViewDir = normalize(-rtc);              // 表面→眼点的视线方向
 }
 )GLSL";
 
@@ -251,15 +284,17 @@ const char *const kGlobeColorVertexSrc = R"GLSL(
 attribute vec3 aPos;
 attribute vec4 aColor;
 uniform mat4 uMvp;
-uniform vec3 uEye;
+uniform vec3 uRtcOffset;  // @Jin 同纹理通路：瓦片中心 ECEF − eye
+uniform vec3 uTileCenter; // @Jin 瓦片中心 ECEF（求法向）
 varying vec4 vColor;
 varying vec3 vNormal;
 varying vec3 vViewDir;
 void main() {
-    gl_Position = uMvp * vec4(aPos, 1.0);
+    vec3 rtc = aPos + uRtcOffset; // @Jin 静态局部坐标 → 眼点相对坐标
+    gl_Position = uMvp * vec4(rtc, 1.0);
     vColor = aColor;
-    vNormal = aPos + uEye;
-    vViewDir = -aPos;
+    vNormal = aPos + uTileCenter;
+    vViewDir = -rtc;
 }
 )GLSL";
 
@@ -1007,6 +1042,10 @@ void Renderer::onSurfaceCreated() {
     vboText_ = 0;
     vboIcon_ = 0;
     vboGlobeMesh_ = 0; // 3D 网格动态 VBO 属旧上下文：放弃句柄，下帧逐瓦片重传
+    // @Jin 瓦片静态 VBO 同样属旧上下文：只放弃 GL 句柄（不能 glDelete，旧上下文已销毁），
+    // 清空缓存表，下帧随 acquireTileGlobeMesh 在新上下文重建。
+    for (auto &cached : tileGlobeMesh_) cached.second.vbo = 0;
+    tileGlobeMesh_.clear();
     // 矢量层 GL 资源同样属于旧上下文，已失效：清零 VBO 句柄 + glReady（保留 CPU 几何），
     // 下一帧据 geom 重新上传（与瓦片纹理/VBO 重建同一口径，避免绑失效 VBO 导致崩溃）。
     resetVectorGl();
@@ -1115,7 +1154,8 @@ void Renderer::onSurfaceCreated() {
         g3UTexture_ = globeTexProgram_.uniformLocation("uTexture");
         g3UUvOffset_ = globeTexProgram_.uniformLocation("uUvOffset");
         g3UUvScale_ = globeTexProgram_.uniformLocation("uUvScale");
-        g3UEye_ = globeTexProgram_.uniformLocation("uEye");
+        g3URtcOffset_ = globeTexProgram_.uniformLocation("uRtcOffset");
+    g3UTileCenter_ = globeTexProgram_.uniformLocation("uTileCenter");
         g3USunDir_ = globeTexProgram_.uniformLocation("uSunDir");
         g3UAmbient_ = globeTexProgram_.uniformLocation("uAmbient");
     }
@@ -1125,7 +1165,8 @@ void Renderer::onSurfaceCreated() {
         gc3APos_ = globeColorProgram_.attribLocation("aPos");
         gc3AColor_ = globeColorProgram_.attribLocation("aColor");
         gc3UMvp_ = globeColorProgram_.uniformLocation("uMvp");
-        gc3UEye_ = globeColorProgram_.uniformLocation("uEye");
+        gc3URtcOffset_ = globeColorProgram_.uniformLocation("uRtcOffset");
+    gc3UTileCenter_ = globeColorProgram_.uniformLocation("uTileCenter");
         gc3USunDir_ = globeColorProgram_.uniformLocation("uSunDir");
         gc3UAmbient_ = globeColorProgram_.uniformLocation("uAmbient");
     }
@@ -1319,8 +1360,12 @@ void Renderer::discardRemovedLayerTextures() {
 }
 
 bool Renderer::onDrawFrame() {
+    // 地形注入：先把非 GL 线程排入的 DEM 数据落到 terrainCache_（GL 线程独占写）
+    // 置于最前，2D/3D 两条通路都能在同一帧内看到新注入的地形。
+    const bool moreTerrain = drainTerrainPending();
     // 视图模式分发：3D 球体走独立管线（透视+深度+贴球网格，复用瓦片纹理缓存），2D 正交通路零回归
-    if (nav_.viewMode() == Navigator::ViewMode::MODE_3D) return onDrawFrame3D();
+    // @Jin 还有待解码 DEM 时强制再请一帧（仅 3D 注入地形），保证分批解码在按需渲染下不中断。
+    if (nav_.viewMode() == Navigator::ViewMode::MODE_3D) return onDrawFrame3D() || moreTerrain;
     // #9 RHI：经后端抽象清除颜色缓冲（GLES2Backend 内 glClear(GL_COLOR_BUFFER_BIT)）
     if (rhi_) rhi_->clear(RHI_CLEAR_COLOR); else glClear(GL_COLOR_BUFFER_BIT);
     if (colorProgram_.program() == 0 || texProgram_.program() == 0) return false;
@@ -1386,25 +1431,6 @@ bool Renderer::renderLayer(size_t layerIndex, double cwx, double cwy, double hw,
     TileLoader &loader = *layer.loader;
     TexMap &texMap = layerTextures_[layerIndex];
 
-    // 交付后台下载就绪的瓦片：上传到本层持久缓存（不按级别过滤，供当前级与祖先兜底复用）。
-    // 解码已在 worker 线程完成（TileLoader::workerLoop），GL 线程只做 glTexImage2D 上传；
-    // 限制单帧上传量：一批瓦片同时就绪时若全部在本帧上传会集中占用 GL 线程造成掉帧，
-    // 取预算内的量、其余留到后续帧渐进补齐，缩放时表现为「由粗到细」连续变清晰。
-    {
-        constexpr int kMaxDecodePerFrame = 12;
-        std::vector<TileLoader::ReadyTile> ready;
-        loader.drainReady(ready, kMaxDecodePerFrame);
-        for (auto &rt : ready) {
-            if (rt.width <= 0 || rt.height <= 0 || rt.rgba.empty()) continue;
-            Texture tex;
-            if (!tex.uploadRGBA(rt.rgba.data(), rt.width, rt.height)) continue;
-            TileTexEntry &e = texMap[tileKey(rt.z, rt.x, rt.y)];
-            e.tex.release(); // 若已有占位/旧纹理，先释放再替换
-            e.tex = std::move(tex);
-            e.lastUsed = frameTick_;
-        }
-    }
-
     // LOD 叶级别：按本层图源 maxLevel 逐层钳制（zoom 超过后恒为 maxLevel，由投影拉伸末级瓦片纹理）。
     const int level = nav_.tileLevel(layer.maxLevel);
 
@@ -1415,6 +1441,29 @@ bool Renderer::renderLayer(size_t layerIndex, double cwx, double cwy, double hw,
         evictTileTextures(texMap);
         return loader.hasPendingOrReady();
     }
+    // @Jin: 先按本帧可见范围建立视口代际，再接收就绪瓦片，防止相机初始化过程中的旧视口结果抢占网络和 GL 上传预算。
+    loader.beginView(tileViewSignature2D(level, txMin, txMax, tyMin, tyMax));
+
+    // @Jin: 交付后台下载就绪的瓦片：上传到本层持久缓存（不按级别过滤，供当前级与祖先兜底复用）。
+    // 解码已在 worker 线程完成（TileLoader::workerLoop），GL 线程只做 glTexImage2D 上传；
+    // 限制单帧上传量：一批瓦片同时就绪时若全部在本帧上传会集中占用 GL 线程造成掉帧，
+    // 取预算内的量、其余留到后续帧渐进补齐，缩放时表现为「由粗到细」连续变清晰。
+    {
+        // @Jin: 提高单帧上传预算，让首批瓦片从“逐块蹦出”改为更快整屏补齐；后续需真机观察帧率。
+        constexpr int kMaxDecodePerFrame = 32;
+        std::vector<TileLoader::ReadyTile> ready;
+        loader.drainReady(ready, kMaxDecodePerFrame);
+        for (auto &rt : ready) {
+            if (rt.width <= 0 || rt.height <= 0 || rt.rgba.empty()) continue;
+            Texture tex;
+            if (!tex.uploadRGBA(rt.rgba.data(), rt.width, rt.height)) continue;
+            TileTexEntry &e = texMap[tileKey(rt.z, rt.x, rt.y)];
+            e.tex.release(); // @Jin: 若已有占位/旧纹理，先释放再替换。
+            e.tex = std::move(tex);
+            e.lastUsed = frameTick_;
+        }
+    }
+
 
     const double n = static_cast<double>(TileMatrix::tilesAtLevel(level));
     const float tileWorld = static_cast<float>(1.0 / n);
@@ -1641,23 +1690,6 @@ bool Renderer::renderGlobeLayer3D(size_t layerIndex, const Navigator::Camera3D &
     TileLoader &loader = *layer.loader;
     TexMap &texMap = layerTextures_[layerIndex];
 
-    // drain 就绪瓦片上传（与 2D renderLayer 同预算）：纹理缓存按 (z,x,y) 键共用，
-    // 2D 下载的瓦片切 3D 直接命中，反之亦然；解码已在 worker 线程完成，单帧上传限额防 GL 线程尖峰。
-    {
-        constexpr int kMaxDecodePerFrame = 12;
-        std::vector<TileLoader::ReadyTile> ready;
-        loader.drainReady(ready, kMaxDecodePerFrame);
-        for (auto &rt : ready) {
-            if (rt.width <= 0 || rt.height <= 0 || rt.rgba.empty()) continue;
-            Texture tex;
-            if (!tex.uploadRGBA(rt.rgba.data(), rt.width, rt.height)) continue;
-            TileTexEntry &e = texMap[tileKey(rt.z, rt.x, rt.y)];
-            e.tex.release();
-            e.tex = std::move(tex);
-            e.lastUsed = frameTick_;
-        }
-    }
-
     // 可见叶瓦片：目标级别与 2D LOD 同源（tileLevel(maxLevel) 保切换时地物粗细连续），
     // 更远处（地平线/背面）由 Tessellator 按屏幕空间误差自动取粗级；墨卡托 (z,x,y) 键与 2D 互通。
     const int targetLevel = nav_.tileLevel(layer.maxLevel);
@@ -1680,6 +1712,27 @@ bool Renderer::renderGlobeLayer3D(size_t layerIndex, const Navigator::Camera3D &
                      [](const GlobeTile &a, const GlobeTile &b) { return a.z > b.z; });
     const size_t leafBudget = std::min(globeTilesScratch_.size(), kGlobeLeafRequestBudget);
 
+    // @Jin: 3D 可见叶集稳定排序后再生成签名；同一组瓦片的补帧不清队列，相机移动导致集合变化时立即取消旧排队项。
+    loader.beginView(tileViewSignature3D(globeTilesScratch_));
+
+    // @Jin: drain 就绪瓦片上传（与 2D renderLayer 同预算）：纹理缓存按 (z,x,y) 键共用，
+    // 2D 下载的瓦片切 3D 直接命中，反之亦然；解码已在 worker 线程完成，单帧上传限额防 GL 线程尖峰。
+    {
+        // @Jin: 提高单帧上传预算，让首批瓦片从“逐块蹦出”改为更快整屏补齐；后续需真机观察帧率。
+        constexpr int kMaxDecodePerFrame = 32;
+        std::vector<TileLoader::ReadyTile> ready;
+        loader.drainReady(ready, kMaxDecodePerFrame);
+        for (auto &rt : ready) {
+            if (rt.width <= 0 || rt.height <= 0 || rt.rgba.empty()) continue;
+            Texture tex;
+            if (!tex.uploadRGBA(rt.rgba.data(), rt.width, rt.height)) continue;
+            TileTexEntry &e = texMap[tileKey(rt.z, rt.x, rt.y)];
+            e.tex.release(); // @Jin: 若已有占位/旧纹理，先释放再替换。
+            e.tex = std::move(tex);
+            e.lastUsed = frameTick_;
+        }
+    }
+
     // 请求策略（对齐 参考实现「每枚可见叶都请求自身那一层级」）：
     //  · 自身纹理：对「全部」可见叶请求（近景 z16、向地平线平滑降到粗级）——远景因此显示自己真正的影像，
     //    而非被全球粗级(z=0..3)拉伸，这正是 参考实现 远景更清晰的根因（也是上一版「只请求近景 192 叶」致糊的教训）。
@@ -1700,40 +1753,43 @@ bool Renderer::renderGlobeLayer3D(size_t layerIndex, const Navigator::Camera3D &
 
     // Pass A 占位：无图且无祖先的瓦片画棋盘深色贴球面（首帧/断网时呈现球体轮廓）；
     // overlay（注记）层跳过保持透明（同 2D）。批量累积一次上传一次绘制。
+    // @Jin 两个 globe 通路共用：按瓦片静态网格中心 ECEF 设置 RTC 平移（center−eye）与法向锚点 uniform。
+    // @Jin 这是静态 VBO 方案下逐瓦片唯一逐帧变化的量，替代原先每顶点 double 减眼点 + 缓冲重传。
+    auto setGlobeRtc = [&](GLint locOffset, GLint locCenter, const Renderer::TileGlobeGpuMesh &gm) {
+        glUniform3f(locOffset, static_cast<GLfloat>(gm.centerEcef.x - cam.eye.x),
+                    static_cast<GLfloat>(gm.centerEcef.y - cam.eye.y),
+                    static_cast<GLfloat>(gm.centerEcef.z - cam.eye.z));
+        glUniform3f(locCenter, static_cast<GLfloat>(gm.centerEcef.x),
+                    static_cast<GLfloat>(gm.centerEcef.y), static_cast<GLfloat>(gm.centerEcef.z));
+    };
     if (!layer.overlay) {
-        std::vector<float> verts;
+        // @Jin 占位瓦片同样走静态 VBO（棋盘色在构建时按 (x+y) 奇偶烘焙）：bind VBO → RTC uniform → draw，
+        // 不再每帧拼大缓冲、不再 glBufferData。
+        globeColorProgram_.use();
+        glUniformMatrix4fv(gc3UMvp_, 1, GL_FALSE, viewProjRtc.data());
+        // 光照 uniform（占位与纹理瓦片同口径：uSunDir/uAmbient；法向锚点改逐瓦片 uTileCenter）
+        glUniform3f(gc3USunDir_, static_cast<GLfloat>(sunDir_.x), static_cast<GLfloat>(sunDir_.y),
+                    static_cast<GLfloat>(sunDir_.z));
+        glUniform1f(gc3UAmbient_, kGlobeAmbient);
+        const GLsizei strideC = kGlobeFloatsPerVertex * sizeof(float);
+        glEnableVertexAttribArray(gc3APos_);
+        glEnableVertexAttribArray(gc3AColor_);
         for (const GlobeTile &t : globeTilesScratch_) {
             auto it = texMap.find(tileKey(t.z, t.x, t.y));
             if (it != texMap.end() && it->second.tex.isValid()) continue;
             int ancLevelA = -1;
             if (findAncestorEntry(texMap, t.z, t.x, t.y, ancLevelA) != nullptr) continue;
-            const bool even = (((t.x + t.y) & 1) == 0);
-            buildGlobeTileMesh(t, cam.eye, even ? 0.16f : 0.24f, even ? 0.34f : 0.44f,
-                               even ? 0.32f : 0.40f, verts);
-        }
-        if (!verts.empty()) {
-            globeColorProgram_.use();
-            glUniformMatrix4fv(gc3UMvp_, 1, GL_FALSE, viewProjRtc.data());
-            // 光照 uniform（占位与纹理瓦片同口径：uEye/uSunDir/uAmbient）
-            glUniform3f(gc3UEye_, static_cast<GLfloat>(cam.eye.x), static_cast<GLfloat>(cam.eye.y),
-                        static_cast<GLfloat>(cam.eye.z));
-            glUniform3f(gc3USunDir_, static_cast<GLfloat>(sunDir_.x), static_cast<GLfloat>(sunDir_.y),
-                        static_cast<GLfloat>(sunDir_.z));
-            glUniform1f(gc3UAmbient_, kGlobeAmbient);
-            glBindBuffer(GL_ARRAY_BUFFER, vboGlobeMesh_);
-            glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts.size() * sizeof(float)),
-                         verts.data(), GL_DYNAMIC_DRAW);
-            const GLsizei stride = kGlobeFloatsPerVertex * sizeof(float);
-            glEnableVertexAttribArray(gc3APos_);
-            glVertexAttribPointer(gc3APos_, 3, GL_FLOAT, GL_FALSE, stride,
+            const TileGlobeGpuMesh &gm = acquireTileGlobeMesh(t);
+            glBindBuffer(GL_ARRAY_BUFFER, gm.vbo);
+            glVertexAttribPointer(gc3APos_, 3, GL_FLOAT, GL_FALSE, strideC,
                                   reinterpret_cast<const void *>(0));
-            glEnableVertexAttribArray(gc3AColor_);
-            glVertexAttribPointer(gc3AColor_, 4, GL_FLOAT, GL_FALSE, stride,
+            glVertexAttribPointer(gc3AColor_, 4, GL_FLOAT, GL_FALSE, strideC,
                                   reinterpret_cast<const void *>(5 * sizeof(float)));
-            glDrawArrays(GL_TRIANGLE_STRIP, 0, static_cast<GLsizei>(verts.size() / kGlobeFloatsPerVertex));
-            glDisableVertexAttribArray(gc3APos_);
-            glDisableVertexAttribArray(gc3AColor_);
+            setGlobeRtc(gc3URtcOffset_, gc3UTileCenter_, gm);
+            glDrawArrays(GL_TRIANGLE_STRIP, 0, gm.vertexCount);
         }
+        glDisableVertexAttribArray(gc3APos_);
+        glDisableVertexAttribArray(gc3AColor_);
     }
 
     // Pass B 纹理：逐瓦片生成网格上传绘制（纹理绑定/UV uniform 本就逐瓦片，共享单一动态 VBO）。
@@ -1745,20 +1801,16 @@ bool Renderer::renderGlobeLayer3D(size_t layerIndex, const Navigator::Camera3D &
     globeTexProgram_.use();
     glUniformMatrix4fv(g3UMvp_, 1, GL_FALSE, viewProjRtc.data());
     // 光照 uniform（方向光 + 大气边缘光）：uEye 供顶点求球面法向、uSunDir 为日光方向、uAmbient 为环境光底
-    glUniform3f(g3UEye_, static_cast<GLfloat>(cam.eye.x), static_cast<GLfloat>(cam.eye.y),
-                static_cast<GLfloat>(cam.eye.z));
+    // @Jin 原 uEye 逐帧 uniform 取消：法向锚点/RTC 平移改为逐瓦片 uTileCenter/uRtcOffset。
     glUniform3f(g3USunDir_, static_cast<GLfloat>(sunDir_.x), static_cast<GLfloat>(sunDir_.y),
                 static_cast<GLfloat>(sunDir_.z));
     glUniform1f(g3UAmbient_, kGlobeAmbient);
     glActiveTexture(GL_TEXTURE0);
     glUniform1i(g3UTexture_, 0);
-    glBindBuffer(GL_ARRAY_BUFFER, vboGlobeMesh_);
+    // @Jin 不再绑定共享动态 VBO：每瓦片用各自的静态 VBO，attrib 指针在瓦片循环内随 bind 设置。
     const GLsizei stride = kGlobeFloatsPerVertex * sizeof(float);
     glEnableVertexAttribArray(g3APos_);
-    glVertexAttribPointer(g3APos_, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(0));
     glEnableVertexAttribArray(g3ATexCoord_);
-    glVertexAttribPointer(g3ATexCoord_, 2, GL_FLOAT, GL_FALSE, stride,
-                          reinterpret_cast<const void *>(3 * sizeof(float)));
     for (const GlobeTile &t : globeTilesScratch_) {
         TileTexEntry *use = nullptr;
         float u0 = 0.0f, v0 = 0.0f, sc = 1.0f;
@@ -1777,15 +1829,17 @@ bool Renderer::renderGlobeLayer3D(size_t layerIndex, const Navigator::Camera3D &
             sc = 1.0f / sub;
             use = anc;
         }
-        globeMeshScratch_.clear();
-        buildGlobeTileMesh(t, cam.eye, 1.0f, 1.0f, 1.0f, globeMeshScratch_);
-        glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(globeMeshScratch_.size() * sizeof(float)),
-                     globeMeshScratch_.data(), GL_DYNAMIC_DRAW);
+        // @Jin 静态 VBO 命中时零重建、零重传；只有 center−eye 的 3 个 float uniform 随帧变化。
+        const TileGlobeGpuMesh &gm = acquireTileGlobeMesh(t);
+        glBindBuffer(GL_ARRAY_BUFFER, gm.vbo);
+        glVertexAttribPointer(g3APos_, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(0));
+        glVertexAttribPointer(g3ATexCoord_, 2, GL_FLOAT, GL_FALSE, stride,
+                              reinterpret_cast<const void *>(3 * sizeof(float)));
+        setGlobeRtc(g3URtcOffset_, g3UTileCenter_, gm);
         glUniform2f(g3UUvOffset_, u0, v0);
         glUniform2f(g3UUvScale_, sc, sc);
         use->tex.bind();
-        glDrawArrays(GL_TRIANGLE_STRIP, 0,
-                     static_cast<GLsizei>(globeMeshScratch_.size() / kGlobeFloatsPerVertex));
+        glDrawArrays(GL_TRIANGLE_STRIP, 0, gm.vertexCount);
     }
     glDisableVertexAttribArray(g3APos_);
     glDisableVertexAttribArray(g3ATexCoord_);
@@ -1798,38 +1852,116 @@ bool Renderer::renderGlobeLayer3D(size_t layerIndex, const Navigator::Camera3D &
 
 // ==================== 地形 DEM 通路（quantized-mesh 高度缓存 + 球面网格抬升） ====================
 
-void Renderer::setTerrainTile(int z, int x, int y, const std::vector<uint8_t> &bytes) {
-    const uint64_t key = tileKey(z, x, y);
-    if (bytes.empty()) {
-        // 清除该 tile
-        terrainCache_.erase(key);
-        for (auto it = terrainLru_.begin(); it != terrainLru_.end(); ++it) {
-            if (*it == key) { terrainLru_.erase(it); break; }
+static uint64_t serviceTerrainKeyByBounds(double lonMin, double latMin, double lonMax, double latMax) {
+    // @Jin: quantized-mesh 使用 EPSG:4326 Cesium geographic grid：cols=2^(z+1), rows=2^z。
+    // @Jin: 注入参数只带 bbox，不带服务 (sx,sy)，这里由瓦片跨度稳定反推服务瓦片号作为全局去重键。
+    const double lonSpan = lonMax - lonMin;
+    const double latSpan = latMax - latMin;
+    if (!(lonSpan > 0.0) || !(latSpan > 0.0)) return 0;
+    const int sz = std::max(0, static_cast<int>(std::lround(std::log2(360.0 / lonSpan) - 1.0)));
+    const int sx = static_cast<int>(std::lround((lonMin + 180.0) / lonSpan));
+    const int sy = static_cast<int>(std::lround((latMin + 90.0) / latSpan));
+    return (static_cast<uint64_t>(sz) << 40) |
+           (static_cast<uint64_t>(sx) << 20) |
+           static_cast<uint64_t>(sy);
+}
+
+void Renderer::setTerrainTile(int z, int x, int y, const std::vector<uint8_t> &bytes,
+                              double lonMin, double latMin, double lonMax, double latMax) {
+    // 只入队：terrainCache_ 归 GL 线程所有（见 Renderer.h 的 terrainPending_ 说明）。
+    // 可由任意线程调用（ArkTS 下载线程 / NAPI 线程），实际写入发生在下一帧的 drainTerrainPending()。
+    PendingTerrain pt;
+    pt.z = z; pt.x = x; pt.y = y;
+    pt.bytes = bytes;
+    pt.lonMin = lonMin; pt.latMin = latMin; pt.lonMax = lonMax; pt.latMax = latMax;
+    {
+        std::lock_guard<std::mutex> lk(terrainMtx_);
+        terrainPending_.push_back(std::move(pt));
+    }
+}
+
+bool Renderer::drainTerrainPending() {
+    std::vector<PendingTerrain> batch;
+    {
+        std::lock_guard<std::mutex> lk(terrainMtx_);
+        if (terrainPending_.empty()) return false; // @Jin 无待处理：无需为地形多请一帧
+        batch.swap(terrainPending_);
+    }
+    // @Jin 【初始加载卡顿削峰】单块 DEM 解码含 buildHeightGrid(64)（遍历约数千三角形栅格化），
+    // 全部在 GL 线程同步执行；首屏一次性灌入上百块（磁盘缓存二次启动尤甚）会造成数个长帧卡顿。
+    // 这里每帧只解码预算内的新 DEM，未处理的按原顺序塞回队首，由后续帧分批消费，把开销摊平。
+    constexpr int kMaxTerrainDecodePerFrame = 3;
+    int decodeBudget = kMaxTerrainDecodePerFrame;
+    // @Jin 本批是否真正改变了 terrainCache_ 内容（清空/新注入/LRU 淘汰）；
+    // 改变才自增 terrainVersion_，让瓦片静态 VBO 按新版本重建；同 key 重复注入不触发。
+    bool terrainChanged = false;
+    size_t idx = 0;
+    for (; idx < batch.size(); ++idx) {
+        PendingTerrain &pt = batch[idx];
+        if (pt.clearAll) {
+            terrainCache_.clear();
+            terrainLru_.clear();
+            terrainChanged = true; // @Jin 全清：所有地形瓦片 VBO 待重建
+            continue;
         }
-        return;
+        const uint64_t key = serviceTerrainKeyByBounds(pt.lonMin, pt.latMin, pt.lonMax, pt.latMax);
+        if (pt.bytes.empty()) {
+            // @Jin: 当前 Demo 不做单块回收（服务 DEM 可能被多个引擎瓦片共享）；关闭地形时会 clearAll。
+            continue;
+        }
+        if (decodeBudget <= 0) {
+            // @Jin 本帧解码预算用尽：当前块及其余块原样留到下一帧（保留相对顺序）。
+            break;
+        }
+        if (terrainCache_.find(key) != terrainCache_.end()) {
+            // @Jin: 同一块服务 DEM 常被多个引擎瓦片重复注入；命中全局缓存时跳过重复解码。
+            for (auto it = terrainLru_.begin(); it != terrainLru_.end(); ++it) {
+                if (*it == key) { terrainLru_.erase(it); break; }
+            }
+            terrainLru_.push_back(key);
+            continue;
+        }
+        --decodeBudget; // @Jin 仅真正进入解码才占预算（clearAll/重复命中不占）
+        QuantizedMeshData qm = decodeQuantizedMesh(pt.bytes, pt.lonMin, pt.latMin, pt.lonMax, pt.latMax);
+        if (!qm.valid) {
+            LOGW("setTerrainTile decode failed z=%d x=%d y=%d bbox=[%.4f,%.4f,%.4f,%.4f]",
+                 pt.z, pt.x, pt.y, pt.lonMin, pt.latMin, pt.lonMax, pt.latMax);
+            continue;
+        }
+        terrainCache_[key] = std::move(qm);
+        terrainLru_.push_back(key);
+        terrainChanged = true; // @Jin 新 DEM 入库：相关瓦片下帧重建网格
+        while (terrainLru_.size() > kMaxTerrainTiles) {
+            uint64_t oldest = terrainLru_.front();
+            terrainLru_.pop_front();
+            terrainCache_.erase(oldest);
+            terrainChanged = true; // @Jin LRU 淘汰也改变覆盖内容，须重建
+        }
+
     }
-    QuantizedMeshData qm = decodeQuantizedMesh(bytes);
-    if (!qm.valid) {
-        LOGW("setTerrainTile decode failed z=%d x=%d y=%d", z, x, y);
-        return;
+    // @Jin 有未处理块：按原顺序塞回队首（保留在新到任务之前），下一帧继续消费。
+    if (idx < batch.size()) {
+        std::vector<PendingTerrain> remain(batch.begin() + static_cast<ptrdiff_t>(idx), batch.end());
+        std::lock_guard<std::mutex> lk(terrainMtx_);
+        remain.insert(remain.end(), terrainPending_.begin(), terrainPending_.end());
+        terrainPending_ = std::move(remain);
     }
-    // LRU 更新：存在则先移除旧条目，再 push_back
-    terrainCache_[key] = std::move(qm);
-    for (auto it = terrainLru_.begin(); it != terrainLru_.end(); ++it) {
-        if (*it == key) { terrainLru_.erase(it); break; }
-    }
-    terrainLru_.push_back(key);
-    // 淘汰最旧
-    while (terrainLru_.size() > kMaxTerrainTiles) {
-        uint64_t oldest = terrainLru_.front();
-        terrainLru_.pop_front();
-        terrainCache_.erase(oldest);
+    // @Jin 每批最多自增一次：瓦片 VBO 只关心「缓存内容是否已变化」，不关心变了几块。
+    if (terrainChanged) ++terrainVersion_;
+    // @Jin 仍有未解码块时返回 true：App 为按需渲染(WHEN_DIRTY)，静止不出帧会让余留永不清空；
+    // 借此让 GlobeEngine 连续 requestRender，直到全部 DEM 分批消化完（队列空即返回 false 停帧省电）。
+    {
+        std::lock_guard<std::mutex> lk(terrainMtx_);
+        return !terrainPending_.empty();
     }
 }
 
 void Renderer::clearTerrain() {
-    terrainCache_.clear();
-    terrainLru_.clear();
+    // 同样只入队，实际清空由 GL 线程 drain 完成（避免跨线程动 terrainCache_）
+    PendingTerrain pt;
+    pt.clearAll = true;
+    std::lock_guard<std::mutex> lk(terrainMtx_);
+    terrainPending_.push_back(std::move(pt));
 }
 
 void Renderer::setSunDirection(const Vec3 &dir) {
@@ -1841,14 +1973,21 @@ void Renderer::setSunDirection(const Vec3 &dir) {
 }
 
 double Renderer::sampleTerrainHeight(const GlobeTile &tile, double lon, double lat) const {
-    const uint64_t key = tileKey(tile.z, tile.x, tile.y);
-    auto it = terrainCache_.find(key);
-    if (it == terrainCache_.end()) return 0.0;
-    return it->second.sampleHeight(lon, lat);
+    (void)tile;
+    // @Jin: 3D 叶瓦片会随屏幕误差在 z9-z12 等多级 LOD 间切换，而 ArkTS 当前只注入固定引擎级的一批 DEM；
+    // @Jin: 因此这里不能再按渲染瓦片自身的 (z,x,y) 精确取缓存，需按经纬度从覆盖该点的 DEM bbox 中采样。
+    for (const auto &entry : terrainCache_) {
+        const QuantizedMeshData &dem = entry.second;
+        if (lon >= dem.lonMin && lon <= dem.lonMax && lat >= dem.latMin && lat <= dem.latMax) {
+            return dem.sampleHeight(lon, lat);
+        }
+    }
+    // @Jin: 没有任何 DEM 精确覆盖该点时返回 0；不能拿任意缓存块钳制外推，否则会把邻区山体贴到错误位置。
+    return 0.0;
 }
 
-void Renderer::buildGlobeTileMesh(const GlobeTile &tile, const Vec3 &eye, float r, float g, float b,
-                                  std::vector<float> &verts) const {
+void Renderer::buildGlobeTileMeshLocal(const GlobeTile &tile, std::vector<float> &verts,
+                                        Vec3 &centerEcef) const {
     // 包围盒外约 0.75% 外扩：盖住不同级别邻瓦片的 T 形缝隙（深度测试裁决前后，轻微 z-fighting
     // 可接受，同 2D Pass B texelPad 思路）；极地附近经度收敛，外扩仅按跨径比例不改变形状
     const double padLon = (tile.lonMax - tile.lonMin) * 0.0075;
@@ -1856,11 +1995,39 @@ void Renderer::buildGlobeTileMesh(const GlobeTile &tile, const Vec3 &eye, float 
     const double lon0 = tile.lonMin - padLon, lon1 = tile.lonMax + padLon;
     const double latN = tile.latMax + padLat, latS = tile.latMin - padLat;
     const Wgs84Globe &globe = Wgs84Globe::instance();
-    constexpr int G = kGlobeGridDiv;
-    // 查一次 DEM 缓存：有则逐顶点采样高度抬升球面网格，无则 alt=0 贴地（零开销）
-    const uint64_t terrainKey = tileKey(tile.z, tile.x, tile.y);
-    auto terrainIt = terrainCache_.find(terrainKey);
-    const QuantizedMeshData *dem = (terrainIt != terrainCache_.end()) ? &terrainIt->second : nullptr;
+    // @Jin 占位棋盘色只取决于瓦片 (x+y) 奇偶：烘焙进静态 VBO，Pass A 直接用、Pass B 忽略。
+    const bool even = (((tile.x + tile.y) & 1) == 0);
+    const float r = even ? 0.16f : 0.24f;
+    const float g = even ? 0.34f : 0.44f;
+    const float b = even ? 0.32f : 0.40f;
+    // @Jin RTC 锚点取未外扩瓦片中心（alt=0）：VBO 顶点存 ecefVertex-center 的局部坐标，
+    // 量级仅几~几十 km，float 精度充足；centerEcef 随 VBO 缓存，绘制时由 uRtcOffset=center-eye 还原。
+    globe.geographicToCartesian((tile.lonMin + tile.lonMax) * 0.5,
+                                (tile.latMin + tile.latMax) * 0.5, 0.0, centerEcef);
+    // @Jin: 先找出与当前 3D 叶瓦片包围盒相交的 DEM。渲染层可能是 z10-z12，而 DEM 注入层固定为较粗级别，
+    // @Jin: 多级 LOD 下只能按地理覆盖关系采样，不能要求二者的 (z,x,y) 完全相同。
+    std::vector<const QuantizedMeshData *> terrainDems;
+    for (const auto &entry : terrainCache_) {
+        const QuantizedMeshData &dem = entry.second;
+        const bool overlap = !(lon1 < dem.lonMin || lon0 > dem.lonMax ||
+                               latS > dem.latMax || latN < dem.latMin);
+        if (overlap) terrainDems.push_back(&dem);
+    }
+    // @Jin: 无地形时维持 8x8 的低成本球面；地形覆盖时用 24x24（1200 顶点/瓦片）。
+    // @Jin: 早期逐帧重建+glBufferData 路径下 16x16 是帧率上限；瓦片改静态 VBO 后稳态零重建，
+    // @Jin: 提高到 24x24 让山脊/沟谷采样更密、与实际更贴合，只增加一次构建与可接受的 GPU 顶点量。
+    constexpr int kTerrainGridDiv = 24;
+    const int G = terrainDems.empty() ? kGlobeGridDiv : kTerrainGridDiv;
+    // @Jin: 几何链路已由真机日志和画面确认生效，先恢复 1.0 真实高程；后续再产品化为 setTerrainExaggeration()。
+    constexpr double kTerrainExaggeration = 1.0;
+    // @Jin: 诊断插桩——统计空间 bbox 命中数和真实采样高度，用于确认“多级 LOD key 失配”是否已解除。
+    static std::atomic<uint64_t> s_diagMeshSeq{0};
+    const bool diagThis = (s_diagMeshSeq.fetch_add(1) % 256 == 0);
+    uint64_t dbgHitCount = 0;
+    uint64_t dbgSampleCount = 0;
+    // @Jin: 上一顶点命中的 DEM 块（仅利用顶点扫描的空间连贯性，循环外声明）。
+    const QuantizedMeshData *lastVertexDem = nullptr;
+    double dbgAltMin = 1e300, dbgAltMax = -1e300;
     for (int row = 0; row < G; ++row) {
         for (int c = 0; c <= G; ++c) {
             const double u = static_cast<double>(c) / G; // 0=西（lonMin）
@@ -1869,10 +2036,41 @@ void Renderer::buildGlobeTileMesh(const GlobeTile &tile, const Vec3 &eye, float 
                 // 逐行 (上,下) 顶点对→ GL_TRIANGLE_STRIP；跨带缠绕方向交替但未开背面剪裁，无影响
                 const double v = static_cast<double>(row + e) / G; // 0=北边=图像顶行（同 2D 单位四边形口径）
                 const double lat = latN + (latS - latN) * v;
-                const double alt = dem ? dem->sampleHeight(lon, lat) : 0.0;
+                // @Jin: 只从精确包含当前顶点的 DEM 瓦片采样，避免跨 bbox 钳制造成邻区地形横向错位。
+                // @Jin: 顶点按行列顺序扫描，相邻 95% 以上落在同一块 DEM 内；先试上一顶点命中的块，
+                // @Jin: 命中即跳过候选列表遍历，把每顶点选块开销从 O(N) 降到 O(1)。
+                const QuantizedMeshData *vertexDem = nullptr;
+                if (lastVertexDem != nullptr &&
+                    lon >= lastVertexDem->lonMin && lon <= lastVertexDem->lonMax &&
+                    lat >= lastVertexDem->latMin && lat <= lastVertexDem->latMax) {
+                    vertexDem = lastVertexDem;
+                } else {
+                    for (const QuantizedMeshData *candidate : terrainDems) {
+                        if (lon >= candidate->lonMin && lon <= candidate->lonMax &&
+                            lat >= candidate->latMin && lat <= candidate->latMax) {
+                            vertexDem = candidate;
+                            break;
+                        }
+                    }
+                    lastVertexDem = vertexDem;
+                }
+                // @Jin: 只有地理覆盖命中的 DEM 才能参与采样；缝隙外扩点宁可回 0，也不用相交块边界值拉伸整片区域。
+                const double rawAlt = vertexDem ? vertexDem->sampleHeight(lon, lat) : 0.0;
+                ++dbgSampleCount;
+                if (vertexDem != nullptr) ++dbgHitCount;
+                if (diagThis && vertexDem) {
+                    if (rawAlt < dbgAltMin) dbgAltMin = rawAlt;
+                    if (rawAlt > dbgAltMax) dbgAltMax = rawAlt;
+                }
+                // @Jin: 仅放大几何高度，不改变经纬度和瓦片范围，便于隔离排查“看不到起伏”的视觉原因。
+                const double alt = rawAlt * kTerrainExaggeration;
                 Vec3 p;
                 globe.geographicToCartesian(lon, lat, alt, p);
-                p -= eye; // RTC：double 差后转 float（ECEF 量级 ~6.4e6 m，绝对坐标不可直上 float）
+                // @Jin 存瓦片中心局部坐标（静态、与眼点无关）；double 相减后再转 float 保精度，
+                // 眼点平移移到着色器（uRtcOffset），几何因此可跨帧固化在 VBO 中。
+                p.x -= centerEcef.x;
+                p.y -= centerEcef.y;
+                p.z -= centerEcef.z;
                 verts.push_back(static_cast<float>(p.x));
                 verts.push_back(static_cast<float>(p.y));
                 verts.push_back(static_cast<float>(p.z));
@@ -1885,6 +2083,57 @@ void Renderer::buildGlobeTileMesh(const GlobeTile &tile, const Vec3 &eye, float 
             }
         }
     }
+    // @Jin: 每 256 块瓦片输出一条：dem=1 且 alt 跨度>1m 才算“顶点真的被高度置换”。
+    if (diagThis) {
+        LOGI("TERDIAG mesh z=%d x=%d y=%d demCandidates=%zu hit=%llu/%llu alt=[%.1f,%.1f] tileBox=[%.4f,%.4f,%.4f,%.4f] cacheTiles=%zu",
+             tile.z, tile.x, tile.y, terrainDems.size(),
+             static_cast<unsigned long long>(dbgHitCount), static_cast<unsigned long long>(dbgSampleCount),
+             dbgHitCount > 0U ? dbgAltMin : 0.0, dbgHitCount > 0U ? dbgAltMax : 0.0,
+             tile.lonMin, tile.latMin, tile.lonMax, tile.latMax, terrainCache_.size());
+    }
+}
+
+Renderer::TileGlobeGpuMesh &Renderer::acquireTileGlobeMesh(const GlobeTile &tile) {
+    // @Jin 瓦片静态 VBO 缓存（卡顿优化核心）：
+    //   · 命中（同 key 且构建时地形版本号未变）→ 直接复用，零重建、零 glBufferData；
+    //   · 地形版本变化（DEM 注入/淘汰/清空）→ 在原 VBO 上原地重传新几何（GL_STATIC_DRAW）；
+    //   · 新瓦片 → glGenBuffers 建 VBO；总数超 kMaxTileGlobeMesh 时按 LRU 淘汰并 glDelete。
+    const uint64_t key = tileKey(tile.z, tile.x, tile.y);
+    auto it = tileGlobeMesh_.find(key);
+    if (it != tileGlobeMesh_.end() && it->second.terrainVersion == terrainVersion_) {
+        it->second.lastUsed = frameTick_; // @Jin 命中只刷新 LRU 时间戳
+        return it->second;
+    }
+    TileGlobeGpuMesh &m = tileGlobeMesh_[key]; // 不存在则建空槽；存在则为待重建的旧条目
+    std::vector<float> localVerts;
+    Vec3 center{0.0, 0.0, 0.0};
+    buildGlobeTileMeshLocal(tile, localVerts, center);
+    if (localVerts.empty() || localVerts.size() % kGlobeFloatsPerVertex != 0) {
+        m.terrainVersion = terrainVersion_; // 防御：异常输出不重传，下版本再试
+        return m;
+    }
+    if (m.vbo == 0) glGenBuffers(1, &m.vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, m.vbo);
+    // @Jin 几何只随 DEM 内容变化 → STATIC_DRAW，驱动可常驻显存，避免 DYNAMIC 反复重分配。
+    glBufferData(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(localVerts.size() * sizeof(float)),
+                 localVerts.data(), GL_STATIC_DRAW);
+    m.vertexCount = static_cast<int>(localVerts.size() / kGlobeFloatsPerVertex);
+    m.centerEcef = center;
+    m.terrainVersion = terrainVersion_;
+    m.lastUsed = frameTick_;
+    if (tileGlobeMesh_.size() > kMaxTileGlobeMesh) {
+        // @Jin LRU 淘汰（仅在超上限瞬间做一次 O(N) 扫描，正常浏览不触发）
+        auto victim = tileGlobeMesh_.end();
+        for (auto jt = tileGlobeMesh_.begin(); jt != tileGlobeMesh_.end(); ++jt) {
+            if (jt->first == key) continue; // 不淘汰刚建的自己
+            if (victim == tileGlobeMesh_.end() || jt->second.lastUsed < victim->second.lastUsed) victim = jt;
+        }
+        if (victim != tileGlobeMesh_.end()) {
+            if (victim->second.vbo != 0) glDeleteBuffers(1, &victim->second.vbo);
+            tileGlobeMesh_.erase(victim);
+        }
+    }
+    return tileGlobeMesh_.find(key)->second;
 }
 
 void Renderer::setLocationMarker(double lonDeg, double latDeg, bool visible, double headingDeg) {

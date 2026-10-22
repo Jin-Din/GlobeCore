@@ -110,6 +110,15 @@ interface GlobeCore {
   /// [x, y]（目标坐标系），失败 null
   nativeConvert(x: number, y: number, srcCrs: string, tgtCrs: string): Float64Array | null;
 
+  // ── 三维地形（feature/terrain-pre）──
+  /// 注入一块 Cesium quantized-mesh v1.0 地形瓦片。
+  /// z/x/y 用【本引擎瓦片网格】编号（渲染时按它查缓存）；四至用【地形服务自己的分块方案】算出。
+  /// bytes 传空数组 = 删除该块。可任意线程调用（内部入队，GL 线程帧首生效）。
+  nativeSetTerrainTile(handle: number, z: number, x: number, y: number, bytes: Uint8Array,
+    lonMin: number, latMin: number, lonMax: number, latMax: number): void;
+  /// 清空全部地形缓存（换地形源 / 关闭地形时调用）
+  nativeClearTerrain(handle: number): void;
+
   // ── GDAL / 图层元信息（bridge/gdal_info、layer_info）──
   nativeGetGdalVersion(): string;
   nativeGetVectorDrivers(): string;

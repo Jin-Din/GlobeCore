@@ -87,6 +87,35 @@ inline std::vector<double> NapiGetFloat64Array(napi_env env, napi_value v) {
     return out;
 }
 
+/// TypedArray 读取：Uint8Array → vector<uint8_t>（地形瓦片等原始字节）。
+/// 兼容 ArrayBuffer 直传（napi_get_typedarray_info 对两者均可取 data/length）。类型不符返回空。
+inline std::vector<uint8_t> NapiGetUint8Array(napi_env env, napi_value v) {
+    std::vector<uint8_t> out;
+    if (v == nullptr) return out;
+    // 先按 TypedArray 取；失败/不是 TypedArray 再按 ArrayBuffer 取
+    napi_typedarray_type type = napi_biguint64_array;
+    size_t length = 0;
+    void *data = nullptr;
+    napi_value buf = nullptr;
+    size_t offset = 0;
+    if (napi_get_typedarray_info(env, v, &type, &length, &data, &buf, &offset) == napi_ok &&
+        data != nullptr && length > 0) {
+        const uint8_t *p = static_cast<const uint8_t *>(data);
+        out.assign(p, p + length);
+        return out;
+    }
+    bool isBuf = false;
+    if (napi_is_arraybuffer(env, v, &isBuf) == napi_ok && isBuf) {
+        void *bd = nullptr;
+        size_t bl = 0;
+        if (napi_get_arraybuffer_info(env, v, &bd, &bl) == napi_ok && bd != nullptr && bl > 0) {
+            const uint8_t *p = static_cast<const uint8_t *>(bd);
+            out.assign(p, p + bl);
+        }
+    }
+    return out;
+}
+
 /// TypedArray 读取：Int32Array（ARGB 像素/计数数组）。类型不符返回空。
 inline std::vector<int32_t> NapiGetInt32Array(napi_env env, napi_value v) {
     std::vector<int32_t> out;

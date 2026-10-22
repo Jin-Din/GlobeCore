@@ -65,6 +65,16 @@ export class MapGestures {
   private fingers: Map<number, Position2D> = new Map();
   private downX: number = 0;
   private downY: number = 0;
+  /** @Jin 单指拖动的“上一帧位置”，独立于速度采样 samples，专用于消除多指→单指切换残留大位移 */
+  private lastSingleX: number = 0;
+  private lastSingleY: number = 0;
+  private hasLastSingle: boolean = false;
+  /** @Jin 多指→单指切换后的“宽限帧”计数：>0 期间用更严的单步阈值拦截切换残留，逐帧递减到 0 */
+  private singleGraceFrames: number = 0;
+  /** @Jin 单帧平移跳变阈值(vp)：一帧(~16ms)真实手指位移不可能超过此值；超过即判定为多指切换残留，丢弃该帧 */
+  // @Jin 单帧跟手拖动的物理上限(vp)：60fps 下快速拖动一般 <80vp；100 以上基本是多指切换残留。
+  // 仅作用于手动拖动路径；惯性 fling 走独立 sink.panBy（另有速度 6000vp/s + dt 32ms 双钳），不受此值影响。
+  private readonly panJumpVp: number = 100;
   private downTime: number = 0;
   private dragging: boolean = false;
   private lastTapX: number = 0;
@@ -79,6 +89,10 @@ export class MapGestures {
 
   // ── 捏合 / 旋转 / 俯仰（双指）──
   private pinchInProgress: boolean = false;
+  /** @Jin 序列级「本次触摸是否发生过双指捏合」：在双指同时抬起（无降单指中间帧）时，
+   *  pinchInProgress 会随手指<2 立即清零，导致全抬判定误以为是单指手势而触发 fling，
+   *  把张手/捏手末速度当成平移惯性 → 放大上跳、缩小下跳。用本标志在全抬处门控 fling/点击。 */
+  private pinchHappened: boolean = false;
   private lastPinchDist: number = 0;
   /** 两指连线 atan2 角（弧度）；非双指态 NaN，POINTER_DOWN 建基准、UP 复位，防丢帧跳变 */
   private lastPinchAngleRad: number = Number.NaN;
@@ -144,6 +158,7 @@ export class MapGestures {
     this.registerFingers(event);
     this.cancelFling(); // 按下即停住惯性滑行，交回手动控制
     if (this.fingers.size === 1) {
+      this.pinchHappened = false; // @Jin 新触摸序列：清上一手势遗留的捏合标记
       const f = this.firstFinger();
       this.downX = f.x;
       this.downY = f.y;
@@ -151,6 +166,7 @@ export class MapGestures {
       this.dragging = false;
       this.samples = [];
       this.pushSample(event.timestamp, f.x, f.y);
+      this.resetSingleBaseline(f.x, f.y); // @Jin 同步单指拖动基准
       this.scheduleLongPress(f.x, f.y); // 单指按下装载长按候选（移动/抬指/双指时取消）
     } else if (this.fingers.size === 2) {
       // 第二指落下：以本帧两指连线角/距离/质心 Y 为旋转、捏合与俯仰基准
@@ -160,9 +176,28 @@ export class MapGestures {
   }
 
   private onFingerMove(event: TouchEvent): void {
+    const prevCount: number = this.fingers.size; // @Jin registerFingers 之前的在手指数
     this.registerFingers(event);
     if (this.fingers.size >= 2) {
       this.onPinchMove(event);
+      return;
+    }
+    // @Jin 【缩放抬手跳变修复·关键】多指捏合降为单指后的第一帧 Move：剩余手指相对其捏合前
+    // 位置可能已移动数百 vp，若此刻参与单指平移会产生一次横跨整个捏合过程的大 pan（真机实测
+    // dx=125 dy=525，纬度瞬间跳 0.18°，即“放大上跳/缩小下跳”）。这里在“移动事件”处（坐标以
+    // 当前剩余手指为准，最可靠）原地重建基准并直接返回，首帧绝不产生平移。
+    if (prevCount >= 2 && this.fingers.size === 1) {
+      // @Jin 以事件实际给出的唯一触点为准（不依赖 Map 迭代序），统一重建全部基准，首帧不 pan
+      const rf0: Position2D = event.touches.length > 0
+        ? { x: event.touches[0].x, y: event.touches[0].y } as Position2D
+        : this.firstFinger();
+      this.downX = rf0.x;
+      this.downY = rf0.y;
+      this.downTime = event.timestamp;
+      this.dragging = false;
+      this.samples = [];
+      this.pushSample(event.timestamp, rf0.x, rf0.y);
+      this.resetSingleBaseline(rf0.x, rf0.y, 4); // @Jin 转换后4帧严阈值，拦第一帧残留
       return;
     }
     // 单指：平移
@@ -176,9 +211,33 @@ export class MapGestures {
       this.dragging = true;
       this.clearLongPressTimer(); // 已越过拖动阈值，不再是长按
     }
-    const last = this.lastSample();
-    const dx = f.x - last.x;
-    const dy = f.y - last.y;
+    // @Jin 拖动位移以独立的上一帧单指位置 lastSingle 计算，不使用可能在捏合期陈旧的 samples；
+    // 并做单帧跳变钳制：多指→单指切换若残留一次大位移（真机实测可达 600+vp，即缩放后猛跳），
+    // 直接丢弃该帧、把基准钉到当前点，下一帧恢复正常，保证任何事件时序下都不会猛跳。
+    if (!this.hasLastSingle) {
+      this.resetSingleBaseline(f.x, f.y);
+    }
+    let dx: number = f.x - this.lastSingleX;
+    let dy: number = f.y - this.lastSingleY;
+    // @Jin 刚从多指切来的前几帧用更严阈值（60vp）：真机日志显示残留步 120~196px 会穿过
+    // 常规 100vp 与 native 200px 之间的空档；正常跟手一帧仅几~几十 vp，不会误杀。
+    const stepLimit: number = this.singleGraceFrames > 0 ? 60 : this.panJumpVp;
+    if (this.singleGraceFrames > 0) {
+      this.singleGraceFrames -= 1;
+    }
+    const jump: boolean = Math.abs(dx) > stepLimit || Math.abs(dy) > stepLimit;
+    if (jump) {
+      // @Jin 判定为多指切换残留/异常跳帧：不产生平移，重建基准与速度采样
+      this.downX = f.x;
+      this.downY = f.y;
+      this.downTime = event.timestamp;
+      this.samples = [];
+      this.pushSample(event.timestamp, f.x, f.y);
+      this.resetSingleBaseline(f.x, f.y, 3); // @Jin 拦到异常后再保3帧严阈值
+      return;
+    }
+    this.lastSingleX = f.x;
+    this.lastSingleY = f.y;
     this.pushSample(event.timestamp, f.x, f.y);
     if ((dx !== 0 || dy !== 0) && this.sink.isReady()) {
       this.sink.panBy(dx, dy);
@@ -187,18 +246,50 @@ export class MapGestures {
   }
 
   private onFingerUp(event: TouchEvent, canceled: boolean): void {
-    this.registerFingers(event);
+    // @Jin 【依次抬仍轻微跳·根因】绝不能用 Up 事件的 event.touches 全量重建手指表：
+    // 真机上 Up 事件的 touches 常常不含“仍按住的另一指”（只回传变化的指），全量重建会把
+    // 剩余指丢掉，导致 remaining=null、降单指基准不重置，下一帧用捏合期陈旧坐标算出残余平移。
+    // Down/Move 已持续把每指最新坐标维护进 fingers，故 Up 只需从中删除本次抬起的 id。
     const up = event.changedTouches.length > 0 ? event.changedTouches[0] : null;
-    // 移除去掉的手指（Up/Cancel 后剩余数）
     if (up !== null) {
-      this.fingers.delete(up.id);
+      for (let k = 0; k < event.changedTouches.length; k++) {
+        this.fingers.delete(event.changedTouches[k].id);
+      }
     } else {
       this.fingers.clear();
     }
+    // @Jin 剩余指直接取删除后的手指表（位置为最近一次 Move 的可靠坐标）；显式迭代器规避
+    // ArkTS 严格流分析把 forEach 闭包内赋值锁成 never。
+    let remPos: Position2D | null = null;
+    const fit = this.fingers.values();
+    for (let step = fit.next(); !step.done; step = fit.next()) {
+      remPos = step.value as Position2D;
+      break;
+    }
+    const remaining: Position2D | null = remPos;
     if (this.fingers.size < 2) {
+      // @Jin 先记下“本次抬起是否正在结束一次双指手势”，下面置 false 后仍要用它判降单指重置。
+      const pinchJustEnded: boolean = this.pinchInProgress;
       this.pinchInProgress = false;
       this.lastPinchAngleRad = Number.NaN;
       this.lastPinchCentroidY = Number.NaN;
+      // @Jin 【缩放后视点自动下移修复】双指捏合期间 onPinchMove 不更新单指平移采样(samples)。
+      // 抬起一指、由双指降为单指的瞬间，剩余手指通常已相对其“捏合前”的位置移动了一段，
+      // 若不重置基准，剩余手指的第一帧 Move 会拿捏合前的旧 lastSample 求 dx/dy，
+      // 产生一次横跨整个捏合过程的大 panBy，把地图猛推（常见握持下表现为视点自动向下）。
+      // 处理：把剩余手指视为一次“新的按下”，以其当前位置重建平移基准与速度采样，丢弃捏合期位移。
+      if (pinchJustEnded && remaining !== null) {
+        // @Jin 已进入新的单指阶段：用“真正仍按住”的手指当前坐标重置基准；随后若用户明确
+        // 做单指甩动可正常 fling。真正的首帧大位移拦截在 onFingerMove 的多→单转换处完成。
+        this.pinchHappened = false;
+        this.downX = remaining.x;
+        this.downY = remaining.y;
+        this.downTime = event.timestamp;
+        this.dragging = false; // 新起手须重新越过 touchSlop 才算拖动
+        this.samples = [];
+        this.pushSample(event.timestamp, remaining.x, remaining.y);
+        this.resetSingleBaseline(remaining.x, remaining.y, 4); // @Jin 依次抬：4帧严阈值
+      }
     }
     if (this.fingers.size !== 0 || canceled) {
       // 仍有手指按着（双指降单指）或事件取消：长按候选不再成立
@@ -211,7 +302,7 @@ export class MapGestures {
     const f = up !== null ? up : this.firstFinger();
     const moved = Math.abs(f.x - this.downX) + Math.abs(f.y - this.downY);
     const duration = event.timestamp - this.downTime;
-    if (!this.dragging && !this.pinchInProgress
+    if (!this.dragging && !this.pinchInProgress && !this.pinchHappened
       && moved < this.touchSlop && duration < this.doubleTapTimeout) {
       const sinceLast = event.timestamp - this.lastTapTime;
       const near = Math.abs(f.x - this.lastTapX) < this.doubleTapSlop
@@ -234,7 +325,9 @@ export class MapGestures {
       this.lastTapTime = 0;
       // 惯性滑动：以松手速度为初速度减速滑行（缩放进行中/3D 双指收尾不触发，对齐 Android 门控）
       const v = this.computeFlingVelocity();
-      if (!this.pinchInProgress && v !== null && this.sink.isReady()) {
+      // @Jin 关键修复：刚结束双指捏合（尤其两指几乎同时抬起、无降单指中间帧）时禁止 fling，
+      // 否则张手/捏手的残余末速度被当成平移惯性，造成放大上跳、缩小下跳。
+      if (!this.pinchInProgress && !this.pinchHappened && v !== null && this.sink.isReady()) {
         this.startFling(v[0], v[1]);
       }
     }
@@ -250,6 +343,15 @@ export class MapGestures {
       next.set(t.id, { x: t.x, y: t.y } as Position2D);
     }
     this.fingers = next;
+  }
+
+  /** @Jin 重置单指拖动的上一帧位置基准。graceFrames>0 表示刚从多指切换来，
+   *  随后若干帧采用更严单步阈值，专门拦截“依次抬/同时抬”后第一帧的坐标残留。 */
+  private resetSingleBaseline(x: number, y: number, graceFrames: number = 0): void {
+    this.lastSingleX = x;
+    this.lastSingleY = y;
+    this.hasLastSingle = true;
+    this.singleGraceFrames = graceFrames > 0 ? graceFrames : 0;
   }
 
   private firstFinger(): Position2D {
@@ -275,7 +377,9 @@ export class MapGestures {
       return;
     }
     this.pinchInProgress = true;
+    this.pinchHappened = true; // @Jin 标记本序列发生过捏合，供全抬时抑制误 fling
     this.dragging = true; // 双指期间不触发单击判定
+    this.samples = [];    // @Jin 双指期不做单指速度采样，清空旧样本防降单指首帧误算位移
     this.lastPinchDist = MapGestures.distance(two[0], two[1]);
     this.lastPinchAngleRad = MapGestures.angleRad(two[0], two[1]);
     this.lastPinchCentroidY = (two[0].y + two[1].y) * 0.5;
@@ -296,7 +400,8 @@ export class MapGestures {
 
     // 捏合缩放：逐帧距离比（factor>1 张开放大），以质心为锚
     if (dist > 0 && this.lastPinchDist > 0 && this.sink.isReady()) {
-      this.sink.zoomBy(dist / this.lastPinchDist, cx, cy);
+      const f: number = dist / this.lastPinchDist;
+      this.sink.zoomBy(f, cx, cy);
       this.sink.requestRender();
     }
     this.lastPinchDist = dist;
@@ -371,10 +476,20 @@ export class MapGestures {
     if (dtMs <= 0 || dtMs > 120) {
       return null;
     }
-    const vx = (last.x - first.x) * 1000 / dtMs;
-    const vy = (last.y - first.y) * 1000 / dtMs;
-    if (Math.sqrt(vx * vx + vy * vy) < this.flingMinVelocity) {
+    let vx: number = (last.x - first.x) * 1000 / dtMs;
+    let vy: number = (last.y - first.y) * 1000 / dtMs;
+    const speed: number = Math.sqrt(vx * vx + vy * vy);
+    if (speed < this.flingMinVelocity) {
       return null;
+    }
+    // @Jin fling 初速上限：双指手势收尾若 samples 混入了跨指/陈旧点，算出的速度会异常巨大
+    // （真机日志曾出现单步平移 1643px）。物理上人手甩动速度有限，超过上限即等比压回，
+    // 既消除巨幅单步跳变，也避免超长惯性。正常快速甩动（<6000vp/s）手感不受影响。
+    const maxFlingSpeed: number = 6000.0;
+    if (speed > maxFlingSpeed) {
+      const k: number = maxFlingSpeed / speed;
+      vx *= k;
+      vy *= k;
     }
     return [vx, vy];
   }
@@ -398,8 +513,14 @@ export class MapGestures {
       setTimeout(this.flingFrame, 16);
       return;
     }
-    const dt = (now - this.lastFlingTs) / 1000;
+    let dt: number = (now - this.lastFlingTs) / 1000;
     this.lastFlingTs = now;
+    // @Jin 单帧步长钳制：setTimeout 在切帧/页面节流时两次回调间隔可能达数百 ms，
+    // v·dt 会一次性平移数百 vp（真机观测到孤立 dy≈620 的跳变）。把 dt 钳到 ≤32ms(≈2帧)，
+    // 被节流时只少滑一点，绝不产生巨幅单步（这是缩放/拖动收尾“猛跳”的另一处直接成因）。
+    if (dt > 0.032) {
+      dt = 0.032;
+    }
     // 摩擦衰减：按 16ms 基准帧归一（0.95/frame ≈ OverScroller 默认摩擦手感）
     const decay = Math.pow(this.flingFrictionPerFrame, dt / 0.016);
     this.flingVx *= decay;

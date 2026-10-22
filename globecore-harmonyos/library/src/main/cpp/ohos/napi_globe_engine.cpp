@@ -1012,6 +1012,48 @@ napi_value NativeSetCaBundle(napi_env env, napi_callback_info info) {
     return nullptr;
 }
 
+/// nativeSetTerrainTile(handle, z, x, y, bytes, lonMin, latMin, lonMax, latMax)
+/// 注入一块 quantized-mesh 地形瓦片（feature/terrain-pre）。
+///
+/// @param z/x/y    【本引擎瓦片网格】的键 —— 渲染时按 tileKey(z,x,y) 查地形缓存，
+///                 必须与底图瓦片编号一致，否则查不到。
+/// @param bytes    quantized-mesh v1.0 原始字节（ArkTS 侧下载后传入；传空字节数组=删除该块）
+/// @param lonMin/latMin/lonMax/latMax  该块数据真实覆盖的经纬度四至（度）。
+///                 标准 header 不含 bbox，必须由调用方按所用服务的分块方案算出。
+///                 当外部地形服务的分块方案与本引擎不同（如 EPSG:4326 等经纬网格）时，
+///                 z/x/y 用引擎编号、四至用服务编号算出的真实范围，即可正确采样。
+///
+/// 线程：可任意线程调用。内部只入队，GL 线程在下一帧帧首落到 terrainCache_。
+/// 仅 3D 球体模式消费地形（2D 平面网格不走高度采样）。
+napi_value NativeSetTerrainTile(napi_env env, napi_callback_info info) {
+    napi_value args[9];
+    gcohos::NapiGetArgs(env, info, 9, args);
+    int64_t handle = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return nullptr;
+    int32_t z = 0, x = 0, y = 0;
+    gcohos::NapiGetInt32(env, args[1], z);
+    gcohos::NapiGetInt32(env, args[2], x);
+    gcohos::NapiGetInt32(env, args[3], y);
+    std::vector<uint8_t> bytes = gcohos::NapiGetUint8Array(env, args[4]);
+    double lonMin = 0, latMin = 0, lonMax = 0, latMax = 0;
+    gcohos::NapiGetDouble(env, args[5], lonMin);
+    gcohos::NapiGetDouble(env, args[6], latMin);
+    gcohos::NapiGetDouble(env, args[7], lonMax);
+    gcohos::NapiGetDouble(env, args[8], latMax);
+    toGlobeEngine(handle)->setTerrainTile(z, x, y, bytes, lonMin, latMin, lonMax, latMax);
+    return nullptr;
+}
+
+/// nativeClearTerrain(handle)：清空全部地形缓存（换地形源时调用）。
+napi_value NativeClearTerrain(napi_env env, napi_callback_info info) {
+    napi_value args[1];
+    gcohos::NapiGetArgs(env, info, 1, args);
+    int64_t handle = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return nullptr;
+    toGlobeEngine(handle)->clearTerrain();
+    return nullptr;
+}
+
 } // namespace
 
 namespace gcohos {
@@ -1065,6 +1107,9 @@ napi_value RegisterGlobeEngine(napi_env env, napi_value exports) {
         {"nativeSetLocationMarkerIcon", nullptr, NativeSetLocationMarkerIcon, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeSetFontPath", nullptr, NativeSetFontPath, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeSetCaBundle", nullptr, NativeSetCaBundle, nullptr, nullptr, nullptr, napi_default, nullptr},
+        // ── 三维地形（feature/terrain-pre）──
+        {"nativeSetTerrainTile", nullptr, NativeSetTerrainTile, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"nativeClearTerrain", nullptr, NativeClearTerrain, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;

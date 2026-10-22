@@ -72,3 +72,19 @@ publish-har.ps1
 
 # 构建工具临时日志（aqtinstall 等）
 *.log
+
+# @Jin install_headers 复制到 include 根的 minizip/expat/sqlite 三方头（与 *.a 配套生成，不入仓）
+globecore/src/main/cpp/include/crypt.h
+globecore/src/main/cpp/include/expat.h
+globecore/src/main/cpp/include/expat_config.h
+globecore/src/main/cpp/include/expat_external.h
+globecore/src/main/cpp/include/ioapi.h
+globecore/src/main/cpp/include/iowin32.h
+globecore/src/main/cpp/include/mztools.h
+globecore/src/main/cpp/include/sqlite3.h
+globecore/src/main/cpp/include/sqlite3ext.h
+globecore/src/main/cpp/include/unzip.h
+globecore/src/main/cpp/include/zip.h
+
+# @Jin DevEco 预览器产物
+globecore-harmonyos/library/.preview/

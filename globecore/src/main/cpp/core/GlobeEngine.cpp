@@ -992,10 +992,11 @@ void GlobeEngine::releaseGl() {
     renderer_.release();
 }
 
-void GlobeEngine::setTerrainTile(int z, int x, int y, const std::vector<uint8_t> &bytes) {
+void GlobeEngine::setTerrainTile(int z, int x, int y, const std::vector<uint8_t> &bytes,
+                                 double lonMin, double latMin, double lonMax, double latMax) {
     // 转发到 Renderer DEM 缓存（须 GL 线程调用，与 buildGlobeTileMesh 同上下文）。
     // 不持 layersMtx_：terrainCache_ 是 Renderer 私有成员，只在 GL 线程访问（与瓦片纹理缓存同口径）。
-    renderer_.setTerrainTile(z, x, y, bytes);
+    renderer_.setTerrainTile(z, x, y, bytes, lonMin, latMin, lonMax, latMax);
     if (renderCallback_) renderCallback_(); // 触发重绘使地形抬升即时生效
 }
 

@@ -47,7 +47,8 @@ struct TileLayer {
     /// （GL 资源只可在 GL 线程删除）。回收后该层转入闲置：其 [loader] 排队项已清空、就绪字节已丢弃。
     std::atomic<bool> discardTextures{false};
 
-    TileLayer(std::string cacheDir, std::string urlTemplate, int maxLevel_, bool overlay_, int numThreads = 4)
+    // @Jin: 在线影像/注记两层各 6 个 worker，在天地图限流风险和首屏批量补齐速度之间取平衡。
+    TileLayer(std::string cacheDir, std::string urlTemplate, int maxLevel_, bool overlay_, int numThreads = 6)
         : maxLevel(maxLevel_), overlay(overlay_) {
         cache.setBaseDir(std::move(cacheDir));
         loader = std::make_unique<TileLoader>(cache, numThreads);

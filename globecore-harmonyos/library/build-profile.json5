@@ -6,13 +6,17 @@
     // 第三方 .a 由 `build-scripts/build-all.sh --target ohos` 产出到 build-scripts/out/ohos/<abi>/。
     "externalNativeOptions": {
       "path": "./src/main/cpp/CMakeLists.txt",
-      // 引擎源根 GLOBECORE_ENGINE_ROOT 由 CMakeLists 自行从模块目录向上派生（不在此传相对 -D，
-      // 避免不同构建目录下相对基准漂移）；此处留空作自定义参数挂点
-      "arguments": "",
+      // 本工程经 junction 引入 demo，CMakeLists 默认的「向上 5 级派生」基准会漂移到不存在的路径，
+      // 故在此显式传绝对路径覆盖（CMake 接受正斜杠）。第三方 .a 目录同理指向本地构建产物。
+      // GLOBECORE_LITE=ON：裁掉 GDAL/PROJ/KML 依赖链（详见 CMakeLists 顶部注释），
+      // 在线瓦片 + 三维地形不受影响，可省下 GDAL/PROJ 的长时间交叉编译。
+      "arguments": "-DGLOBECORE_LITE=ON -DGLOBECORE_ENGINE_ROOT=E:/WorkBuddy/qt_ohos_map_sdk/vendor/GlobeCore/globecore/src/main/cpp -DGLOBECORE_THIRD_PARTY_DIR=E:/WorkBuddy/qt_ohos_map_sdk/build/ohos-deps/export",
       "cppFlags": "",
+      // feature/terrain-pre：本地验证阶段只编 arm64-v8a（真机 5KLBB25911200313）。
+      // 第三方 .a 需按 ABI 各编一套（每套 GDAL+PROJ 约 40 分钟），先保真机闭环；
+      // 待 arm64 跑通后再补 x86_64（模拟器）并恢复双 ABI。
       "abiFilters": [
-        "arm64-v8a",
-        "x86_64"
+        "arm64-v8a"
       ]
     }
   },

@@ -109,6 +109,31 @@ bool TileLoader::hasRasterSource() const {
     return !rasterPath_.empty();
 }
 
+void TileLoader::beginView(uint64_t viewSignature) {
+    // @Jin: 相同视口的补帧/续帧不清队列，保证已下载瓦片能按预算渐进上传；视口签名变化才切换代际。
+    bool sameView = false;
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        sameView = hasViewSignature_ && viewSignature_ == viewSignature;
+    }
+    if (sameView) return;
+
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        if (hasViewSignature_ && viewSignature_ == viewSignature) return;
+        hasViewSignature_ = true;
+        viewSignature_ = viewSignature;
+        ++viewGeneration_;
+        // @Jin: 只清理尚未开工的排队项；在途项由 inflight_ 代际判断，能复用的升级、不能复用的不交付。
+        queue_.clear();
+        pending_.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lk(readyMtx_);
+        ready_.clear(); // @Jin: 旧视口已解码结果不再抢占本帧 GL 纹理上传预算。
+    }
+}
+
 void TileLoader::request(int z, int x, int y) {
     // 不再因无 URL 模板而跳过：磁盘读取也走本异步管线（GL 线程绝不同步读盘，对齐 参考实现 getTexture 不阻塞渲染线程）。
 
@@ -133,7 +158,13 @@ void TileLoader::request(int z, int x, int y) {
     {
         std::lock_guard<std::mutex> lk(mtx_);
         if (stop_) return;
-        if (pending_.count(k) != 0) return; // 去重：已排队或进行中
+        if (pending_.count(k) != 0) return; // @Jin: 已排队的同 key 不重复入队。
+        auto inFlight = inflight_.find(k);
+        if (inFlight != inflight_.end()) {
+            // @Jin: 旧视口已在读取/下载、但新视口仍需要该瓦时，直接把在途任务升级为新代际，避免重复请求。
+            inFlight->second = viewGeneration_;
+            return;
+        }
         // 失败退避：冷却窗口内不重复请求；到期则放行本次重试（下次仍失败会重新记入）
         auto fit = failedUntil_.find(k);
         if (fit != failedUntil_.end()) {
@@ -141,7 +172,7 @@ void TileLoader::request(int z, int x, int y) {
             failedUntil_.erase(fit);
         }
         pending_.insert(k);
-        queue_.push_back(Request{z, x, y});
+        queue_.push_back(Request{z, x, y, viewGeneration_});
         // 超限丢最旧：被丢者同步移出 pending_，若仍可见下一帧会重新入队（去重不受损）
         while (queue_.size() > kMaxQueue) {
             const Request &oldest = queue_.front();
@@ -155,7 +186,17 @@ void TileLoader::request(int z, int x, int y) {
 void TileLoader::drainReady(std::vector<ReadyTile> &out, int maxCount) {
     std::lock_guard<std::mutex> lk(readyMtx_);
     int taken = 0;
+    uint64_t currentGeneration = 0;
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        currentGeneration = viewGeneration_;
+    }
+    // @Jin: 从队首逐项检查，过期结果直接丢弃；同视口结果仍遵循单帧上传预算。
     while (!ready_.empty() && (maxCount < 0 || taken < maxCount)) {
+        if (ready_.front().generation != currentGeneration) {
+            ready_.pop_front();
+            continue;
+        }
         out.push_back(std::move(ready_.front()));
         ready_.pop_front();
         ++taken;
@@ -165,7 +206,8 @@ void TileLoader::drainReady(std::vector<ReadyTile> &out, int maxCount) {
 bool TileLoader::hasPendingOrReady() {
     {
         std::lock_guard<std::mutex> lk(mtx_);
-        if (!pending_.empty()) return true;
+        // @Jin: pending_ 只表示排队项；worker 出队后进入 inflight_，在途网络未完成时也必须持续触发补帧。
+        if (!pending_.empty() || !inflight_.empty()) return true;
     }
     {
         std::lock_guard<std::mutex> lk(readyMtx_);
@@ -179,15 +221,17 @@ void TileLoader::cancelPending() {
         std::lock_guard<std::mutex> lk(mtx_);
         queue_.clear();
         pending_.clear();
+        inflight_.clear();
+        ++viewGeneration_;
+        hasViewSignature_ = false;
         failedUntil_.clear();
     }
     {
         std::lock_guard<std::mutex> lk(readyMtx_);
         ready_.clear();
     }
-    // 只清队列、不置 stop_/abort_：墓碑槽位仍持有本对象（容器不 erase），工作线程无活可干时自然回到
-    // cv_.wait 挂起（零 CPU，仅留线程栈），且万一上层重新启用该层仍可正常工作；
-    // 在途那块交给它跑完（GDAL 生成不可中断），其交付因无人 drain 而随就绪队列一并作废。
+    // @Jin: 不置 stop_/abort_：墓碑槽位仍持有本对象，工作线程无活可干时回到 cv_.wait 挂起。
+    // @Jin: 代际已经递增，旧 GDAL/网络任务即使跑完，其结果也不会进入当前 ready 队列。
 }
 
 void TileLoader::workerLoop() {
@@ -213,6 +257,9 @@ void TileLoader::workerLoop() {
             }
             req = queue_[best];
             queue_.erase(queue_.begin() + static_cast<std::ptrdiff_t>(best));
+            const uint64_t k = key(req.z, req.x, req.y);
+            pending_.erase(k);
+            inflight_[k] = req.generation;
         }
 
         // 诊断采样：本 loader 前若干块处理瓦片逐块打印来源（排查「栅格层零日志」归属问题），超预算自动静默
@@ -224,6 +271,21 @@ void TileLoader::workerLoop() {
             urlTemplateSnapshot = urlTemplate_;
         }
         const bool sampled = diagSample_.fetch_sub(1) > 0;
+        bool stale = false;
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            auto inFlight = inflight_.find(key(req.z, req.x, req.y));
+            if (inFlight == inflight_.end() || inFlight->second != viewGeneration_) {
+                stale = true;
+            } else {
+                req.generation = inFlight->second;
+            }
+        }
+        if (stale) {
+            std::lock_guard<std::mutex> lk(mtx_);
+            inflight_.erase(key(req.z, req.x, req.y));
+            continue;
+        }
         if (sampled) {
             LOGI("TileLoader process z=%d x=%d y=%d raster=%s net=%s cacheDir=%s",
                  req.z, req.x, req.y,
@@ -237,11 +299,17 @@ void TileLoader::workerLoop() {
         //    继续走下载/失败冷却——若不过滤，读盘命中坏瓦会被解码失败却计为成功，令退避失效并逐帧重刷。
         std::vector<uint8_t> bytes;
         bool haveBytes = cache_.readTile(req.z, req.x, req.y, bytes) && !bytes.empty();
+        // @Jin: 记录每块瓦片的第一来源；磁盘命中后不会进入网络分支，可直接验证缓存是否真正节省请求。
+        bool fromCache = haveBytes;
+        bool fromNetwork = false;
+        bool fromRaster = false;
         if (haveBytes && !looksLikeImage(bytes)) {
             LOGW("磁盘瓦片损坏，已清除 z=%d x=%d y=%d size=%zu", req.z, req.x, req.y, bytes.size());
             cache_.removeTile(req.z, req.x, req.y);
             bytes.clear();
             haveBytes = false;
+            // @Jin: 坏缓存会自愈为网络重取，不能计入有效缓存命中，否则会高估缓存节省的请求数。
+            fromCache = false;
         }
         // 2) 磁盘未命中 → 栅格层：按 (z,x,y) 四至用 GDAL 重投影即时生成 PNG 字节，成功则回写缓存
         if (!haveBytes && !rasterPath.empty()) {
@@ -256,12 +324,27 @@ void TileLoader::workerLoop() {
             if (genOk && !bytes.empty()) {
                 cache_.writeTile(req.z, req.x, req.y, bytes);
                 haveBytes = true;
+                fromRaster = true;
             }
             // 无交集/生成失败：不联网（栅格层无 URL），本瓦片无字节，由祖先兜底或保持透明
         }
         // 3) 仍未命中 → 联网拉取（可被 abort_ 中断），成功则原子写盘。
         //    响应体须过图像魔数校验才落盘/交付：图源限流时以 HTTP 200 回异常 XML，不可当瓦片污染缓存。
         if (!haveBytes && rasterPath.empty()) {
+            {
+                std::lock_guard<std::mutex> lk(mtx_);
+                auto inFlight = inflight_.find(key(req.z, req.x, req.y));
+                if (inFlight == inflight_.end() || inFlight->second != viewGeneration_) {
+                    stale = true;
+                } else {
+                    req.generation = inFlight->second;
+                }
+            }
+            if (stale) {
+                std::lock_guard<std::mutex> lk(mtx_);
+                inflight_.erase(key(req.z, req.x, req.y));
+                continue;
+            }
             bytes.clear();
             const std::string url = buildUrl(req.z, req.x, req.y);
             bool ok = !url.empty() &&
@@ -277,11 +360,21 @@ void TileLoader::workerLoop() {
             if (ok) {
                 cache_.writeTile(req.z, req.x, req.y, bytes);
                 haveBytes = true;
+                fromNetwork = true;
             } else if (!abort_.load()) {
                 LOGW("瓦片读盘/下载均失败 z=%d x=%d y=%d", req.z, req.x, req.y);
             }
         }
-        if (haveBytes) {
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            auto inFlight = inflight_.find(key(req.z, req.x, req.y));
+            if (inFlight == inflight_.end() || inFlight->second != viewGeneration_) {
+                stale = true;
+            } else {
+                req.generation = inFlight->second;
+            }
+        }
+        if (haveBytes && !stale) {
             // worker 线程解码 RGBA（替代 GL 线程解码）：PNG/JPEG→RGBA8888 在此完成，
             // GL 线程 drainReady 后只做 glTexImage2D 上传，免一扎瓦片同时就绪时 GL 线程集中解码丢帧。
             int w = 0, h = 0;
@@ -296,6 +389,7 @@ void TileLoader::workerLoop() {
                     rt.y = req.y;
                     rt.width = w;
                     rt.height = h;
+                    rt.generation = req.generation;
                     rt.rgba = std::move(rgba);
                     ready_.push_back(std::move(rt));
                 }
@@ -305,6 +399,9 @@ void TileLoader::workerLoop() {
                 LOGW("瓦片解码失败，清除缓存 z=%d x=%d y=%d size=%zu", req.z, req.x, req.y, bytes.size());
                 cache_.removeTile(req.z, req.x, req.y);
                 haveBytes = false;
+                // @Jin: 只有成功解码并交付才算有效命中；坏缓存进入失败分支后会按冷却策略重试。
+                fromCache = false;
+                fromRaster = false;
             }
         }
 
@@ -312,13 +409,41 @@ void TileLoader::workerLoop() {
             std::lock_guard<std::mutex> lk(mtx_);
             const uint64_t k = key(req.z, req.x, req.y);
             pending_.erase(k);
+            inflight_.erase(k);
+            if (stale) continue; // @Jin: 过期视口不计失败、不写退避，把 worker 立即让给当前视口。
             // 失败退避以「取字节是否成功」为准（非是否交付）：高水位丢弃的瓦片字节已在盘，
             // 不应误记冷却——否则会在 30s 内压制其重请求，远景兜底图迟迟补不上。
             if (haveBytes) {
                 failedUntil_.erase(k); // 成功取到字节：清除旧失败标记（下帧可立即重请求读盘秒得）
+                const uint64_t processed = statProcessed_.fetch_add(1) + 1;
+                if (fromCache) statCacheHits_.fetch_add(1);
+                if (fromNetwork) statNetworkHits_.fetch_add(1);
+                if (fromRaster) statRasterGenerated_.fetch_add(1);
+                // @Jin: 前 32 块逐块诊断之后，每处理 64 块输出一次聚合统计，方便真机 hilog 对比缓存/网络占比。
+                if (!sampled && (processed % 64 == 0)) {
+                    LOGI("TileLoader stats processed=%llu cache=%llu network=%llu raster=%llu failed=%llu cacheDir=%s",
+                         static_cast<unsigned long long>(processed),
+                         static_cast<unsigned long long>(statCacheHits_.load()),
+                         static_cast<unsigned long long>(statNetworkHits_.load()),
+                         static_cast<unsigned long long>(statRasterGenerated_.load()),
+                         static_cast<unsigned long long>(statFailures_.load()),
+                         cache_.baseDir().c_str());
+                }
             } else if (!abort_.load()) {
                 // 失败退避：记录冷却截止时刻，窗口内 request() 直接忽略（防限流风暴死循环）
                 failedUntil_[k] = std::chrono::steady_clock::now() + kFailCooldown;
+                const uint64_t processed = statProcessed_.fetch_add(1) + 1;
+                statFailures_.fetch_add(1);
+                // @Jin: 失败也计入聚合统计，限流或异常 XML 时能从 hilog 直接看到网络失败规模。
+                if (!sampled && (processed % 64 == 0 || processed <= 8)) {
+                    LOGI("TileLoader stats processed=%llu cache=%llu network=%llu raster=%llu failed=%llu cacheDir=%s",
+                         static_cast<unsigned long long>(processed),
+                         static_cast<unsigned long long>(statCacheHits_.load()),
+                         static_cast<unsigned long long>(statNetworkHits_.load()),
+                         static_cast<unsigned long long>(statRasterGenerated_.load()),
+                         static_cast<unsigned long long>(statFailures_.load()),
+                         cache_.baseDir().c_str());
+                }
             }
         }
     }

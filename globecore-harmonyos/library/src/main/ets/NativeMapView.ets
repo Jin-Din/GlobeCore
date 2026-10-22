@@ -226,6 +226,28 @@ export struct NativeMapView {
   }
 
   /**
+   * 注入一块三维地形瓦片（Cesium quantized-mesh v1.0，feature/terrain-pre）。
+   *
+   * [z]/[x]/[y] 用本引擎瓦片网格编号（与底图瓦片一致），[bbox] 用该地形服务自己的分块方案
+   * 算出的真实四至 [lonMin, latMin, lonMax, latMax]（度）—— 标准 header 不含 bbox，
+   * 必须显式给出，否则高度采样会整体错位。
+   * [bytes] 传空数组表示删除该块。仅 3D 球体模式消费地形。
+   *
+   * 可任意线程调用；native 侧入队，GL 线程下一帧帧首生效。地形瓦片的下载与调度由宿主负责
+   * （本 HAR 不带地形服务适配，避免绑定具体数据源与坐标系）。
+   */
+  setTerrainTile(z: number, x: number, y: number, bytes: Uint8Array, bbox: number[]): void {
+    NativeLib.nativeSetTerrainTile(this.nativeHandle, z, x, y, bytes, bbox);
+    this.requestRender();
+  }
+
+  /** 清空全部三维地形缓存（换地形源 / 关闭地形时调用）；清空后地表回到零高程 */
+  clearTerrain(): void {
+    NativeLib.nativeClearTerrain(this.nativeHandle);
+    this.requestRender();
+  }
+
+  /**
    * 移除一个瓦片图源图层（index 为 addTileLayer / addRasterLayer 的加入次序，0 起）：墓碑—native
    * 置 removed + 隐藏，不 erase 底层容器，其它层 index 保持稳定；其瓦片纹理由 GL 线程下一帧释放
    * （其它层纹理原封不动），后台加载队列即时清空。宿主删除栅格图层时可调本函数就地生效，不必

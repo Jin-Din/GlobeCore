@@ -44,6 +44,7 @@ public:
         int y = 0;
         int width = 0;
         int height = 0;
+        uint64_t generation = 0; // @Jin: 标记瓦片由哪一个视口代际产出，GL 线程丢弃已滑出视口的旧结果。
         std::vector<uint8_t> rgba;  // 已解码 RGBA8888（width*height*4）
     };
 
@@ -73,6 +74,10 @@ public:
     /// 防止大范围视图（3D 球面）触发服务限流（HTTP 429）后「失败→纹理驱逐→重请求→再失败」请求风暴死循环。
     void request(int z, int x, int y);
 
+    /// @Jin: 声明当前帧/当前视口真正需要的瓦片集合签名；签名变化时取消尚未开工的旧请求，
+    /// 避免初始化相机或连续手势期间把多个过期视口的瓦片全部下载，造成请求量突增和首屏 GL 上传抖动。
+    void beginView(uint64_t viewSignature);
+
     /// 取走就绪瓦片（GL 线程每帧调用）。out 追加，不清空原有内容。
     /// [maxCount] 为本次最多取走的数量（<0 表示全部）：限制单帧解码上传量，避免一批瓦片同时就绪时
     /// GL 线程集中解码造成掉帧（时快时慢）；未取走的留在队列，下一帧继续（渐进补齐，视觉连续）。
@@ -82,14 +87,14 @@ public:
     /// RENDERMODE_WHEN_DIRTY 省电模式下，瓦片异步到位需据此触发重绘；全部就绪后返回 false 停绘。
     bool hasPendingOrReady();
 
-    /// 丢弃尚未开工的全部请求与已就绪待上传的字节（层被宿主移除时用）：清排队项/去重集/失败退避表与就绪队列，
-    /// 令闲置的工作线程回到条件变量挂起。不中断在途的一块（GDAL 生成/下载）——其结果因无人 drain 自然丢弃，
-    /// 故调用后本 loader 不再产生任何后续工作。线程安全。
+    /// @Jin: 丢弃尚未开工的全部请求与已就绪字节（层被宿主移除时用），并递增视口代际；
+    /// @Jin: 排队项/去重集/在途表/失败退避表全部清空，在途任务即使返回也会因代际过旧被丢弃。
     void cancelPending();
 
 private:
     struct Request {
         int z, x, y;
+        uint64_t generation = 0; // @Jin: 入队时所属视口代际，出队后用于识别过期请求。
     };
 
     static uint64_t key(int z, int x, int y);
@@ -104,6 +109,11 @@ private:
     std::condition_variable cv_;
     std::deque<Request> queue_;
     std::unordered_set<uint64_t> pending_;
+    // @Jin: 在途瓦片 key -> 视口代际；视口切换后仍被新视口需要时可原地升级，避免同 key 重复联网。
+    std::unordered_map<uint64_t, uint64_t> inflight_;
+    uint64_t viewGeneration_ = 1;
+    uint64_t viewSignature_ = 0;
+    bool hasViewSignature_ = false;
     // 失败退避表（mtx_ 保护）：key → 冷却截止时刻；成功交付或到期后移除
     std::unordered_map<uint64_t, std::chrono::steady_clock::time_point> failedUntil_;
     bool stop_ = false;
@@ -127,6 +137,13 @@ private:
 
     // 诊断采样计数（排查瓦片去向）：本 loader 前若干块处理瓦片打一条带来源标识的日志，之后静默
     std::atomic<int> diagSample_{32};
+
+    // @Jin: 聚合统计瓦片来源，用来核实重复浏览是否命中磁盘缓存，避免只凭后台请求总量误判缓存失效。
+    std::atomic<uint64_t> statCacheHits_{0};
+    std::atomic<uint64_t> statNetworkHits_{0};
+    std::atomic<uint64_t> statRasterGenerated_{0};
+    std::atomic<uint64_t> statFailures_{0};
+    std::atomic<uint64_t> statProcessed_{0};
 };
 
 } // namespace globecore

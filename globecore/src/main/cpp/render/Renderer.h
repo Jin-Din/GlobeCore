@@ -91,7 +91,14 @@ public:
     /// 注入/更新一块 quantized-mesh 地形瓦片（解码 bytes → 存入 LRU 缓存）。
     /// 供 buildGlobeTileMesh 在生成球面网格时采样高度（替代 alt=0 贴地）。
     /// bytes 为空则清除该 tile 的缓存。须在 GL 线程调用（与 buildGlobeTileMesh 同帧/上下文）。
-    void setTerrainTile(int z, int x, int y, const std::vector<uint8_t> &bytes);
+    ///
+    /// 【feature/terrain-pre】新增四至参数：标准 quantized-mesh header 不含 bbox，
+    /// 必须由调用方按所用地形服务的分块方案算出瓦片四至。
+    /// (z,x,y) 仍是【本引擎瓦片网格】的键（渲染时按它查缓存），可与四至所属的外部瓦片不同号
+    /// —— 这样外部服务用别的分块方案（如 EPSG:4326 等经纬网格）时，只要四至给对即可正确采样。
+    /// @param lonMin/latMin/lonMax/latMax 该地形数据实际覆盖的经纬度范围（度）
+    void setTerrainTile(int z, int x, int y, const std::vector<uint8_t> &bytes,
+                        double lonMin, double latMin, double lonMax, double latMax);
 
     /// 清除全部地形缓存（上下文重建/换地形源时调用）。
     void clearTerrain();
@@ -113,8 +120,8 @@ private:
     bool sunFollowCamera_ = true;
 
 private:
-    /// 查询某球面瓦片在给定经纬度处的地形高度（米，椭球面以上）。
-    /// 缓存未命中返回 0.0（等同无地形）。供 buildGlobeTileMesh 逐顶点调用。
+    /// 查询某经纬度处的地形高度（米，椭球面以上）。
+    /// @Jin: 3D 渲染瓦片存在多级 LOD，查询按 DEM bbox 覆盖关系匹配，而不是要求渲染瓦片 key 与注入 key 相同。
     double sampleTerrainHeight(const GlobeTile &tile, double lon, double lat) const;
 
 private:
@@ -168,8 +175,13 @@ private:
     /// 交错布局 [x,y,z,u,v,r,g,b,a]（kGlobeFloatsPerVertex=9）——位置为大地坐标减眼点（RTC，
     /// double 差后转 float），uv 按瓦片经纬度线性（v=0 对应北边=图像顶行，同 2D 单位四边形口径），
     /// 颜色为占位色（纹理绘制时忽略）。包围盒外约 0.75% 外扩盖住跨级 T 形接缝（同 2D texelPad 思路）。
-    void buildGlobeTileMesh(const GlobeTile &tile, const Vec3 &eye, float r, float g, float b,
-                            std::vector<float> &verts) const;
+    // @Jin 构建「瓦片中心局部坐标」静态网格：顶点存 ecefVertex - tileCenterEcef（float），
+    // @Jin 瓦片中心 ECEF 经 centerEcef 输出；占位棋盘色按 (x+y) 奇偶烘焙。几何只与 DEM 内容有关。
+    void buildGlobeTileMeshLocal(const GlobeTile &tile, std::vector<float> &verts,
+                                 Vec3 &centerEcef) const;
+    // @Jin 取/建瓦片静态 VBO（按 tileKey 缓存，terrainVersion_ 变化时原地重建），含 LRU 上限。
+    struct TileGlobeGpuMesh;
+    TileGlobeGpuMesh &acquireTileGlobeMesh(const GlobeTile &tile);
 
     /// 3D 定位 marker（P2.b）：把 marker 经纬度 CPU 投影到屏幕像素（复用 viewProjRtc，含相机朝向），
     /// 在屏幕像素空间用 screenOrtho 画罗盘图标 / 蓝点白边圆 + 移动方向箭头（箭头方向由「沿 heading
@@ -361,7 +373,10 @@ private:
     GLint g3UTexture_ = -1;
     GLint g3UUvOffset_ = -1;
     GLint g3UUvScale_ = -1;
-    GLint g3UEye_ = -1;       // 眼点 ECEF（顶点求球面法向用）
+    // @Jin 静态瓦片 VBO 改造：原 uEye（眼点 ECEF）拆为 uRtcOffset（瓦片中心−眼点，逐帧变）+
+    // @Jin uTileCenter（瓦片中心 ECEF，随 VBO 固化），顶点缓冲因此可完全静态、跨帧复用。
+    GLint g3URtcOffset_ = -1;  // 瓦片中心 ECEF − eye：局部坐标还原为眼点相对坐标
+    GLint g3UTileCenter_ = -1; // 瓦片中心 ECEF：aPos 加回中心即表面点 ECEF，求球面法向
     GLint g3USunDir_ = -1;   // 日光方向（归一，由 setSunDirection 设置）
     GLint g3UAmbient_ = -1;  // 环境光底（kGlobeAmbient）
 
@@ -371,7 +386,9 @@ private:
     GLint gc3APos_ = -1;
     GLint gc3AColor_ = -1;
     GLint gc3UMvp_ = -1;
-    GLint gc3UEye_ = -1;
+    // @Jin 占位通路与纹理通路同口径（uRtcOffset/uTileCenter 见纹理通路注释）。
+    GLint gc3URtcOffset_ = -1;
+    GLint gc3UTileCenter_ = -1;
     GLint gc3USunDir_ = -1;
     GLint gc3UAmbient_ = -1;
 
@@ -448,7 +465,20 @@ private:
     GLint gfiMvp_ = -1;
     GLint gfiTexture_ = -1;
 
-    GLuint vboGlobeMesh_ = 0;              // 3D 网格动态 VBO（Pass A 批量一次上传；Pass B 逐瓦片重传）
+    GLuint vboGlobeMesh_ = 0;              // 3D 网格动态 VBO（保留：其它通路备用；瓦片已改静态缓存）
+    // @Jin 【卡顿优化】瓦片静态网格 VBO 缓存：几何按 tileKey 缓存，仅在 terrainVersion_ 变化时
+    // @Jin 原地重建；稳态浏览（平移/旋转、无 DEM 增删）时逐瓦片只更新 uRtcOffset 等 uniform 并 draw，
+    // @Jin 彻底消除原「每帧 544 顶点重建 × 可见瓦片数 + 每瓦片一次 glBufferData」的 CPU/GPU 开销。
+    struct TileGlobeGpuMesh {
+        GLuint vbo = 0;                       // 瓦片私有 VBO（几何静态，GL_STATIC_DRAW）
+        int vertexCount = 0;                  // 顶点数（TRIANGLE_STRIP）
+        Vec3 centerEcef{0.0, 0.0, 0.0};       // 瓦片中心 ECEF（double 计算后转 float 保存）
+        uint64_t terrainVersion = 0;          // 构建时的地形版本号（不一致即重建）
+        uint64_t lastUsed = 0;                // LRU 时间戳（frameTick_）
+    };
+    std::unordered_map<uint64_t, TileGlobeGpuMesh> tileGlobeMesh_;
+    static constexpr size_t kMaxTileGlobeMesh = 512; // @Jin ≤544v×32B×512≈9MB 显存上限
+    uint64_t terrainVersion_ = 0; // @Jin terrainCache_ 每发生一次增/删/清空自增，作瓦片 VBO 失效号
     std::vector<GlobeTile> globeTilesScratch_; // 可见叶瓦片 scratch（逐层复用，避免反复堆分配）
     std::vector<float> globeMeshScratch_;      // 单瓦片网格 scratch（Pass B 逐瓦片上传用）
     GeographicQuadtree geoQuadtree_;           // #11 带帧间一致性的地理四叉树（替代 Tessellator 全量重建）
@@ -518,11 +548,27 @@ private:
     Matrix4 lastOrtho_;
 
     // ==================== 地形 DEM 缓存（quantized-mesh 解码后的高度采样数据） ====================
-    // 以 tileKey(z,x,y) 索引 quantized-mesh 解码数据，buildGlobeTileMesh 逐顶点采样高度。
-    // LRU 淘汰防无界增长（单瓦片约 1-2k 顶点 × ~48B ≈ 100KB，缓存上限 ~16MB）。
+    // @Jin: 服务 DEM 按自身 geographic tile 全局去重，多个引擎/渲染瓦片共享同一份数据；
+    // @Jin: 不能按引擎 key 保存，否则相邻引擎瓦片引用同一服务 DEM 时会重复解码并挤占 LRU。
     std::unordered_map<uint64_t, QuantizedMeshData> terrainCache_;
     std::deque<uint64_t> terrainLru_; // 最近使用顺序（front=最旧）
-    static constexpr size_t kMaxTerrainTiles = 160; // ~160 tiles × ~100KB ≈ 16MB
+    static constexpr size_t kMaxTerrainTiles = 240; // @Jin: 按唯一服务 DEM 条目计数，控制内存上限。
+
+    // ── 地形注入队列（feature/terrain-pre）──
+    // terrainCache_ 只允许 GL 线程访问，但地形瓦片由 ArkTS 侧下载后经 NAPI 注入（非 GL 线程）。
+    // 故这里做「生产者入队 / GL 线程帧首消费」：setTerrainTile/clearTerrain 只入队，
+    // drainTerrainPending() 在 onDrawFrame 开头（GL 线程）把队列应用到 terrainCache_。
+    // 这样既免了锁住整段建网格过程，也不会有跨线程写 terrainCache_ 的数据竞争。
+    struct PendingTerrain {
+        int z = 0, x = 0, y = 0;
+        std::vector<uint8_t> bytes;   // 空 = 删除该 tile
+        double lonMin = 0, latMin = 0, lonMax = 0, latMax = 0;
+        bool clearAll = false;        // true = 清空全部地形
+    };
+    std::mutex terrainMtx_;
+    std::vector<PendingTerrain> terrainPending_;
+    /// 消费待注入队列并写入 terrainCache_。仅 GL 线程调用（onDrawFrame 帧首）。
+    bool drainTerrainPending(); // @Jin 返回是否仍有未解码 DEM（驱动按需渲染下的连续分批解码）
 
     // ==================== #9 RHI 抽象层 ====================
     // 后端无关渲染硬件接口：onSurfaceCreated 中由 RHIFactory 创建（默认 GLES2Backend），
