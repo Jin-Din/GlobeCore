@@ -1704,6 +1704,9 @@ bool Renderer::renderGlobeLayer3D(size_t layerIndex, const Navigator::Camera3D &
     const double tanHalf = std::tan(nav_.fieldOfViewDeg() * 0.5 * 3.14159265358979323846 / 180.0);
     TessCamera tc;
     tc.eye = cam.eye;
+    // @Jin 帧间缓存必须同时看到相机朝向：仅比较眼点会让 tilt/heading 后继续复用旧视锥叶集，造成周边黑区。
+    tc.forward = cam.forward;
+    tc.up = cam.up;
     tc.viewProj = viewProjAbs;
     tc.frustumPlanes = cam.frustumPlanes; // 直接采用 Navigator 预提的 double 平面
     // #11 用带帧间一致性的地理四叉树替代 Tessellator 全量重建：

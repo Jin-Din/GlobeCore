@@ -16,7 +16,7 @@ namespace globecore {
  *
  *  1. **帧间一致性（frame coherence）**：[Tessellator] 每帧从根瓦片 DFS 全量重建可见叶集；
  *     本类缓存上帧可见叶集与相机快照，相机微动（< 阈值）时直接复用上帧结果（零递归开销），
- *     仅在相机显著移动/参数变更时触发全量重建。高频重绘（手势拖拽/缩放）下 CPU 占用大幅下降。
+ *     仅在相机显著移动/参数变更时触发全量重建；@Jin 朝向变化不视为微动，避免倾斜/旋转后复用旧叶集。
  *
  *  2. **极冠覆盖（polar cap）**：Web 墨卡托在 ±85.0511° 截断，极冠 85.05°~90° 无瓦片纹理。
  *     本类对触极行瓦片（latMax≥85.0511° 或 latMin≤-85.0511°）输出时把经纬度边界外推到 ±90°，
@@ -45,6 +45,9 @@ private:
     /// 帧间缓存：上帧相机状态 + 可见瓦片集
     bool hasPrev_ = false;
     Vec3 prevEye_{};
+    // @Jin 上帧相机基：forward 相同但 up 不同（俯视时旋转）也必须触发重建。
+    Vec3 prevForward_{};
+    Vec3 prevUp_{};
     double prevTanHalfFov_ = -1.0;
     int prevViewportH_ = -1;
     int prevTargetLevel_ = -1;
@@ -52,9 +55,10 @@ private:
     double prevDetailFactor_ = -1.0;
     std::vector<GlobeTile> prevVisible_;
 
-    /// 判断相机状态相对上帧是否「显著变化」（需全量重建）。微动则复用上帧结果。
-    bool cameraChangedSignificantly(const Vec3 &eye, double tanHalfFov, int viewportH,
-                                    int targetLevel, int maxLevel, double detailFactor) const;
+    /// @Jin 判断相机是否发生会影响可见叶集的变化；朝向变化必须立即重建，眼点阈值按离地高度缩放。
+    bool cameraChangedSignificantly(const TessCamera &cam, double eyeAlt, double tanHalfFov,
+                                    int viewportH, int targetLevel, int maxLevel,
+                                    double detailFactor) const;
 };
 
 } // namespace globecore

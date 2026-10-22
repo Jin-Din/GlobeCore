@@ -220,10 +220,16 @@ void GeographicQuadtree::buildVisibleTiles(const TessCamera &cam, int targetLeve
     if (targetLevel < 0) targetLevel = 0;
     if (maxLevel < 0) maxLevel = 0;
 
+    // @Jin 先求离地高度，供帧间缓存按“当前尺度”判断位移；不能再用地心距 1% 的绝对阈值。
+    double eyeLonDeg = 0.0;
+    double eyeLatDeg = 0.0;
+    double eyeAlt = 0.0;
+    globe.cartesianToGeographic(cam.eye, eyeLonDeg, eyeLatDeg, eyeAlt);
+
     // #11 帧间一致性：相机微动时直接复用上帧结果（零递归开销）。
-    // 阈值取眼点位移 < 1% 眼高（手势拖拽/惯性滑行的典型微动量级）。
-    // 显著移动 / 参数变更 / 首帧 → 全量重建。
-    if (hasPrev_ && !cameraChangedSignificantly(cam.eye, tanHalfFov, viewportHeightPx,
+    // @Jin 朝向变化、离地高度缩放及明显平移都必须重建；旧逻辑在 50 km 高度允许约 64 km 位移，
+    // @Jin 倾斜/缩放后仍复用旧叶集，真机表现为中心影像带之外出现大片黑区。
+    if (hasPrev_ && !cameraChangedSignificantly(cam, eyeAlt, tanHalfFov, viewportHeightPx,
                                                  targetLevel, maxLevel, detailFactor)) {
         out = prevVisible_; // 复用上帧可见叶集（含极冠外推后的经纬度边界）
         return;
@@ -233,8 +239,9 @@ void GeographicQuadtree::buildVisibleTiles(const TessCamera &cam, int targetLeve
     SubdivCtx c;
     c.eye = cam.eye;
     c.planes = cam.frustumPlanes;
-    double eyeAlt = 0.0;
-    globe.cartesianToGeographic(cam.eye, c.eyeLonDeg, c.eyeLatDeg, eyeAlt);
+    // @Jin 复用上面已求得的地理坐标，避免同帧重复反算 ECEF。
+    c.eyeLonDeg = eyeLonDeg;
+    c.eyeLatDeg = eyeLatDeg;
     const double eyeLen = cam.eye.length();
     c.R = globe.equatorialRadius();
     if (eyeLen > 1e-12) c.eyeDir = cam.eye * (1.0 / eyeLen);
@@ -251,6 +258,9 @@ void GeographicQuadtree::buildVisibleTiles(const TessCamera &cam, int targetLeve
     // 缓存本帧结果供下帧复用
     prevVisible_ = out;
     prevEye_ = cam.eye;
+    // @Jin 同步保存相机基，下一帧才能识别纯旋转（眼点不变但可见半球改变）。
+    prevForward_ = cam.forward;
+    prevUp_ = cam.up;
     prevTanHalfFov_ = tanHalfFov;
     prevViewportH_ = viewportHeightPx;
     prevTargetLevel_ = targetLevel;
@@ -259,18 +269,37 @@ void GeographicQuadtree::buildVisibleTiles(const TessCamera &cam, int targetLeve
     hasPrev_ = true;
 }
 
-bool GeographicQuadtree::cameraChangedSignificantly(const Vec3 &eye, double tanHalfFov, int viewportH,
-                                                    int targetLevel, int maxLevel, double detailFactor) const {
+bool GeographicQuadtree::cameraChangedSignificantly(const TessCamera &cam, double eyeAlt,
+                                                    double tanHalfFov, int viewportH,
+                                                    int targetLevel, int maxLevel,
+                                                    double detailFactor) const {
     // 参数变更 → 必须全量重建
     if (viewportH != prevViewportH_ || targetLevel != prevTargetLevel_ ||
         maxLevel != prevMaxLevel_ || detailFactor != prevDetailFactor_) return true;
     // FOV 变更（缩放手势会改 fov）
     if (std::fabs(tanHalfFov - prevTanHalfFov_) > 1e-6) return true;
-    // 眼点位移：取眼高 1% 或至少 100m 作阈值（近地手势微动 < 此值 → 复用上帧叶集）
-    const double eyeLen = eye.length();
-    const double prevLen = prevEye_.length();
-    const double threshold = std::max(eyeLen * 0.01, 100.0);
-    const Vec3 d = eye - prevEye_;
+
+    // @Jin 相机基一致性：heading/tilt 变化时眼点可能仍在旧阈值内，但视锥覆盖的球面已经改变。
+    // @Jin 0.1° 足以吸收浮点噪声，同时保证正常双指俯仰/旋转每一小步都能及时更新可见叶集。
+    constexpr double kMaxOrientationDeltaRad = 0.1 * kDeg2Rad;
+    const double minDirectionDot = std::cos(kMaxOrientationDeltaRad);
+    const Vec3 forward = cam.forward.normalized();
+    const Vec3 up = cam.up.normalized();
+    const Vec3 prevForward = prevForward_.normalized();
+    const Vec3 prevUp = prevUp_.normalized();
+    if (forward.lengthSquared() < 0.5 || up.lengthSquared() < 0.5 ||
+        prevForward.lengthSquared() < 0.5 || prevUp.lengthSquared() < 0.5) {
+        return true;
+    }
+    if (forward.dot(prevForward) < minDirectionDot || up.dot(prevUp) < minDirectionDot) {
+        return true;
+    }
+
+    // @Jin 位移阈值按离地高度缩放（0.25%，下限 20 m）：50 km 时约 125 m。
+    // @Jin 这避免高空仍沿用数十公里前的叶集，同时静止/极小抖动继续命中缓存。
+    const double altitude = std::max(eyeAlt, 1.0);
+    const double threshold = std::max(altitude * 0.0025, 20.0);
+    const Vec3 d = cam.eye - prevEye_;
     return d.length() > threshold;
 }
 
@@ -278,6 +307,9 @@ void GeographicQuadtree::clear() {
     hasPrev_ = false;
     prevVisible_.clear();
     prevEye_ = {};
+    // @Jin 清空缓存时同步清相机基，避免上下文重建后的首帧误用旧朝向。
+    prevForward_ = {};
+    prevUp_ = {};
 }
 
 } // namespace globecore

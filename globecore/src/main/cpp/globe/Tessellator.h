@@ -14,6 +14,8 @@ namespace globecore {
 /// 下 row3±row2 抵消后归一化放大 float32 噪声导致 leaves 非单调翻转。
 struct TessCamera {
     Vec3 eye;                                    // 眼点（ECEF 米）
+    Vec3 forward;                                // @Jin 相机视线方向（单位向量）：供帧间缓存判断朝向是否变化
+    Vec3 up;                                     // @Jin 相机上方向（单位向量）：捕获 tilt/heading/roll 引起的朝向变化
     Matrix4 viewProj;                            // 预留，仅交给 Renderer 开 GPU 时参考
     std::array<FrustumPlane, 6> frustumPlanes{}; // left/right/bottom/top/near/far，double
 };
