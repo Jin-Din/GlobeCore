@@ -10,6 +10,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "core/GlobeEngine.h"
@@ -106,6 +107,16 @@ inline std::vector<std::string> toStringVec(JNIEnv *env, jobjectArray arr) {
             env->DeleteLocalRef(s);
         }
     }
+    return out;
+}
+
+/// @Jin jstring → UTF-8 std::string；null 或转换失败返回空串，供地形 Provider 配置/状态桥接复用。
+inline std::string toUtf8String(JNIEnv *env, jstring value) {
+    if (value == nullptr) return {};
+    const char *utf8 = env->GetStringUTFChars(value, nullptr);
+    if (utf8 == nullptr) return {};
+    std::string out(utf8);
+    env->ReleaseStringUTFChars(value, utf8);
     return out;
 }
 
@@ -733,6 +744,59 @@ Java_com_zys_globecore_NativeLib_nativeSetDisplayDensity(JNIEnv * /*env*/, jobje
                                                             jdouble density) {
     if (handle == 0) return;
     toGlobeEngine(handle)->setDisplayDensity(density);
+}
+
+// @Jin 配置 C++ 地形 Provider；headers 由 Kotlin 侧展平为 [name0, value0, name1, value1, ...]。
+// @Jin 奇数长度视为无效输入并丢弃末项，避免把不完整键值对传入下载线程。
+JNIEXPORT jboolean JNICALL
+Java_com_zys_globecore_NativeLib_nativeConfigureTerrainProvider(
+    JNIEnv *env, jobject /*thiz*/, jlong handle, jstring baseUrl, jstring cacheDir,
+    jint maxZoom, jint concurrency, jint tileRadius, jobjectArray headerPairs) {
+    if (handle == 0) return JNI_FALSE;
+    const std::vector<std::string> flat = toStringVec(env, headerPairs);
+    std::vector<std::pair<std::string, std::string>> headers;
+    headers.reserve(flat.size() / 2);
+    for (size_t i = 0; i + 1 < flat.size(); i += 2) {
+        headers.emplace_back(flat[i], flat[i + 1]);
+    }
+    const bool ok = toGlobeEngine(handle)->configureTerrainProvider(
+        toUtf8String(env, baseUrl), toUtf8String(env, cacheDir),
+        maxZoom, concurrency, tileRadius, headers);
+    return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+// @Jin 开关 C++ 地形 Provider；关闭后的 DEM 清理在 GlobeEngine 内完成。
+JNIEXPORT jboolean JNICALL
+Java_com_zys_globecore_NativeLib_nativeSetTerrainProviderEnabled(
+    JNIEnv * /*env*/, jobject /*thiz*/, jlong handle, jboolean enabled) {
+    if (handle == 0) return JNI_FALSE;
+    return toGlobeEngine(handle)->setTerrainProviderEnabled(enabled == JNI_TRUE) ? JNI_TRUE : JNI_FALSE;
+}
+
+// @Jin 请求 C++ Provider 按最新相机视口刷新地形。
+JNIEXPORT void JNICALL
+Java_com_zys_globecore_NativeLib_nativeRefreshTerrainProvider(
+    JNIEnv * /*env*/, jobject /*thiz*/, jlong handle) {
+    if (handle == 0) return;
+    toGlobeEngine(handle)->refreshTerrainProvider();
+}
+
+// @Jin 后台预取 layer.json，不要求地形 Provider 已开启。
+JNIEXPORT void JNICALL
+Java_com_zys_globecore_NativeLib_nativePrefetchTerrainProviderMetadata(
+    JNIEnv * /*env*/, jobject /*thiz*/, jlong handle) {
+    if (handle == 0) return;
+    toGlobeEngine(handle)->prefetchTerrainProviderMetadata();
+}
+
+// @Jin 返回 C++ Provider 的单行 JSON 诊断状态；句柄无效时返回空对象字符串。
+JNIEXPORT jstring JNICALL
+Java_com_zys_globecore_NativeLib_nativeTerrainProviderStatus(
+    JNIEnv *env, jobject /*thiz*/, jlong handle) {
+    const std::string status = handle == 0
+        ? std::string("{}")
+        : toGlobeEngine(handle)->terrainProviderStatsJson();
+    return env->NewStringUTF(status.c_str());
 }
 
 // 设置定位标记（蓝点）的地理坐标、可见性与移动方位角（headingDeg<0 不画箭头）：屏幕固定尺寸叠加在瓦片之上

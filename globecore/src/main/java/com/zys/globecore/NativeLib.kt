@@ -266,6 +266,28 @@ internal object NativeLib {
      */
     external fun nativeFeatureRenderColor(handle: Long, layerIndex: Int, fid: Long): IntArray?
 
+    /**
+     * @Jin 配置 C++ CesiumTerrainProvider。
+     * @Jin headers 按 [name0, value0, name1, value1, ...] 展平传递，避免 JNI 直接遍历 Kotlin/Java Map。
+     * @Jin Provider 的视口调度、下载、缓存、去重、重试和 DEM 注入全部在 native 完成。
+     */
+    external fun nativeConfigureTerrainProvider(
+        handle: Long, baseUrl: String, cacheDir: String,
+        maxZoom: Int, concurrency: Int, tileRadius: Int, headers: Array<String>
+    ): Boolean
+
+    /** @Jin 开关 C++ 地形 Provider；关闭时 native 同步清空 Renderer DEM 缓存。 */
+    external fun nativeSetTerrainProviderEnabled(handle: Long, enabled: Boolean): Boolean
+
+    /** @Jin 按当前相机视口请求一次 C++ 地形刷新；连续请求由 native 自动合并。 */
+    external fun nativeRefreshTerrainProvider(handle: Long)
+
+    /** @Jin 后台预取 layer.json 到 C++ 内存与磁盘缓存，不要求地形已开启。 */
+    external fun nativePrefetchTerrainProviderMetadata(handle: Long)
+
+    /** @Jin 返回 Provider 缓存命中、网络请求、去重和失败等诊断信息的单行 JSON。 */
+    external fun nativeTerrainProviderStatus(handle: Long): String
+
     /** 设置屏幕密度（`displayMetrics.density`），作为 LOD 细分判据的 densityFactor（对齐 参考实现 `setupViewport(w,h,density)`） */
     external fun nativeSetDisplayDensity(handle: Long, density: Double)
 

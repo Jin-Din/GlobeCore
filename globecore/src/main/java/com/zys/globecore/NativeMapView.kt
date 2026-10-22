@@ -175,6 +175,63 @@ class NativeMapView @JvmOverloads constructor(
     }
 
     /**
+     * @Jin 配置 C++ CesiumTerrainProvider；与 Harmony `configureTerrainProvider` 保持同名同参口径。
+     * @Jin 宿主只提供数据源、缓存目录、并发与请求头；中心优先视口调度、下载、缓存、去重、重试和注入均由 native 完成。
+     * @Jin 请求头 Map 在此一次性展平为键值数组，跨 JNI 后由 native 还原为稳定有序的 name/value 对。
+     *
+     * @param baseUrl 地形服务根地址（不含末尾 `/layer.json`）
+     * @param cacheDir 地形磁盘缓存目录（`layer.json` 与 `<z>/<x>_<y>.terrain`）
+     * @param maxZoom layer.json 不可用时的最大级别回退值
+     * @param concurrency 下载并发数（native 会钳制到安全范围）
+     * @param tileRadius 中心优先调度半径；3 表示 7×7 引擎瓦片窗口
+     * @param headers 数据源策略请求头，如 Referer/User-Agent；默认空
+     * @return 配置是否成功；句柄已释放或参数为空返回 false
+     */
+    fun configureTerrainProvider(
+        baseUrl: String,
+        cacheDir: String,
+        maxZoom: Int = 15,
+        concurrency: Int = 4,
+        tileRadius: Int = 3,
+        headers: Map<String, String> = emptyMap()
+    ): Boolean {
+        val h = nativeHandle
+        if (h == 0L) return false
+        val flattened = ArrayList<String>(headers.size * 2)
+        headers.forEach { (name, value) ->
+            flattened.add(name)
+            flattened.add(value)
+        }
+        return NativeLib.nativeConfigureTerrainProvider(
+            h, baseUrl, cacheDir, maxZoom, concurrency, tileRadius, flattened.toTypedArray()
+        )
+    }
+
+    /** @Jin 开关 C++ 地形 Provider；关闭时 native 同时清空 DEM 缓存，重新开启后按当前视口恢复。 */
+    fun setTerrainProviderEnabled(enabled: Boolean): Boolean {
+        val h = nativeHandle
+        return h != 0L && NativeLib.nativeSetTerrainProviderEnabled(h, enabled)
+    }
+
+    /** @Jin 按当前相机视口刷新地形；连续相机变化可重复调用，native 内会合并刷新。 */
+    fun refreshTerrainProvider() {
+        val h = nativeHandle
+        if (h != 0L) NativeLib.nativeRefreshTerrainProvider(h)
+    }
+
+    /** @Jin 后台预取 layer.json；可在地形开关打开前调用，用于缩短首次启用等待。 */
+    fun prefetchTerrainProviderMetadata() {
+        val h = nativeHandle
+        if (h != 0L) NativeLib.nativePrefetchTerrainProviderMetadata(h)
+    }
+
+    /** @Jin 读取 C++ Provider 诊断 JSON；句柄已释放时返回空对象 `{}`。 */
+    fun terrainProviderStatus(): String {
+        val h = nativeHandle
+        return if (h != 0L) NativeLib.nativeTerrainProviderStatus(h) else "{}"
+    }
+
+    /**
      * 添加一个瓦片图源图层（可多次调用叠加，按调用顺序绘制：底图在前、注记 overlay 在后）。
      * 每层自带磁盘缓存目录（形如 `/调查宝/tiles/<图源>`）+ 联网 URL 模板 + 图源最大级别，各层独立取瓦片。
      * native 按 `<cacheDir>/<z>/<x>_<y>.tile` 读写（与原 app `FileTileStore`（已删除）布局一致，缓存互通）；
