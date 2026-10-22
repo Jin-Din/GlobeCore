@@ -485,6 +485,54 @@ export class NativeLib {
 
   // ── 三维地形（feature/terrain-pre）──
 
+  /** @Jin 把 layer.json 交给 C++ 核心解析并返回元数据句柄；解析失败返回 0。 */
+  static nativeCesiumTerrainCreate(jsonText: string, fallbackMaxZoom: number): number {
+    if (!NativeLib.ensureLoaded()) {
+      return 0;
+    }
+    return gc.nativeCesiumTerrainCreate(jsonText, fallbackMaxZoom);
+  }
+
+  /** @Jin 释放 C++ 地形元数据句柄；重复传入 0 不执行 native 调用。 */
+  static nativeCesiumTerrainDestroy(handle: number): void {
+    if (handle !== 0) {
+      gc.nativeCesiumTerrainDestroy(handle);
+    }
+  }
+
+  /** @Jin 读取 C++ 解析后的有效 maxzoom。 */
+  static nativeCesiumTerrainMaxZoom(handle: number): number {
+    return handle === 0 ? -1 : gc.nativeCesiumTerrainMaxZoom(handle);
+  }
+
+  /** @Jin 读取 C++ 解析后的瓦片 URL 模板。 */
+  static nativeCesiumTerrainTileTemplate(handle: number): string {
+    return handle === 0 ? '' : gc.nativeCesiumTerrainTileTemplate(handle);
+  }
+
+  /** @Jin 获取一个引擎瓦片相交的全部服务 DEM，摊平三元组转回 number[]。 */
+  static nativeCesiumTerrainEngineToServiceTiles(handle: number, z: number, x: number, y: number): number[] {
+    if (handle === 0) {
+      return [];
+    }
+    const result: Float64Array | null = gc.nativeCesiumTerrainEngineToServiceTiles(handle, z, x, y);
+    return result === null ? [] : Array.from(result);
+  }
+
+  /** @Jin 获取 C++ 计算的服务瓦片经纬度四至；native 不可用时返回 null。 */
+  static nativeCesiumTerrainTileBounds(z: number, x: number, y: number): number[] | null {
+    if (!NativeLib.ensureLoaded()) {
+      return null;
+    }
+    const result: Float64Array = gc.nativeCesiumTerrainTileBounds(z, x, y);
+    return result.length >= 4 ? Array.from(result) : null;
+  }
+
+  /** @Jin 判断服务瓦片是否在 C++ 解析的 available 范围内。 */
+  static nativeCesiumTerrainIsAvailable(handle: number, z: number, x: number, y: number): boolean {
+    return handle !== 0 && gc.nativeCesiumTerrainIsAvailable(handle, z, x, y);
+  }
+
   /**
    * 注入一块 Cesium quantized-mesh v1.0 地形瓦片。
    *

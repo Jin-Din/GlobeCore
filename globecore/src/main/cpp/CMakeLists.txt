@@ -80,6 +80,8 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         rhi/VulkanBackend.cpp
         # quantized-mesh 地形 DEM 解码器（Cesium 格式：量化顶点+三角索引→高度采样）
         terrain/QuantizedMesh.cpp
+        # @Jin Cesium 地形 layer.json 解析与 4326/TMS ↔ 墨卡托 bbox 求交核心
+        terrain/CesiumTerrain.cpp
         # binary glTF (.glb) v2 解码器（顶点/索引/PBR baseColor 提取，供 3D Tiles 渲染）
         gltf/GltfDecoder.cpp
         # 3D Tiles tileset.json 解析器（tile 树+boundingVolume+geometricError+content.uri）

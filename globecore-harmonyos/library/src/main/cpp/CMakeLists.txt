@@ -156,6 +156,8 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         ohos/napi_gdal_info.cpp
         ohos/napi_layer_info.cpp
         ohos/napi_vector_io.cpp
+        # @Jin Cesium quantized-mesh 地形核心 NAPI（layer.json + 网格数学 + available 判断）
+        ohos/napi_terrain_core.cpp
         # ── 引擎源：与 Android CMakeLists 同一清单，仅去掉 jni/ 桥接 ──
         # 顶层渲染引擎 + 相机/导航器
         ${GLOBECORE_ENGINE_ROOT}/core/GlobeEngine.cpp
@@ -172,6 +174,8 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         ${GLOBECORE_ENGINE_ROOT}/rhi/VulkanBackend.cpp
         # quantized-mesh 地形 DEM 解码器（量化顶点+三角索引→高度采样）
         ${GLOBECORE_ENGINE_ROOT}/terrain/QuantizedMesh.cpp
+        # @Jin Cesium 地形 layer.json 解析与 4326/TMS ↔ 墨卡托 bbox 求交核心
+        ${GLOBECORE_ENGINE_ROOT}/terrain/CesiumTerrain.cpp
         # binary glTF (.glb) v2 解码器
         ${GLOBECORE_ENGINE_ROOT}/gltf/GltfDecoder.cpp
         # 3D Tiles tileset.json 解析器

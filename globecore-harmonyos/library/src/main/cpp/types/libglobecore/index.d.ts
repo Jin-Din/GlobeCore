@@ -111,6 +111,20 @@ interface GlobeCore {
   nativeConvert(x: number, y: number, srcCrs: string, tgtCrs: string): Float64Array | null;
 
   // ── 三维地形（feature/terrain-pre）──
+  /// @Jin 从 layer.json 创建 C++ 地形元数据句柄；解析失败返回 0。
+  nativeCesiumTerrainCreate(jsonText: string, fallbackMaxZoom: number): number;
+  /// @Jin 释放 C++ 地形元数据句柄。
+  nativeCesiumTerrainDestroy(handle: number): void;
+  /// @Jin 返回 layer.json 声明的有效 maxzoom。
+  nativeCesiumTerrainMaxZoom(handle: number): number;
+  /// @Jin 返回 layer.json 声明的瓦片 URL 模板。
+  nativeCesiumTerrainTileTemplate(handle: number): string;
+  /// @Jin 返回 [z,x,y,z,x,y,...]，表示一个引擎瓦片相交的全部服务 DEM。
+  nativeCesiumTerrainEngineToServiceTiles(handle: number, z: number, x: number, y: number): Float64Array | null;
+  /// @Jin 返回服务瓦片经纬度四至 [lonMin,latMin,lonMax,latMax]。
+  nativeCesiumTerrainTileBounds(z: number, x: number, y: number): Float64Array;
+  /// @Jin 判断服务瓦片是否位于 layer.json 的 available 范围内。
+  nativeCesiumTerrainIsAvailable(handle: number, z: number, x: number, y: number): boolean;
   /// 注入一块 Cesium quantized-mesh v1.0 地形瓦片。
   /// z/x/y 用【本引擎瓦片网格】编号（渲染时按它查缓存）；四至用【地形服务自己的分块方案】算出。
   /// bytes 传空数组 = 删除该块。可任意线程调用（内部入队，GL 线程帧首生效）。

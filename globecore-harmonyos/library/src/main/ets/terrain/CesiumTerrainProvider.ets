@@ -13,11 +13,12 @@
 // @Jin 引擎网格与服务网格不重合：一个引擎墨卡托瓦片可关联多块服务 DEM，
 // @Jin native 按每块服务瓦片的真实 bbox 做覆盖采样，避免单块粗 DEM 外推造成山脊错位。
 // @Jin
-// @Jin 本阶段为 P2-1 阶段 A：先统一下沉到 Harmony HAR；
-// @Jin 后续阶段 B/C 会把网格数学、缓存与视口调度继续下沉到 C++ 核心，供 Android/Qt 共用。
+// @Jin P2-1 阶段 B：layer.json、available、EPSG:4326/TMS 网格换算已下沉 C++ 核心；
+// @Jin ArkTS 只保留平台 HTTP、磁盘缓存与流式交付，后续阶段 C 再下沉视口调度和下载。
 
 import { http } from '@kit.NetworkKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
+import { NativeLib } from '../NativeLib';
 
 // @Jin 地形提供器日志标签；宿主可通过 hilog 过滤该标签观察元数据与失败统计。
 const TAG: string = 'CesiumTerrain';
@@ -92,6 +93,16 @@ export interface TerrainTile {
  * cols = 2^(z+1)，rows = 2^z，x 自西、y 自南。
  */
 export function geoTileBounds(z: number, x: number, y: number): GeoBounds {
+  // @Jin 正常路径由 C++ 统一计算；native 加载失败时保留纯 JS 公式，避免 Har 初始化异常直接中断地形。
+  const nativeBounds: number[] | null = NativeLib.nativeCesiumTerrainTileBounds(z, x, y);
+  if (nativeBounds !== null) {
+    return {
+      lonMin: nativeBounds[0],
+      latMin: nativeBounds[1],
+      lonMax: nativeBounds[2],
+      latMax: nativeBounds[3],
+    };
+  }
   const cols: number = Math.pow(2, z + 1);
   const rows: number = Math.pow(2, z);
   return {
@@ -202,7 +213,12 @@ export class CesiumTerrainProvider {
   // @Jin 每个请求复用的请求头配置。
   private headers: Record<string, string> = {};
   private metaLoaded: boolean = false;
+  // @Jin C++ 元数据句柄；非 0 时 available 判断、瓦片映射和 bbox 全走共享核心。
+  private coreHandle: number = 0;
+  // @Jin native 不可用或 layer.json 解析失败时的 ArkTS 兼容数据，仅作为降级路径。
   private available: AvailableRange[][] = [];
+  // @Jin 防止页面销毁时仍挂起的 layer.json 请求在 dispose 后重新创建 C++ 句柄。
+  private disposed: boolean = false;
   /** @Jin 已下载或已确认不可用的瓦片，避免同一会话内重复请求。 */
   private failed: Set<string> = new Set<string>();
   /** @Jin 本轮已成功交付给 native 的服务 DEM；分阶段扩半径时避免重复读盘与重复解码。 */
@@ -244,21 +260,48 @@ export class CesiumTerrainProvider {
   }
 
   /**
-   * @Jin 拉取并解析 layer.json（幂等）。
-   * @Jin 失败时保留宿主给出的默认参数并退化为“不查 available 直接下载”，避免阻塞地形功能。
+   * @Jin 拉取 layer.json 并交给 C++ 核心解析（幂等）。
+   * @Jin 正常路径不再在 ArkTS 保存 available/网格规则；仅当 native 不可用时降级到 JSON 兼容解析。
    */
   async ensureMeta(): Promise<boolean> {
+    if (this.disposed) {
+      return false;
+    }
     if (this.metaLoaded) {
-      return true;
+      return this.coreHandle !== 0 || this.available.length > 0;
     }
     try {
       const text: string = await this.httpGetText(`${this.baseUrl}/layer.json`);
+      if (this.disposed) {
+        return false;
+      }
+      const handle: number = NativeLib.nativeCesiumTerrainCreate(text, this.maxZoom);
+      if (handle !== 0) {
+        if (this.disposed) {
+          NativeLib.nativeCesiumTerrainDestroy(handle);
+          return false;
+        }
+        this.coreHandle = handle;
+        const nativeMaxZoom: number = NativeLib.nativeCesiumTerrainMaxZoom(handle);
+        const nativeTemplate: string = NativeLib.nativeCesiumTerrainTileTemplate(handle);
+        if (nativeMaxZoom >= 0) {
+          this.maxZoom = nativeMaxZoom;
+        }
+        if (nativeTemplate.length > 0) {
+          this.tileTemplate = nativeTemplate;
+        }
+        this.metaLoaded = true;
+        console.info(`${TAG}: layer.json ok core=cpp maxzoom=${this.maxZoom} template=${this.tileTemplate}`);
+        return true;
+      }
+
+      // @Jin C++ 核心不可用时才走兼容解析；正常构建不会进入该分支。
       const meta: LayerJsonMeta = JSON.parse(text) as LayerJsonMeta;
       if (meta.format !== undefined && meta.format !== 'quantized-mesh-1.0') {
         console.warn(`${TAG}: 非预期地形格式 ${meta.format}`);
       }
       if (meta.tiles !== undefined && meta.tiles.length > 0) {
-        // @Jin 使用服务自己声明的模板，支持 .terrain、查询参数和带版本号的 Cesium 地形源。
+        // @Jin 兼容路径仍使用服务声明模板，支持查询参数和带版本号的 Cesium 地形源。
         this.tileTemplate = meta.tiles[0];
       }
       if (meta.maxzoom !== undefined) {
@@ -266,8 +309,8 @@ export class CesiumTerrainProvider {
       }
       this.available = meta.available === undefined ? [] : meta.available;
       this.metaLoaded = true;
-      console.info(`${TAG}: layer.json ok projection=${meta.projection} scheme=${meta.scheme} ` +
-        `maxzoom=${this.maxZoom} levels=${this.available.length}`);
+      console.warn(`${TAG}: C++ terrain core unavailable, fallback arkts projection=${meta.projection} ` +
+        `scheme=${meta.scheme} maxzoom=${this.maxZoom} levels=${this.available.length}`);
       return true;
     } catch (e) {
       console.error(`${TAG}: layer.json 加载失败，将不查 available 直接下载: ${JSON.stringify(e)}`);
@@ -276,8 +319,11 @@ export class CesiumTerrainProvider {
     }
   }
 
-  /** @Jin 判断服务瓦片是否在 available 覆盖范围内；未拿到元数据时一律放行。 */
+  /** @Jin 判断服务瓦片是否可用；C++ 句柄存在时直接复用共享 available 解析结果。 */
   isAvailable(z: number, x: number, y: number): boolean {
+    if (this.coreHandle !== 0) {
+      return NativeLib.nativeCesiumTerrainIsAvailable(this.coreHandle, z, x, y);
+    }
     if (z < 0 || z > this.maxZoom) {
       return false;
     }
@@ -308,6 +354,10 @@ export class CesiumTerrainProvider {
    * @Jin 返回 null 表示服务范围外或下载失败。
    */
   async fetchTile(z: number, x: number, y: number): Promise<Uint8Array | null> {
+    // @Jin 页面离开或宿主切换地形源后不再继续读取/下载旧服务瓦片。
+    if (this.disposed) {
+      return null;
+    }
     const key: string = `${z}/${x}/${y}`;
     if (this.failed.has(key)) {
       this.skipCount++;
@@ -364,6 +414,10 @@ export class CesiumTerrainProvider {
     tiles: number[][],
     onReady: (tile: TerrainTile) => void
   ): Promise<void> {
+    // @Jin Provider 销毁后不再派发新请求，避免页面退出时后台继续占用网络与 DEM 缓存。
+    if (this.disposed) {
+      return;
+    }
     const wanted: Set<string> = new Set<string>();
     const serviceTiles: number[][][] = [];
     for (let i = 0; i < tiles.length; i++) {
@@ -371,6 +425,26 @@ export class CesiumTerrainProvider {
       const z: number = t[0];
       const x: number = t[1];
       const y: number = t[2];
+      const engineTile: number[] = [z, x, y];
+      if (this.coreHandle !== 0) {
+        // @Jin 核心路径一次返回所有与引擎 bbox 真正相交、且在 available 内的服务 DEM。
+        const serviceFlat: number[] = NativeLib.nativeCesiumTerrainEngineToServiceTiles(
+          this.coreHandle, z, x, y);
+        for (let j = 0; j + 2 < serviceFlat.length; j += 3) {
+          const sz: number = serviceFlat[j];
+          const sx: number = serviceFlat[j + 1];
+          const sy: number = serviceFlat[j + 2];
+          // @Jin native 按服务瓦片 bbox 全局共享 DEM；同阶段按 wanted 去重，跨阶段按 delivered 跳过已交付 DEM。
+          const key: string = `${sz}/${sx}/${sy}`;
+          if (!wanted.has(key) && !this.delivered.has(key)) {
+            wanted.add(key);
+            serviceTiles.push([engineTile, [sz, sx, sy]]);
+          }
+        }
+        continue;
+      }
+
+      // @Jin C++ 核心不可用时保留原网格求交逻辑，确保 Har 降级后仍可加载地形。
       const sz: number = serviceZoomForEngineZoom(z, this.maxZoom);
       const engineBounds: GeoBounds = mercatorTileBounds(z, x, y);
       const range: number[] = intersectingGeoTileRange(sz, engineBounds);
@@ -380,11 +454,10 @@ export class CesiumTerrainProvider {
       const y1: number = range[3];
       for (let sx = x0; sx <= x1; sx++) {
         for (let sy = y0; sy <= y1; sy++) {
-          // @Jin: native 已按服务瓦片 bbox 全局共享 DEM；同阶段按 wanted 去重，跨阶段按 delivered 跳过已交付 DEM。
           const key: string = `${sz}/${sx}/${sy}`;
           if (!wanted.has(key) && !this.delivered.has(key)) {
             wanted.add(key);
-            serviceTiles.push([[z, x, y], [sz, sx, sy]]);
+            serviceTiles.push([engineTile, [sz, sx, sy]]);
           }
         }
       }
@@ -500,6 +573,22 @@ export class CesiumTerrainProvider {
   /** @Jin: 新一轮地形刷新前清空已交付记忆；分阶段加载内部不会清空，避免 r2/r3 重复注入 r1 的共享 DEM。 */
   resetDeliveredTiles(): void {
     this.delivered.clear();
+  }
+
+  /**
+   * @Jin 释放 C++ 元数据句柄；宿主页面销毁或释放 Provider 时必须调用。
+   * @Jin 方法幂等，挂起的 layer.json 请求返回后会检测 disposed 并立即销毁迟到句柄。
+   */
+  dispose(): void {
+    if (this.disposed) {
+      return;
+    }
+    this.disposed = true;
+    const handle: number = this.coreHandle;
+    this.coreHandle = 0;
+    NativeLib.nativeCesiumTerrainDestroy(handle);
+    this.delivered.clear();
+    this.failed.clear();
   }
 
   // @Jin ── HTTP ───────────────────────────────────────────
