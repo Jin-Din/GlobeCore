@@ -198,6 +198,25 @@ struct RenderCallbackHolder {
     }
 };
 
+/// @Jin 持有 NativeMapView 的全局引用与地形事件方法号；析构时按需附加 JVM 后释放。
+/// @Jin Provider 事件可能来自调度线程或任一下载 worker，不能在构造线程假设 JNIEnv 一直有效。
+struct TerrainEventCallbackHolder {
+    JavaVM *vm = nullptr;
+    jobject viewRef = nullptr;
+    jmethodID eventMid = nullptr;
+    ~TerrainEventCallbackHolder() {
+        if (vm == nullptr || viewRef == nullptr) return;
+        JNIEnv *env = nullptr;
+        bool attached = false;
+        if (vm->GetEnv(reinterpret_cast<void **>(&env), JNI_VERSION_1_6) != JNI_OK || env == nullptr) {
+            if (vm->AttachCurrentThread(&env, nullptr) != JNI_OK || env == nullptr) return;
+            attached = true;
+        }
+        env->DeleteGlobalRef(viewRef);
+        if (attached) vm->DetachCurrentThread();
+    }
+};
+
 } // namespace
 
 extern "C" {
@@ -797,6 +816,43 @@ Java_com_zys_globecore_NativeLib_nativeTerrainProviderStatus(
         ? std::string("{}")
         : toGlobeEngine(handle)->terrainProviderStatsJson();
     return env->NewStringUTF(status.c_str());
+}
+
+// @Jin 注册/反注册统一地形事件回调；view 为空表示清除 Provider 回调。
+// @Jin JNI 回调只调用 NativeMapView.onTerrainProviderEvent，由 Kotlin 侧 post 到 GLSurfaceView 主线程。
+JNIEXPORT void JNICALL
+Java_com_zys_globecore_NativeLib_nativeSetTerrainProviderEventCallback(
+    JNIEnv *env, jobject /*thiz*/, jlong handle, jobject view) {
+    if (handle == 0) return;
+    if (view == nullptr) {
+        toGlobeEngine(handle)->setTerrainProviderEventCallback(nullptr);
+        return;
+    }
+    auto holder = std::make_shared<TerrainEventCallbackHolder>();
+    env->GetJavaVM(&holder->vm);
+    holder->viewRef = env->NewGlobalRef(view);
+    jclass cls = env->GetObjectClass(view);
+    if (cls != nullptr) {
+        holder->eventMid = env->GetMethodID(cls, "onTerrainProviderEvent", "(Ljava/lang/String;)V");
+        env->DeleteLocalRef(cls);
+    }
+    if (holder->vm == nullptr || holder->viewRef == nullptr || holder->eventMid == nullptr) return;
+    toGlobeEngine(handle)->setTerrainProviderEventCallback([holder](const std::string &json) {
+        if (holder->vm == nullptr || holder->viewRef == nullptr || holder->eventMid == nullptr) return;
+        JNIEnv *workerEnv = nullptr;
+        bool attached = false;
+        if (holder->vm->GetEnv(reinterpret_cast<void **>(&workerEnv), JNI_VERSION_1_6) != JNI_OK || workerEnv == nullptr) {
+            if (holder->vm->AttachCurrentThread(&workerEnv, nullptr) != JNI_OK || workerEnv == nullptr) return;
+            attached = true;
+        }
+        jstring payload = workerEnv->NewStringUTF(json.c_str());
+        if (payload != nullptr) {
+            workerEnv->CallVoidMethod(holder->viewRef, holder->eventMid, payload);
+            workerEnv->DeleteLocalRef(payload);
+        }
+        if (workerEnv->ExceptionCheck()) workerEnv->ExceptionClear();
+        if (attached) holder->vm->DetachCurrentThread();
+    });
 }
 
 // 设置定位标记（蓝点）的地理坐标、可见性与移动方位角（headingDeg<0 不画箭头）：屏幕固定尺寸叠加在瓦片之上

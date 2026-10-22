@@ -140,6 +140,8 @@ interface GlobeCore {
   nativeRefreshTerrainProvider(handle: number): void;
   nativePrefetchTerrainProviderMetadata(handle: number): void;
   nativeTerrainProviderStatus(handle: number): string;
+  /// @Jin 统一地形事件回调；payload 为含 event 与 stats 的单行 JSON，null 反注册。
+  nativeSetTerrainProviderEventCallback(handle: number, callback: ((payload: string) => void) | null): void;
 
   // ── GDAL / 图层元信息（bridge/gdal_info、layer_info）──
   nativeGetGdalVersion(): string;

@@ -129,9 +129,16 @@ CesiumTerrainProvider::~CesiumTerrainProvider() {
     }
 }
 
+void CesiumTerrainProvider::setEventCallback(EventCallback callback) {
+    // @Jin 回调只在短临界区内替换；emitEvent 先拷贝再调用，不在持锁状态进入平台桥接。
+    std::lock_guard<std::mutex> lock(eventMtx_);
+    eventCallback_ = std::move(callback);
+}
+
 void CesiumTerrainProvider::setEnabled(bool enabled) {
     enabled_.store(enabled);
     if (enabled) {
+        emitEvent("enabled");
         requestRefresh();
         return;
     }
@@ -143,6 +150,7 @@ void CesiumTerrainProvider::setEnabled(bool enabled) {
     resetDeliveredTiles();
     waitCv_.notify_all();
     LOGI("CesiumTerrainProvider: disabled");
+    emitEvent("disabled");
 }
 
 void CesiumTerrainProvider::requestRefresh() {
@@ -209,6 +217,7 @@ bool CesiumTerrainProvider::loadMetadata(const std::shared_ptr<std::atomic<bool>
 
     const std::string cachePath = metadataCachePath();
     std::string text;
+    emitEvent("metadata_started");
     if (readTextFile(cachePath, text)) {
         CesiumTerrainMeta cached = parseCesiumTerrainLayerJson(text, options_.maxZoom);
         if (cached.ok) {
@@ -219,6 +228,7 @@ bool CesiumTerrainProvider::loadMetadata(const std::shared_ptr<std::atomic<bool>
                 metadataLoaded_ = true;
             }
             LOGI("CesiumTerrainProvider: layer.json disk hit bytes=%zu maxzoom=%d", text.size(), meta_.maxZoom);
+            emitEvent("metadata_ready", "\"source\":\"disk\"");
             return true;
         }
     }
@@ -229,6 +239,7 @@ bool CesiumTerrainProvider::loadMetadata(const std::shared_ptr<std::atomic<bool>
     const bool ok = HttpClient::get(url, bytes, kMetadataTimeoutMs, abort.get(), options_.headers);
     if (!ok || bytes.empty() || abort->load()) {
         LOGE("CesiumTerrainProvider: layer.json download failed url=%s", url.c_str());
+        if (!abort->load()) emitEvent("error", "\"stage\":\"metadata\"");
         return false;
     }
 
@@ -236,6 +247,7 @@ bool CesiumTerrainProvider::loadMetadata(const std::shared_ptr<std::atomic<bool>
     CesiumTerrainMeta downloaded = parseCesiumTerrainLayerJson(text, options_.maxZoom);
     if (!downloaded.ok) {
         LOGE("CesiumTerrainProvider: layer.json parse failed: %s", downloaded.error.c_str());
+        emitEvent("error", "\"stage\":\"metadata_parse\"");
         return false;
     }
     // @Jin 在 move 前保存日志字段，避免 std::string 被移走后输出空模板。
@@ -253,6 +265,7 @@ bool CesiumTerrainProvider::loadMetadata(const std::shared_ptr<std::atomic<bool>
     }
     LOGI("CesiumTerrainProvider: layer.json network ok bytes=%zu maxzoom=%d template=%s",
          bytes.size(), downloadedMaxZoom, downloadedTemplate.c_str());
+    emitEvent("metadata_ready", "\"source\":\"network\"");
     return true;
 }
 
@@ -376,6 +389,10 @@ void CesiumTerrainProvider::runRefresh(const TerrainViewportSnapshot &viewport, 
     LOGI("CesiumTerrainProvider: refresh start z=%d center=%.4f,%.4f tilt=%.1f engineTiles=%d serviceTasks=%d concurrency=%d",
          engineZoom, viewport.latitude, viewport.longitude, viewport.tilt,
          runEngineTiles, queued, effectiveConcurrency_);
+    std::ostringstream startExtra;
+    startExtra << "\"engineZoom\":" << engineZoom << ",\"engineTiles\":" << runEngineTiles
+               << ",\"queued\":" << queued;
+    emitEvent("refresh_started", startExtra.str());
 
     if (tasks.empty()) {
         const long long elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -386,6 +403,7 @@ void CesiumTerrainProvider::runRefresh(const TerrainViewportSnapshot &viewport, 
             if (currentAbort_ == abort) currentAbort_.reset();
         }
         LOGI("CesiumTerrainProvider: refresh complete z=%d no new DEM elapsed=%lldms", engineZoom, elapsed);
+        emitEvent("refresh_completed", "\"delivered\":0,\"failures\":0");
         return;
     }
 
@@ -394,10 +412,11 @@ void CesiumTerrainProvider::runRefresh(const TerrainViewportSnapshot &viewport, 
     std::atomic<int> runFailures{0};
     std::atomic<long long> firstTileMs{-1};
     const int workers = std::max(1, std::min(effectiveConcurrency_, queued));
+    const int progressStep = std::max(1, queued / 10);
     std::vector<std::thread> threads;
     threads.reserve(static_cast<size_t>(workers));
     for (int i = 0; i < workers; ++i) {
-        threads.emplace_back([this, &tasks, &cursor, &runDelivered, &runFailures, &firstTileMs, abort, generation, start]() {
+        threads.emplace_back([this, &tasks, &cursor, &runDelivered, &runFailures, &firstTileMs, abort, generation, start, progressStep, queued]() {
             while (!stopping_.load() && !abort->load() && generation_.load() == generation) {
                 const size_t index = cursor.fetch_add(1);
                 if (index >= tasks.size()) break;
@@ -427,8 +446,22 @@ void CesiumTerrainProvider::runRefresh(const TerrainViewportSnapshot &viewport, 
                 const int deliveredNow = runDelivered.fetch_add(1) + 1;
                 statDeliveredTiles_++;
                 if (deliveredNow == 1) {
-                    firstTileMs.store(std::chrono::duration_cast<std::chrono::milliseconds>(
+                    const long long firstMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - start).count();
+                    firstTileMs.store(firstMs);
+                    // @Jin first_tile 事件必须携带本轮实时首块耗时，不能等到整轮结束才更新统计快照。
+                    lastFirstTileMs_.store(firstMs);
+                    lastElapsedMs_.store(firstMs);
+                    emitEvent("first_tile", "\"delivered\":1");
+                }
+                if (deliveredNow % progressStep == 0) {
+                    // @Jin 进度最多约 10 次/轮；平台桥接无需为每块 DEM 创建一次 UI 事件。
+                    lastElapsedMs_.store(std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::steady_clock::now() - start).count());
+                    std::ostringstream progressExtra;
+                    progressExtra << "\"delivered\":" << deliveredNow << ",\"total\":" << queued
+                                  << ",\"failures\":" << runFailures.load();
+                    emitEvent("progress", progressExtra.str());
                 }
             }
         });
@@ -456,6 +489,10 @@ void CesiumTerrainProvider::runRefresh(const TerrainViewportSnapshot &viewport, 
     LOGI("CesiumTerrainProvider: refresh complete z=%d tasks=%d delivered=%d firstTileMs=%lld diskHits=%d network=%d retries=%d failures=%d elapsed=%lldms",
          engineZoom, queued, delivered, firstTileMs.load(), statDiskHits_.load(), statNetworkRequests_.load(),
          statRetries_.load(), failures, elapsed);
+    std::ostringstream completeExtra;
+    completeExtra << "\"delivered\":" << delivered << ",\"total\":" << queued
+                  << ",\"failures\":" << failures;
+    emitEvent("refresh_completed", completeExtra.str());
 }
 
 std::string CesiumTerrainProvider::tileUrl(const TerrainServiceTile &tile) const {
@@ -502,6 +539,25 @@ void CesiumTerrainProvider::markDelivered(const std::string &key) {
 void CesiumTerrainProvider::abortInFlight() {
     std::lock_guard<std::mutex> lock(abortMtx_);
     if (currentAbort_) currentAbort_->store(true);
+}
+
+void CesiumTerrainProvider::emitEvent(const std::string &event, const std::string &extraJson) const {
+    EventCallback callback;
+    {
+        std::lock_guard<std::mutex> lock(eventMtx_);
+        callback = eventCallback_;
+    }
+    if (!callback) return;
+    std::ostringstream json;
+    json << "{\"event\":\"" << event << "\",\"stats\":" << statsJson();
+    if (!extraJson.empty()) json << "," << extraJson;
+    json << "}";
+    try {
+        // @Jin 平台投递异常不得影响 C++ 调度线程和 worker。
+        callback(json.str());
+    } catch (...) {
+        LOGE("CesiumTerrainProvider: event callback failed event=%s", event.c_str());
+    }
 }
 
 TerrainProviderStats CesiumTerrainProvider::stats() const {

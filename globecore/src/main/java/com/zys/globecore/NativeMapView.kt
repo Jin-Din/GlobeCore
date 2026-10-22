@@ -231,6 +231,27 @@ class NativeMapView @JvmOverloads constructor(
         return if (h != 0L) NativeLib.nativeTerrainProviderStatus(h) else "{}"
     }
 
+    /** @Jin 地形事件宿主监听器；收到的是 C++ 已序列化的单行 JSON。 */
+    private var terrainProviderEventListener: ((String) -> Unit)? = null
+
+    /**
+     * @Jin 注册/替换统一地形事件监听；传 null 反注册。
+     * @Jin 事件包括 metadata_started/metadata_ready/refresh_started/first_tile/progress/
+     * refresh_completed/error/enabled/disabled，每条均带完整 stats。
+     */
+    fun setOnTerrainProviderEventListener(listener: ((String) -> Unit)?) {
+        terrainProviderEventListener = listener
+        val h = nativeHandle
+        if (h != 0L) {
+            NativeLib.nativeSetTerrainProviderEventCallback(h, if (listener != null) this else null)
+        }
+    }
+
+    /** @Jin JNI 事件入口：native 可在 worker 线程调用，post 后回调始终在 GLSurfaceView 主线程执行。 */
+    fun onTerrainProviderEvent(payload: String) {
+        post { terrainProviderEventListener?.invoke(payload) }
+    }
+
     /**
      * 添加一个瓦片图源图层（可多次调用叠加，按调用顺序绘制：底图在前、注记 overlay 在后）。
      * 每层自带磁盘缓存目录（形如 `/调查宝/tiles/<图源>`）+ 联网 URL 模板 + 图源最大级别，各层独立取瓦片。
@@ -623,6 +644,8 @@ class NativeMapView @JvmOverloads constructor(
         val h = nativeHandle
         if (h != 0L) {
             nativeHandle = 0L
+            // @Jin 先拆事件回调全局引用，再销毁 Provider，避免在途事件访问已释放句柄。
+            NativeLib.nativeSetTerrainProviderEventCallback(h, null)
             NativeLib.nativeDestroy(h)
         }
     }

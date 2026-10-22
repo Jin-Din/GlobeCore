@@ -4,8 +4,10 @@
 #ifndef GLOBECORE_DESKTOP_MAPWIDGET_H
 #define GLOBECORE_DESKTOP_MAPWIDGET_H
 
+#include <QMap>
 #include <QOpenGLWidget>
 #include <QPoint>
+#include <QString>
 #include <memory>
 
 #include "core/GlobeEngine.h"
@@ -22,6 +24,16 @@ public:
     /// 以控件中心为锚缩放（供工具栏按钮调用，与滚轮缩放同口径）
     void zoomCentered(double factor);
 
+    // @Jin 地形 Provider 门面与 Android / Harmony 保持同名口径，数据源策略由宿主注入。
+    bool configureTerrainProvider(const QString &baseUrl, const QString &cacheDir,
+                                  int maxZoom = 15, int concurrency = 4, int tileRadius = 3,
+                                  const QMap<QString, QString> &headers = QMap<QString, QString>());
+    // @Jin 开关、刷新、元数据预取与状态查询均直接转发到共享 C++ Provider。
+    bool setTerrainProviderEnabled(bool enabled);
+    void refreshTerrainProvider();
+    void prefetchTerrainProviderMetadata();
+    QString terrainProviderStatus() const;
+
 signals:
     /// 左键未拖动即抬起：命中矢量要素则发出（索引为 addVectorLayer 次序），未命中不发
     void featurePicked(int layerIndex, long long fid, double lonDeg, double latDeg);
@@ -29,6 +41,8 @@ signals:
     void cursorGeo(double lonDeg, double latDeg);
     /// 一帧绘制后的相机显示级别，供状态栏级别显示
     void zoomLevelChanged(int level);
+    // @Jin 地形 Provider 统一事件（单行 JSON）；已由 GUI 线程投递后发出。
+    void terrainProviderEvent(const QString &payload);
 
 protected:
     void initializeGL() override;

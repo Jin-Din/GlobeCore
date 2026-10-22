@@ -25,6 +25,19 @@ NativeNet.initCaBundle(context);
 
 `CesiumTerrainProvider` 不绑定具体地形服务，宿主需通过 `TerrainSourceOptions` 注入 `baseUrl`、独立 `cacheDir`，并可配置 `maxZoom/concurrency/headers`。
 
+`NativeMapView` 还提供统一地形事件监听：
+
+```ts
+mapView.setOnTerrainProviderEventListener((payload: string): void => {
+  // @Jin payload 为单行 JSON，包含 event 与完整 stats
+  console.info(`terrain event: ${payload}`);
+});
+mapView.configureTerrainProvider(baseUrl, cacheDir, 15, 4, 3, headers);
+mapView.prefetchTerrainProviderMetadata();
+```
+
+事件包括 `metadata_started`、`metadata_ready`、`refresh_started`、`first_tile`、`progress`、`refresh_completed`、`error`、`enabled`、`disabled`。页面退出时传 `undefined` 注销监听。
+
 ## 支持 ABI
 
 `arm64-v8a`、`x86_64`。

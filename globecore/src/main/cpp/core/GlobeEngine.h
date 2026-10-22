@@ -307,6 +307,12 @@ public:
     /** @Jin 返回 C++ Provider 的单行 JSON 状态；未配置时返回空 JSON 对象。 */
     std::string terrainProviderStatsJson() const;
 
+    /**
+     * @Jin 注册统一地形事件回调，事件为单行 JSON。
+     * @Jin 回调可能来自 Provider 调度/worker 线程；Android JNI、Harmony TSFN、Qt signal 各自负责转投宿主线程。
+     */
+    void setTerrainProviderEventCallback(std::function<void(const std::string &)> callback);
+
 private:
     Navigator navigator_;
     // 瓦片图源图层（按加入顺序绘制）；以 unique_ptr 持有保证地址稳定，供 Renderer 长期引用
@@ -320,6 +326,9 @@ private:
     Renderer renderer_;     // 引用 navigator_、layers_、vectorLayers_、rasterImageLayers_，须在其后声明以保证构造顺序
     // @Jin 地形 Provider 在 renderer_ 之后声明：析构时先停下载线程，再释放 Renderer。
     std::unique_ptr<CesiumTerrainProvider> terrainProvider_;
+    // @Jin 统一事件回调跨 Provider 重建保留；configure 时重新安装到新实例。
+    mutable std::mutex terrainEventMtx_;
+    std::function<void(const std::string &)> terrainEventCallback_;
     std::function<void()> renderCallback_; // 「需重绘」回调（由 JNI 注入，指向 requestRender）
 
     // 图层容器互斥锁：保护 layers_/vectorLayers_/rasterImageLayers_ 的结构变化（push_back 会重分配

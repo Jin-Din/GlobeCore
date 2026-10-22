@@ -600,6 +600,14 @@ export class NativeLib {
     return handle === 0 ? '{}' : gc.nativeTerrainProviderStatus(handle);
   }
 
+  /** @Jin 注册统一地形事件回调；callback=null 反注册。 */
+  static nativeSetTerrainProviderEventCallback(handle: number,
+    callback: ((payload: string) => void) | null): void {
+    if (handle !== 0) {
+      gc.nativeSetTerrainProviderEventCallback(handle, callback);
+    }
+  }
+
   // ── PROJ / GDAL 桥（bridge 导出的直通包装，门面见 NativeSrs/NativeLayerInfo/NativeVector）──
 
   static nativeGetProjVersion(): number {

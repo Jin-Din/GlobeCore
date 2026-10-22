@@ -276,6 +276,19 @@ export struct NativeMapView {
     return NativeLib.nativeTerrainProviderStatus(this.nativeHandle);
   }
 
+  /** @Jin 地形事件宿主监听器；payload 为 C++ 已序列化的单行 JSON。 */
+  private terrainProviderEventListener?: (payload: string) => void;
+
+  /**
+   * @Jin 注册/替换统一地形事件监听；传 undefined 反注册。
+   * @Jin 事件包括 metadata_started/metadata_ready/refresh_started/first_tile/progress/
+   * refresh_completed/error/enabled/disabled，每条均带完整 stats。
+   */
+  setOnTerrainProviderEventListener(listener?: (payload: string) => void): void {
+    this.terrainProviderEventListener = listener;
+    NativeLib.nativeSetTerrainProviderEventCallback(this.nativeHandle, listener ?? null);
+  }
+
   /**
    * 移除一个瓦片图源图层（index 为 addTileLayer / addRasterLayer 的加入次序，0 起）：墓碑—native
    * 置 removed + 隐藏，不 erase 底层容器，其它层 index 保持稳定；其瓦片纹理由 GL 线程下一帧释放

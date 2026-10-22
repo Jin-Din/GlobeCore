@@ -288,6 +288,9 @@ internal object NativeLib {
     /** @Jin 返回 Provider 缓存命中、网络请求、去重和失败等诊断信息的单行 JSON。 */
     external fun nativeTerrainProviderStatus(handle: Long): String
 
+    /** @Jin 注册统一地形事件回调；view 为空表示反注册，view 需实现 onTerrainProviderEvent(String)。 */
+    external fun nativeSetTerrainProviderEventCallback(handle: Long, view: Any?)
+
     /** 设置屏幕密度（`displayMetrics.density`），作为 LOD 细分判据的 densityFactor（对齐 参考实现 `setupViewport(w,h,density)`） */
     external fun nativeSetDisplayDensity(handle: Long, density: Double)
 

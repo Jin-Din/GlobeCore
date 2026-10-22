@@ -61,6 +61,65 @@ struct GestureListener {
 std::mutex g_tapMtx;
 std::unordered_map<int64_t, GestureListener> g_tapListeners;
 
+// @Jin 地形事件跨线程投递：Provider 调度/worker 线程只入队，真正 JS 回调在 ArkTS 线程执行。
+struct TerrainEventListener {
+    std::mutex mtx;
+    napi_threadsafe_function tsfn = nullptr;
+
+    void emit(const std::string &json) {
+        std::lock_guard<std::mutex> lock(mtx);
+        if (tsfn == nullptr) return;
+        auto *pack = new std::string(json);
+        if (napi_call_threadsafe_function(tsfn, pack, napi_tsfn_nonblocking) != napi_ok) delete pack;
+    }
+
+    void close() {
+        std::lock_guard<std::mutex> lock(mtx);
+        if (tsfn == nullptr) return;
+        napi_release_threadsafe_function(tsfn, napi_tsfn_release);
+        tsfn = nullptr;
+    }
+};
+
+std::mutex g_terrainEventMtx;
+std::unordered_map<int64_t, std::shared_ptr<TerrainEventListener>> g_terrainEventListeners;
+
+void TerrainEventCallJs(napi_env env, napi_value jsCb, void * /*context*/, void *data) {
+    std::unique_ptr<std::string> json(static_cast<std::string *>(data));
+    if (env == nullptr || jsCb == nullptr || json == nullptr) return;
+    napi_value arg = nullptr;
+    napi_create_string_utf8(env, json->c_str(), NAPI_AUTO_LENGTH, &arg);
+    napi_value thisArg = nullptr;
+    napi_get_undefined(env, &thisArg);
+    napi_call_function(env, thisArg, jsCb, 1, &arg, nullptr);
+}
+
+napi_threadsafe_function MakeTerrainEventTsfn(napi_env env, napi_value cb) {
+    napi_value asyncName = nullptr;
+    napi_create_string_utf8(env, "globecore-terrain-event", NAPI_AUTO_LENGTH, &asyncName);
+    napi_threadsafe_function tsfn = nullptr;
+    const napi_status st = napi_create_threadsafe_function(
+        env, cb, nullptr, asyncName, 32 /*max_queue_size*/, 1 /*initial_thread_count*/,
+        nullptr, nullptr, nullptr, TerrainEventCallJs, &tsfn);
+    if (st != napi_ok) {
+        LOGE("globecore-terrain-event: create tsfn failed: %d", st);
+        return nullptr;
+    }
+    return tsfn;
+}
+
+void ReleaseTerrainEventListener(int64_t handle) {
+    std::shared_ptr<TerrainEventListener> listener;
+    {
+        std::lock_guard<std::mutex> lock(g_terrainEventMtx);
+        auto it = g_terrainEventListeners.find(handle);
+        if (it == g_terrainEventListeners.end()) return;
+        listener = it->second;
+        g_terrainEventListeners.erase(it);
+    }
+    if (listener) listener->close();
+}
+
 void TapCallJs(napi_env env, napi_value jsCb, void * /*context*/, void *data) {
     std::unique_ptr<TapPack> pack(static_cast<TapPack *>(data)); // 销毁广播时 data 为 null
     if (env == nullptr || jsCb == nullptr || pack == nullptr) return;
@@ -264,6 +323,7 @@ napi_value NativeDestroy(napi_env env, napi_callback_info info) {
         }
     }
     ReleaseGestureListeners(handle); // join 之后：渲染线程已停，不会再碰 tsfn
+    ReleaseTerrainEventListener(handle); // @Jin Provider 线程随后由 GlobeEngine 析构 join。
     delete toGlobeEngine(handle);
     return nullptr;
 }
@@ -1124,6 +1184,35 @@ napi_value NativeTerrainProviderStatus(napi_env env, napi_callback_info info) {
     return gcohos::NapiMakeString(env, toGlobeEngine(handle)->terrainProviderStatsJson());
 }
 
+/// @Jin 注册/反注册统一地形事件回调；cb=null 时清除 Provider 回调。
+napi_value NativeSetTerrainProviderEventCallback(napi_env env, napi_callback_info info) {
+    napi_value args[2];
+    gcohos::NapiGetArgs(env, info, 2, args);
+    int64_t handle = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return nullptr;
+
+    ReleaseTerrainEventListener(handle);
+    napi_valuetype vt = napi_undefined;
+    if (args[1] != nullptr) napi_typeof(env, args[1], &vt);
+    if (vt != napi_function) {
+        toGlobeEngine(handle)->setTerrainProviderEventCallback(nullptr);
+        return nullptr;
+    }
+
+    napi_threadsafe_function tsfn = MakeTerrainEventTsfn(env, args[1]);
+    if (tsfn == nullptr) return nullptr;
+    auto listener = std::make_shared<TerrainEventListener>();
+    listener->tsfn = tsfn;
+    {
+        std::lock_guard<std::mutex> lock(g_terrainEventMtx);
+        g_terrainEventListeners[handle] = listener;
+    }
+    toGlobeEngine(handle)->setTerrainProviderEventCallback([listener](const std::string &json) {
+        listener->emit(json);
+    });
+    return nullptr;
+}
+
 } // namespace
 
 namespace gcohos {
@@ -1186,6 +1275,7 @@ napi_value RegisterGlobeEngine(napi_env env, napi_value exports) {
         {"nativeRefreshTerrainProvider", nullptr, NativeRefreshTerrainProvider, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativePrefetchTerrainProviderMetadata", nullptr, NativePrefetchTerrainProviderMetadata, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeTerrainProviderStatus", nullptr, NativeTerrainProviderStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"nativeSetTerrainProviderEventCallback", nullptr, NativeSetTerrainProviderEventCallback, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;

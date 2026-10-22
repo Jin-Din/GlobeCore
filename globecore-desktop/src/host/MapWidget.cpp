@@ -40,15 +40,23 @@ MapWidget::MapWidget(QWidget *parent) : QOpenGLWidget(parent) {
     // 无 GL 上下文依赖：构造只做对象图搭建，GL 相关一律留到 initializeGL
     engine_ = std::make_unique<globecore::GlobeEngine>();
     engine_->setViewMode(0); // 2D 墨卡托起步，与移动端默认口径一致
+    // @Jin Provider 回调可能来自调度/worker 线程，统一排队到 MapWidget 所属 GUI 线程后发 signal。
+    engine_->setTerrainProviderEventCallback([this](const std::string &eventJson) {
+        const QString payload = QString::fromStdString(eventJson);
+        QMetaObject::invokeMethod(
+                this, [this, payload] { emit terrainProviderEvent(payload); }, Qt::QueuedConnection);
+    });
 }
 
 MapWidget::~MapWidget() {
     if (!engine_) {
         return;
     }
+    // @Jin 先断地形事件与渲染回调，再释放 GL，避免析构期间 worker 回投。
+    engine_->setTerrainProviderEventCallback(nullptr);
+    engine_->setRenderCallback(nullptr);
     // GL 资源（VBO/纹理/着色器）须在上下文销毁前释放；QOpenGLWidget 的上下文归属本控件
     makeCurrent();
-    engine_->setRenderCallback(nullptr); // 先断回调，防析构后仍有 worker 线程排队 update()
     engine_->releaseGl();
     doneCurrent();
 }
@@ -121,6 +129,37 @@ bool MapWidget::event(QEvent *e) {
         engine_->setDisplayDensity(devicePixelRatioF());
     }
     return QOpenGLWidget::event(e);
+}
+
+// @Jin 注入数据源、缓存目录、并发与请求头，Provider 实例和下载线程均由 GlobeCore 管理。
+bool MapWidget::configureTerrainProvider(const QString &baseUrl, const QString &cacheDir,
+                                         int maxZoom, int concurrency, int tileRadius,
+                                         const QMap<QString, QString> &headers) {
+    if (!engine_) return false;
+    std::vector<std::pair<std::string, std::string>> nativeHeaders;
+    nativeHeaders.reserve(static_cast<size_t>(headers.size()));
+    for (auto it = headers.cbegin(); it != headers.cend(); ++it) {
+        nativeHeaders.emplace_back(it.key().toStdString(), it.value().toStdString());
+    }
+    return engine_->configureTerrainProvider(baseUrl.toStdString(), cacheDir.toStdString(),
+                                             maxZoom, concurrency, tileRadius, nativeHeaders);
+}
+
+// @Jin 开关、刷新、预取和状态查询只做薄转发，不在 Qt 层复制 Provider 逻辑。
+bool MapWidget::setTerrainProviderEnabled(bool enabled) {
+    return engine_ && engine_->setTerrainProviderEnabled(enabled);
+}
+
+void MapWidget::refreshTerrainProvider() {
+    if (engine_) engine_->refreshTerrainProvider();
+}
+
+void MapWidget::prefetchTerrainProviderMetadata() {
+    if (engine_) engine_->prefetchTerrainProviderMetadata();
+}
+
+QString MapWidget::terrainProviderStatus() const {
+    return engine_ ? QString::fromStdString(engine_->terrainProviderStatsJson()) : QStringLiteral("{}");
 }
 
 void MapWidget::zoomCentered(double factor) {

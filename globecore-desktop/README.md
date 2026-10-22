@@ -18,6 +18,21 @@ globecore/src/main/cpp/          ← 引擎源（唯一真源，不复制不搬�
 
 桌面直接调用 `gcbridge` C++ 核心，**不需要 JNI/NAPI 那种编解码薄封装层**。
 
+## 地形 Provider
+
+`MapWidget` 与 Android / Harmony 使用同一套地形 Provider 门面：
+
+```cpp
+widget->configureTerrainProvider(baseUrl, cacheDir, 15, 4, 3, headers);
+QObject::connect(widget, &MapWidget::terrainProviderEvent, this, [](const QString &payload) {
+    // @Jin payload 为单行 JSON，可在 GUI 线程直接解析 event / stats
+});
+widget->prefetchTerrainProviderMetadata();
+widget->setTerrainProviderEnabled(true);
+```
+
+共享 C++ Provider 的 worker 线程只产生事件；`MapWidget` 通过 `Qt::QueuedConnection` 转投 GUI 线程后发出 `terrainProviderEvent(QString)`。
+
 ## 目录
 
 ```

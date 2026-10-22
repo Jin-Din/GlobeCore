@@ -1033,6 +1033,12 @@ bool GlobeEngine::configureTerrainProvider(
     options.tileRadius = tileRadius;
     options.headers = headers;
 
+    std::function<void(const std::string &)> eventCallback;
+    {
+        // @Jin 回调跨 Provider 重建保留；新实例创建后立即安装，metadata 预取事件不会丢失。
+        std::lock_guard<std::mutex> lock(terrainEventMtx_);
+        eventCallback = terrainEventCallback_;
+    }
     terrainProvider_ = std::make_unique<CesiumTerrainProvider>(
         std::move(options),
         [this]() -> TerrainViewportSnapshot {
@@ -1053,6 +1059,7 @@ bool GlobeEngine::configureTerrainProvider(
             // @Jin C++ worker 直接入队 Renderer；GL 线程下一帧帧首消费，不再经过 ArkTS 调度。
             setTerrainTile(z, x, y, bytes, bounds.lonMin, bounds.latMin, bounds.lonMax, bounds.latMax);
         });
+    terrainProvider_->setEventCallback(std::move(eventCallback));
     terrainProvider_->prefetchMetadata();
     LOGI("GlobeEngine terrain provider configured url=%s cache=%s maxZoom=%d concurrency=%d radius=%d",
          baseUrl.c_str(), cacheDir.c_str(), maxZoom, concurrency, tileRadius);
@@ -1079,6 +1086,16 @@ void GlobeEngine::prefetchTerrainProviderMetadata() {
 
 std::string GlobeEngine::terrainProviderStatsJson() const {
     return terrainProvider_ ? terrainProvider_->statsJson() : std::string("{}");
+}
+
+void GlobeEngine::setTerrainProviderEventCallback(std::function<void(const std::string &)> callback) {
+    std::function<void(const std::string &)> installed;
+    {
+        std::lock_guard<std::mutex> lock(terrainEventMtx_);
+        terrainEventCallback_ = callback;
+        installed = terrainEventCallback_;
+    }
+    if (terrainProvider_) terrainProvider_->setEventCallback(std::move(installed));
 }
 
 } // namespace globecore

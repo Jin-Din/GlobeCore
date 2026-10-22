@@ -79,6 +79,8 @@ public:
     using TileSink = std::function<void(int z, int x, int y,
                                          const std::vector<uint8_t> &bytes,
                                          const TerrainGeoBounds &bounds)>;
+    /// @Jin 统一地形事件回调：参数为单行 JSON，含 event 与完整 stats；平台桥接只负责线程投递。
+    using EventCallback = std::function<void(const std::string &eventJson)>;
 
     CesiumTerrainProvider(TerrainProviderOptions options,
                           ViewportProvider viewportProvider,
@@ -100,6 +102,9 @@ public:
 
     /** @Jin 引擎清空地形缓存后同步清空 Provider 的已交付记忆。 */
     void resetDeliveredTiles();
+
+    /** @Jin 注册/替换统一地形事件回调；传空 function 反注册。回调可能来自调度或 worker 线程。 */
+    void setEventCallback(EventCallback callback);
 
     /** @Jin 线程安全读取状态快照。 */
     TerrainProviderStats stats() const;
@@ -133,10 +138,14 @@ private:
     bool isDelivered(const std::string &key);
     void markDelivered(const std::string &key);
     void abortInFlight();
+    void emitEvent(const std::string &event, const std::string &extraJson = {}) const;
 
     TerrainProviderOptions options_;
     ViewportProvider viewportProvider_;
     TileSink tileSink_;
+
+    mutable std::mutex eventMtx_;
+    EventCallback eventCallback_;
 
     std::atomic<bool> enabled_{false};
     std::atomic<bool> stopping_{false};
