@@ -10,3 +10,15 @@ export { NativeSrs } from './src/main/ets/NativeSrs';
 export { NativeNet } from './src/main/ets/NativeNet';
 export { NativeLayerInfo } from './src/main/ets/NativeLayerInfo';
 export { NativeVector } from './src/main/ets/NativeVector';
+// @Jin 通用 Cesium quantized-mesh 地形提供器：数据源由宿主注入，HAR 不绑定具体服务。
+export {
+  CesiumTerrainProvider,
+  TerrainSourceOptions,
+  TerrainTile,
+  GeoBounds,
+  geoTileBounds,
+  lonLatToGeoTile,
+  mercatorTileCenter,
+  lonLatToMercatorTile,
+  serviceZoomForEngineZoom,
+} from './src/main/ets/terrain/CesiumTerrainProvider';
