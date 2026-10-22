@@ -246,6 +246,35 @@ export struct NativeMapView {
     NativeLib.nativeClearTerrain(this.nativeHandle);
     this.requestRender();
   }
+  /**
+   * @Jin 配置 C++ CesiumTerrainProvider。
+   * @Jin 宿主只提供地址、缓存目录、并发与请求头；中心优先视口调度、下载、去重、重试和注入均由 native 完成。
+   */
+  configureTerrainProvider(baseUrl: string, cacheDir: string, maxZoom: number,
+    concurrency: number, tileRadius: number, headers: Record<string, string>): boolean {
+    return NativeLib.nativeConfigureTerrainProvider(this.nativeHandle, baseUrl, cacheDir,
+      maxZoom, concurrency, tileRadius, headers);
+  }
+
+  /** @Jin 开关 C++ 地形 Provider；关闭时 native 同步清空 DEM。 */
+  setTerrainProviderEnabled(enabled: boolean): boolean {
+    return NativeLib.nativeSetTerrainProviderEnabled(this.nativeHandle, enabled);
+  }
+
+  /** @Jin 请求 C++ Provider 按当前相机视口刷新；连续请求在 native 内自动合并。 */
+  refreshTerrainProvider(): void {
+    NativeLib.nativeRefreshTerrainProvider(this.nativeHandle);
+  }
+
+  /** @Jin 后台预取 layer.json，不要求地形已开启。 */
+  prefetchTerrainProviderMetadata(): void {
+    NativeLib.nativePrefetchTerrainProviderMetadata(this.nativeHandle);
+  }
+
+  /** @Jin 读取 C++ Provider 诊断 JSON，用于 hilog 核实磁盘命中/网络请求/去重/失败。 */
+  terrainProviderStatus(): string {
+    return NativeLib.nativeTerrainProviderStatus(this.nativeHandle);
+  }
 
   /**
    * 移除一个瓦片图源图层（index 为 addTileLayer / addRasterLayer 的加入次序，0 起）：墓碑—native

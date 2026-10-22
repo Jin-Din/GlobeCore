@@ -82,6 +82,8 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         terrain/QuantizedMesh.cpp
         # @Jin Cesium 地形 layer.json 解析与 4326/TMS ↔ 墨卡托 bbox 求交核心
         terrain/CesiumTerrain.cpp
+        # @Jin C++ 视口地形调度、下载缓存、去重重试与注入 Provider
+        terrain/CesiumTerrainProvider.cpp
         # binary glTF (.glb) v2 解码器（顶点/索引/PBR baseColor 提取，供 3D Tiles 渲染）
         gltf/GltfDecoder.cpp
         # 3D Tiles tileset.json 解析器（tile 树+boundingVolume+geometricError+content.uri）

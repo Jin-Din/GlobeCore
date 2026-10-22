@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace globecore {
@@ -34,10 +35,12 @@ public:
      * @param outBytes  输出：响应字节
      * @param timeoutMs 整体超时（毫秒）
      * @param abortFlag 可选中断标志：传输中一旦置 true 则立即中断返回 false（用于关机时快速 join 工作线程）
+     * @param headers   可选 HTTP 请求头；@Jin C++ TerrainProvider 用它承载宿主注入的 Referer/User-Agent。
      * @return 成功返回 true；网络/超时/中断/非 2xx 返回 false（outBytes 被清空）
      */
     static bool get(const std::string &url, std::vector<uint8_t> &outBytes, long timeoutMs = 15000,
-                    const std::atomic<bool> *abortFlag = nullptr);
+                    const std::atomic<bool> *abortFlag = nullptr,
+                    const std::vector<std::pair<std::string, std::string>> &headers = {});
 
     /// 设置 CA 证书包路径（cacert.pem），用于 HTTPS 证书校验；空串表示用默认行为
     static void setCaBundle(const std::string &caInfoPath);

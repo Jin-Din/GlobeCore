@@ -176,6 +176,8 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         ${GLOBECORE_ENGINE_ROOT}/terrain/QuantizedMesh.cpp
         # @Jin Cesium 地形 layer.json 解析与 4326/TMS ↔ 墨卡托 bbox 求交核心
         ${GLOBECORE_ENGINE_ROOT}/terrain/CesiumTerrain.cpp
+        # @Jin C++ 视口地形调度、下载缓存、去重重试与注入 Provider
+        ${GLOBECORE_ENGINE_ROOT}/terrain/CesiumTerrainProvider.cpp
         # binary glTF (.glb) v2 解码器
         ${GLOBECORE_ENGINE_ROOT}/gltf/GltfDecoder.cpp
         # 3D Tiles tileset.json 解析器

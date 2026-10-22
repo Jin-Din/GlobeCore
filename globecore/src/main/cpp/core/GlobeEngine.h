@@ -14,6 +14,7 @@
 #include "layer/VectorLayer.h"
 #include "navigator/Navigator.h"
 #include "render/Renderer.h"
+#include "terrain/CesiumTerrainProvider.h"
 
 namespace globecore {
 
@@ -286,6 +287,26 @@ public:
     /// 清除全部地形缓存（换地形源/上下文重建时调用）。
     void clearTerrain();
 
+    /**
+     * @Jin 配置并启动 C++ CesiumTerrainProvider。
+     * @Jin 平台只传数据源、缓存目录和并发策略；视口采集、下载、去重、缓存、重试与注入均在 C++ 内完成。
+     */
+    bool configureTerrainProvider(const std::string &baseUrl, const std::string &cacheDir,
+                                  int maxZoom, int concurrency, int tileRadius,
+                                  const std::vector<std::pair<std::string, std::string>> &headers);
+
+    /** @Jin 开关 C++ 地形调度；关闭时同时清空 Renderer 地形缓存。 */
+    bool setTerrainProviderEnabled(bool enabled);
+
+    /** @Jin 按当前相机视口请求一次 C++ 地形刷新（请求自动合并）。 */
+    void refreshTerrainProvider();
+
+    /** @Jin 后台预取 layer.json，不要求地形已开启。 */
+    void prefetchTerrainProviderMetadata();
+
+    /** @Jin 返回 C++ Provider 的单行 JSON 状态；未配置时返回空 JSON 对象。 */
+    std::string terrainProviderStatsJson() const;
+
 private:
     Navigator navigator_;
     // 瓦片图源图层（按加入顺序绘制）；以 unique_ptr 持有保证地址稳定，供 Renderer 长期引用
@@ -297,6 +318,8 @@ private:
     // 须声明在 renderer_ 之前：Renderer 构造时引用本向量。
     std::vector<std::unique_ptr<RasterImageLayer>> rasterImageLayers_;
     Renderer renderer_;     // 引用 navigator_、layers_、vectorLayers_、rasterImageLayers_，须在其后声明以保证构造顺序
+    // @Jin 地形 Provider 在 renderer_ 之后声明：析构时先停下载线程，再释放 Renderer。
+    std::unique_ptr<CesiumTerrainProvider> terrainProvider_;
     std::function<void()> renderCallback_; // 「需重绘」回调（由 JNI 注入，指向 requestRender）
 
     // 图层容器互斥锁：保护 layers_/vectorLayers_/rasterImageLayers_ 的结构变化（push_back 会重分配

@@ -78,7 +78,8 @@ void HttpClient::setCaBundle(const std::string &caInfoPath) {
 }
 
 bool HttpClient::get(const std::string &url, std::vector<uint8_t> &outBytes, long timeoutMs,
-                     const std::atomic<bool> *abortFlag) {
+                     const std::atomic<bool> *abortFlag,
+                     const std::vector<std::pair<std::string, std::string>> &headers) {
     if (!globalInit()) return false;
 
     CURL *curl = threadHandle();
@@ -96,6 +97,22 @@ bool HttpClient::get(const std::string &url, std::vector<uint8_t> &outBytes, lon
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);       // 多线程环境下必须，避免 alarm 信号
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L); // 跟随 3xx
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "globecore/0.2.8.1");
+
+    // @Jin 宿主注入的请求头用于 Referer/Token 等数据源策略；请求结束统一释放，不污染线程常驻 handle。
+    curl_slist *headerList = nullptr;
+    for (const auto &header : headers) {
+        const std::string line = header.first + ": " + header.second;
+        curl_slist *next = curl_slist_append(headerList, line.c_str());
+        if (next == nullptr) {
+            curl_slist_free_all(headerList);
+            headerList = nullptr;
+            break;
+        }
+        headerList = next;
+    }
+    if (headerList != nullptr) {
+        curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headerList);
+    }
 
     // 可中断传输：传入 abortFlag 时启用进度回调，标志置位则中断
     if (abortFlag != nullptr) {
@@ -128,6 +145,8 @@ bool HttpClient::get(const std::string &url, std::vector<uint8_t> &outBytes, lon
 
     long httpCode = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+    // @Jin curl_slist 仅本请求有效；连接缓存属于 easy handle，不受 header list 释放影响。
+    curl_slist_free_all(headerList);
     // 刻意不 cleanup：handle 线程常驻，连接缓存跨请求复用（线程退出由 ThreadCurl 析构回收）
 
     if (rc != CURLE_OK) {

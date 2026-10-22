@@ -25,6 +25,11 @@ GlobeEngine::GlobeEngine() : renderer_(navigator_, layers_, vectorLayers_, raste
 }
 
 GlobeEngine::~GlobeEngine() {
+    // @Jin 先停 Provider 并等待下载线程退出，确保迟到回调不会再访问即将析构的 Navigator/Renderer。
+    if (terrainProvider_) {
+        terrainProvider_->setEnabled(false);
+        terrainProvider_.reset();
+    }
     LOGI("GlobeEngine destroyed");
 }
 
@@ -1001,8 +1006,79 @@ void GlobeEngine::setTerrainTile(int z, int x, int y, const std::vector<uint8_t>
 }
 
 void GlobeEngine::clearTerrain() {
+    // @Jin 外部清空和关闭地形时同步失效 Provider 已交付 LRU，确保下一次刷新会重新注入。
+    if (terrainProvider_) terrainProvider_->resetDeliveredTiles();
     renderer_.clearTerrain();
     if (renderCallback_) renderCallback_();
+}
+
+bool GlobeEngine::configureTerrainProvider(
+    const std::string &baseUrl, const std::string &cacheDir,
+    int maxZoom, int concurrency, int tileRadius,
+    const std::vector<std::pair<std::string, std::string>> &headers) {
+    if (baseUrl.empty() || cacheDir.empty()) return false;
+
+    // @Jin 换源时先停旧 Provider 再清空 DEM，避免旧地址的迟到结果混入新地形。
+    if (terrainProvider_) {
+        terrainProvider_->setEnabled(false);
+        terrainProvider_.reset();
+    }
+    clearTerrain();
+
+    TerrainProviderOptions options;
+    options.baseUrl = baseUrl;
+    options.cacheDir = cacheDir;
+    options.maxZoom = maxZoom;
+    options.concurrency = concurrency;
+    options.tileRadius = tileRadius;
+    options.headers = headers;
+
+    terrainProvider_ = std::make_unique<CesiumTerrainProvider>(
+        std::move(options),
+        [this]() -> TerrainViewportSnapshot {
+            TerrainViewportSnapshot viewport;
+            const Camera camera = navigator_.camera();
+            viewport.valid = navigator_.viewportHeight() > 0;
+            viewport.viewMode = viewMode();
+            viewport.viewportHeight = navigator_.viewportHeight();
+            viewport.latitude = camera.latitude;
+            viewport.longitude = camera.longitude;
+            viewport.altitude = camera.altitude;
+            viewport.tilt = camera.tilt;
+            viewport.displayZoom = static_cast<double>(currentZoomLevel());
+            return viewport;
+        },
+        [this](int z, int x, int y, const std::vector<uint8_t> &bytes,
+               const TerrainGeoBounds &bounds) {
+            // @Jin C++ worker 直接入队 Renderer；GL 线程下一帧帧首消费，不再经过 ArkTS 调度。
+            setTerrainTile(z, x, y, bytes, bounds.lonMin, bounds.latMin, bounds.lonMax, bounds.latMax);
+        });
+    terrainProvider_->prefetchMetadata();
+    LOGI("GlobeEngine terrain provider configured url=%s cache=%s maxZoom=%d concurrency=%d radius=%d",
+         baseUrl.c_str(), cacheDir.c_str(), maxZoom, concurrency, tileRadius);
+    return true;
+}
+
+bool GlobeEngine::setTerrainProviderEnabled(bool enabled) {
+    if (!terrainProvider_) return false;
+    terrainProvider_->setEnabled(enabled);
+    if (!enabled) {
+        // @Jin Provider 关闭后清空 Renderer 的 DEM 缓存；重新开启时由新视口重新注入。
+        clearTerrain();
+    }
+    return true;
+}
+
+void GlobeEngine::refreshTerrainProvider() {
+    if (terrainProvider_) terrainProvider_->requestRefresh();
+}
+
+void GlobeEngine::prefetchTerrainProviderMetadata() {
+    if (terrainProvider_) terrainProvider_->prefetchMetadata();
+}
+
+std::string GlobeEngine::terrainProviderStatsJson() const {
+    return terrainProvider_ ? terrainProvider_->statsJson() : std::string("{}");
 }
 
 } // namespace globecore

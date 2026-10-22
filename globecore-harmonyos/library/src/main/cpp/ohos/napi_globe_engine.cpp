@@ -25,6 +25,7 @@
 #include "geom/Camera.h"
 #include "layer/VectorLayer.h"
 #include "net/HttpClient.h"
+#include "util/JsonParser.h"
 #include "util/Log.h"
 
 #include "XComponentBridge.h"
@@ -1054,6 +1055,75 @@ napi_value NativeClearTerrain(napi_env env, napi_callback_info info) {
     return nullptr;
 }
 
+/// nativeConfigureTerrainProvider(handle, baseUrl, cacheDir, maxZoom, concurrency, tileRadius, headersJson)
+/// @Jin Harmony 只注入配置；C++ Provider 负责视口调度、HTTP、磁盘缓存、去重重试和 DEM 注入。
+napi_value NativeConfigureTerrainProvider(napi_env env, napi_callback_info info) {
+    napi_value args[7];
+    gcohos::NapiGetArgs(env, info, 7, args);
+    int64_t handle = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return gcohos::NapiMakeBool(env, false);
+    const std::string baseUrl = gcohos::NapiGetString(env, args[1]);
+    const std::string cacheDir = gcohos::NapiGetString(env, args[2]);
+    int32_t maxZoom = 15;
+    int32_t concurrency = 4;
+    int32_t tileRadius = 3;
+    gcohos::NapiGetInt32(env, args[3], maxZoom);
+    gcohos::NapiGetInt32(env, args[4], concurrency);
+    gcohos::NapiGetInt32(env, args[5], tileRadius);
+    const std::string headersJson = gcohos::NapiGetString(env, args[6]);
+
+    std::vector<std::pair<std::string, std::string>> headers;
+    const globecore::JsonValue root = globecore::parseJson(headersJson);
+    if (root.isObject()) {
+        for (const auto &entry : root.obj) {
+            if (entry.second.isString()) headers.emplace_back(entry.first, entry.second.strVal);
+        }
+    }
+    const bool ok = toGlobeEngine(handle)->configureTerrainProvider(
+        baseUrl, cacheDir, maxZoom, concurrency, tileRadius, headers);
+    return gcohos::NapiMakeBool(env, ok);
+}
+
+/// @Jin 开/关 C++ 地形 Provider；关闭时同时清空 Renderer DEM。
+napi_value NativeSetTerrainProviderEnabled(napi_env env, napi_callback_info info) {
+    napi_value args[2];
+    gcohos::NapiGetArgs(env, info, 2, args);
+    int64_t handle = 0;
+    bool enabled = false;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return gcohos::NapiMakeBool(env, false);
+    gcohos::NapiGetBool(env, args[1], enabled);
+    return gcohos::NapiMakeBool(env, toGlobeEngine(handle)->setTerrainProviderEnabled(enabled));
+}
+
+/// @Jin 请求 C++ Provider 按最新相机视口刷新。
+napi_value NativeRefreshTerrainProvider(napi_env env, napi_callback_info info) {
+    napi_value args[1];
+    gcohos::NapiGetArgs(env, info, 1, args);
+    int64_t handle = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return nullptr;
+    toGlobeEngine(handle)->refreshTerrainProvider();
+    return nullptr;
+}
+
+/// @Jin 后台预取 layer.json。
+napi_value NativePrefetchTerrainProviderMetadata(napi_env env, napi_callback_info info) {
+    napi_value args[1];
+    gcohos::NapiGetArgs(env, info, 1, args);
+    int64_t handle = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return nullptr;
+    toGlobeEngine(handle)->prefetchTerrainProviderMetadata();
+    return nullptr;
+}
+
+/// @Jin 返回缓存命中/网络请求/去重/失败等单行 JSON 诊断状态。
+napi_value NativeTerrainProviderStatus(napi_env env, napi_callback_info info) {
+    napi_value args[1];
+    gcohos::NapiGetArgs(env, info, 1, args);
+    int64_t handle = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return gcohos::NapiMakeString(env, "{}");
+    return gcohos::NapiMakeString(env, toGlobeEngine(handle)->terrainProviderStatsJson());
+}
+
 } // namespace
 
 namespace gcohos {
@@ -1110,6 +1180,12 @@ napi_value RegisterGlobeEngine(napi_env env, napi_value exports) {
         // ── 三维地形（feature/terrain-pre）──
         {"nativeSetTerrainTile", nullptr, NativeSetTerrainTile, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeClearTerrain", nullptr, NativeClearTerrain, nullptr, nullptr, nullptr, napi_default, nullptr},
+        // @Jin C++ 地形 Provider 配置、开关、刷新、预取与诊断状态。
+        {"nativeConfigureTerrainProvider", nullptr, NativeConfigureTerrainProvider, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"nativeSetTerrainProviderEnabled", nullptr, NativeSetTerrainProviderEnabled, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"nativeRefreshTerrainProvider", nullptr, NativeRefreshTerrainProvider, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"nativePrefetchTerrainProviderMetadata", nullptr, NativePrefetchTerrainProviderMetadata, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"nativeTerrainProviderStatus", nullptr, NativeTerrainProviderStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;

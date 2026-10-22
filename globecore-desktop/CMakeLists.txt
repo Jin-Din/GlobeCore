@@ -208,6 +208,8 @@ add_library(globecore STATIC
         ${GLOBECORE_ENGINE_ROOT}/rhi/GLES2Backend.cpp
         ${GLOBECORE_ENGINE_ROOT}/rhi/VulkanBackend.cpp
         ${GLOBECORE_ENGINE_ROOT}/terrain/QuantizedMesh.cpp
+        # @Jin C++ 视口地形调度、下载缓存、去重重试与注入 Provider
+        ${GLOBECORE_ENGINE_ROOT}/terrain/CesiumTerrainProvider.cpp
         ${GLOBECORE_ENGINE_ROOT}/gltf/GltfDecoder.cpp
         ${GLOBECORE_ENGINE_ROOT}/layer/TilesetJson.cpp
         ${GLOBECORE_ENGINE_ROOT}/layer/TileCache.cpp

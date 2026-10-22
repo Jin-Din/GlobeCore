@@ -29,7 +29,7 @@ SDK**。
 | 底图 | 任意 XYZ 瓦片图源（`{z}/{x}/{y}` URL 模板）多层叠加；注记层透明混合置顶；超出图源最大级别拉伸末级纹理（无限放大不出 404 占位块）；URL 传空即纯离线读缓存 | `addTileLayer` |
 | 缓存 | 瓦片缓存双后端：`cacheDir` 以 `.mbtiles` 结尾走 SQLite **MBTiles 单文件**（WAL、标准 tiles/metadata 表、TMS y 翻转、扩展列 `added_at` 入库时间，老库自动 ALTER 补列），否则按 `<cacheDir>/<z>/<x>_<y>.tile` 目录落盘；2D/3D 纹理缓存同键复用；取瓦片走 native 后台线程池，就绪异步上屏 | 同上（`cacheDir`） |
 | 本地影像 | tif/img 等 GDAL 可打开格式，双通路：`addRasterLayer` native 重投影后按全球墨卡托即时切片并回写缓存复用（级别由栅格分辨率自动推算）；`addRasterImageLayer` 整幅直读单张贴图按 WGS84 四至贴面（UI 线程零 GDAL 立即返回，超 GL 纹理/内存帽沿 overviews 降采样，全幅 sidecar 磁盘缓存二次打开秒级就绪） | `addRasterLayer` / `addRasterImageLayer` |
-| 三维地形 | quantized-mesh v1.0 双通路：native 注入接口 `setTerrainTile/clearTerrain`，以及 Harmony HAR 通用 `CesiumTerrainProvider`。Provider 由宿主注入 `baseUrl/cacheDir/concurrency/headers`；阶段 B 起 `layer.json`、available 判断、EPSG:4326/TMS 与墨卡托引擎瓦片 bbox 求交由共享 C++ 核心 `terrain/CesiumTerrain` 完成，ArkTS 只保留 HTTP、磁盘缓存和流式交付；不硬编码服务地址或 token。native 按真实 bbox 全局共享覆盖多块 DEM，索引按 high-watermark 解码，DEM 逐帧削峰、地形瓦片静态 VBO（LRU），仅 3D 球体生效 | `setTerrainTile` / `clearTerrain` / `CesiumTerrainProvider` |
+| 三维地形 | quantized-mesh v1.0 双通路：底层保留 `setTerrainTile/clearTerrain` 注入接口；HarmonyOS 阶段 C 已把 `CesiumTerrainProvider` 下沉共享 C++，由 native 直接读取相机视口、中心优先生成 DEM 任务，并完成 `layer.json` 解析、EPSG:4326/TMS 与墨卡托 bbox 求交、磁盘缓存、并发下载、重试、去重和流式注入。宿主只注入 `baseUrl/cacheDir/maxZoom/concurrency/tileRadius/headers`，不绑定服务地址或 token；native 按真实 bbox 全局共享覆盖多块 DEM，索引按 high-watermark 解码，DEM 逐帧削峰、地形瓦片静态 VBO（LRU），仅 3D 球体生效 | `configureTerrainProvider` / `setTerrainProviderEnabled` / `refreshTerrainProvider` / `terrainProviderStatus` |
 | 瓦片调度 | 后台线程池取瓦片（先盘后网、原子写盘、失败冷却退避），GL 线程仅异步上传并按帧限额；视口代际（view-generation）在初始化/连续手势时丢弃过期排队与就绪结果、在途同 key 可被新视口复用；在线图源首屏按 z-2/z-1 祖先粗瓦优先投递与出队，先完整低清覆盖再由叶子替换变清，显著压低无效请求量与“逐格蹦出”感；3D 地理四叉树帧间缓存同时校验眼点、离地高度尺度与相机 forward/up，倾斜、旋转、缩放后立即重建可见叶集，避免复用旧视锥造成周边黑区 | `addTileLayer` |
 | 矢量 | shp/kml/kmz/dwg/dxf 等 OGR 可打开格式**直读文件**→ 重投影 WGS84 → earcut 三角剖分；面填充/描边/线/点/图标 billboard/文字标注（字形图集，可复用系统 CJK 字体，零 APK 增量） | `addVectorLayer` / `VectorStyle` / `setFontPath` |
 | 大数据矢量 | 按屏幕范围增量重载（Swap-on-ready，重载期无空窗）、单次要素预算、加载中状态轮询、按级别隐藏、样式变更就地换层不闪图 | `updateVectorExtent` / `hasVectorLoading` / `setVectorMinLevel` / `setVectorLayerVisible` / `removeVectorLayer` |
@@ -478,6 +478,30 @@ struct MapPage {
 }
 ```
 
+### 三维地形 C++ Provider（P2-1 阶段 C）
+
+阶段 C 起，Cesium quantized-mesh 的视口调度、下载缓存、重试去重与引擎注入全部在 `globecore/src/main/cpp/terrain/CesiumTerrainProvider` 中完成。Harmony 宿主只配置数据源；仓库中的旧 ArkTS `CesiumTerrainProvider` 暂时保留用于兼容和阶段 D 参考，但 Demo 正常路径不再调用。
+
+```typescript
+const cacheDir = `${getContext(this).filesDir}/map-cache/terrain`;
+view.configureTerrainProvider(
+  'http://example.com/terrain/cesium',
+  cacheDir, 15, 4, 3,
+  { 'User-Agent': 'GlobeCoreDemo/1.0' }
+);
+view.prefetchTerrainProviderMetadata(); // 空闲时先取 layer.json
+view.setViewMode(ViewMode.THREE_D);
+view.setTerrainProviderEnabled(true);
+view.refreshTerrainProvider();
+console.info(view.terrainProviderStatus());
+```
+
+- 缓存布局：`<cacheDir>/layer.json`、`<cacheDir>/<z>/<x>_<y>.terrain`；元数据和瓦片均使用临时文件 + rename 原子写入。
+- 调度策略：相机中心优先，默认 `tileRadius=3`（7×7 引擎瓦片窗口）；固定并发 worker 先查磁盘，未命中才联网，同一服务 DEM 在单轮及跨刷新 LRU 中去重。
+- 可靠性：单请求失败重试 1 次；相机连续变化只保留最后一次刷新；视口代际变化会终止旧任务并丢弃迟到结果；失败回调不会污染已交付 LRU。
+- 状态 JSON：`engineZoom/requestedEngineTiles/requestedServiceTiles/deliveredTiles/diskHits/networkRequests/retries/cacheWrites/duplicateSkips/failures/firstTileMs/elapsedMs`，可直接用于 hilog 和页面诊断。
+- 真机数据（设备 `5KLBB25911200313`，太白山 tilt=55°）：热缓存 `182` 块全部磁盘命中、`networkRequests=0`、`firstTileMs=8ms`、`elapsedMs=101ms`；清数据冷缓存 `182` 个唯一 DEM、`182` 次网络、`firstTileMs=106ms`、`elapsedMs=3003ms`，去重 `84`、失败 `0`。
+
 其余 API（矢量/栅格/叠加层/拾取/定位标记/手势）与 Kotlin 侧逐一对应，参「API 概览与快速上手」；
 生命周期无需手动 onPause/onResume：native EGL 线程随 XComponent 加载/卸载自动 attach/detach。
 
@@ -531,6 +555,7 @@ cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build b
   ⑤ **3D 倾斜/缩放黑区修复**：`GeographicQuadtree` 帧间缓存原先只比较眼点位移、FOV 与级别参数，且位移阈值误用地心距 1%（50 km 高度时约 64 km）；两指倾斜或缩放后高度/朝向已变化却继续复用旧叶集，真机出现中心影像带之外大片黑区。现缓存同时校验相机 `forward/up`（0.1°）并把位移阈值改为离地高度的 0.25%（下限 20 m），眼点相同但纯旋转也会立即重建；真机以 tilt 55°→约 80°、随后双指缩小复测，左右/下方黑带消失。
   ⑥ **P2-1 阶段 A：地形 Provider 下沉 Harmony HAR**：原 Demo 内 `CesiumTerrainProvider` 迁入 `@zys/globecore`，公开 `TerrainSourceOptions`（`baseUrl/cacheDir/maxZoom/concurrency/headers`）和网格工具函数；移除 HAR 内硬编码地形地址，`layer.json` 的 `tiles/maxzoom/available` 动态生效，保留并发下载、磁盘缓存、EPSG:4326/TMS bbox 精确求交与流式交付。Demo 改为从 HAR 导入并只注入 210 数据源配置；真机太白山热缓存复测 `DEM=182、engineTiles=49、fetchMs=64、skip=0、fail=0`。
   ⑦ **P2-1 阶段 B：地形元数据与网格核心下沉 C++**：新增共享 `terrain/CesiumTerrain`，统一解析 `layer.json` 的 `tiles/maxzoom/available`，提供 Geographic/TMS 与 Web Mercator bbox 求交、available 判断及服务瓦片四至计算；Harmony NAPI 新增 `nativeCesiumTerrainCreate/Destroy/MaxZoom/TileTemplate/EngineToServiceTiles/TileBounds/IsAvailable` 薄桥接，HAR Provider 正常路径不再用 `JSON.parse` 解析元数据，并新增幂等 `dispose()` 释放 C++ 句柄。HAP 编译通过；真机日志确认 `CesiumTerrainCore: projection=EPSG:4326 scheme=tms maxzoom=15 availableLevels=16` 与 ArkTS `core=cpp`，太白山热缓存复测仍为 `DEM=182、engineTiles=49、fetchMs=64、skip=0、fail=0`。
+  ⑧ **P2-1 阶段 C：C++ 地形 Provider 与视口调度**：新增平台无关 `terrain/CesiumTerrainProvider`，由 native 直接读取 navigator 相机视口并按中心优先生成 7×7 引擎瓦片任务；内置 `layer.json` 元数据预取、磁盘缓存（`layer.json` 与 `<z>/<x>_<y>.terrain` 均临时文件 + rename）、固定并发、失败重试、视口代际取消、单轮/跨刷新 LRU 去重，以及 `GlobeEngine::setTerrainTile` 直接流式注入。Harmony NAPI/HAR 新增 `configureTerrainProvider/setTerrainProviderEnabled/refreshTerrainProvider/prefetchTerrainProviderMetadata/terrainProviderStatus`，宿主不再负责 DEM 网格换算、下载和逐块调度；`clearTerrain` 会同步失效 Provider 交付 LRU。真机太白山热缓存 `182/182` 磁盘命中、`network=0`、首块 `8ms`、总耗时 `101ms`；清数据冷缓存 `182` 个唯一 DEM、`182` 次网络、首块 `106ms`、总耗时 `3003ms`、去重 `84`、失败 `0`。
   > 维护约定：**每次改动定稿后同步更新本版本说明**（与代码提交同批），未发版工作累积在本条，发版时再改版本号与“当前发布”标记。
 - **0.1.4.0（当前发布）**：三项合入——
   ① **GeoPackage 工程读写**：新增 `bridge/geopackage_io.cpp`，OGR GPKG 驱动实现工程文件（七表：tracks / measures / photos / media_groups / survey_plots / project_meta / layer_refs）整体读写，Kotlin/ArkTS 侧以 JSON 跨桥传输；写入整文件 tmp+rename **原子替换**，五张要素表 **SetFID 落盘**使记录 id 持久化（重写不重编号），读侧缺列宽容回退、写侧整文件重建自动升级 schema；

@@ -133,6 +133,14 @@ interface GlobeCore {
   /// 清空全部地形缓存（换地形源 / 关闭地形时调用）
   nativeClearTerrain(handle: number): void;
 
+  // @Jin C++ CesiumTerrainProvider：平台仅配置数据源与读取诊断状态。
+  nativeConfigureTerrainProvider(handle: number, baseUrl: string, cacheDir: string,
+    maxZoom: number, concurrency: number, tileRadius: number, headersJson: string): boolean;
+  nativeSetTerrainProviderEnabled(handle: number, enabled: boolean): boolean;
+  nativeRefreshTerrainProvider(handle: number): void;
+  nativePrefetchTerrainProviderMetadata(handle: number): void;
+  nativeTerrainProviderStatus(handle: number): string;
+
   // ── GDAL / 图层元信息（bridge/gdal_info、layer_info）──
   nativeGetGdalVersion(): string;
   nativeGetVectorDrivers(): string;

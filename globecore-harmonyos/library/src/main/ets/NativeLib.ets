@@ -562,6 +562,43 @@ export class NativeLib {
     }
     gc.nativeClearTerrain(handle);
   }
+  /**
+   * @Jin 配置 C++ CesiumTerrainProvider：下载、磁盘缓存、去重、重试与视口调度全部在 native 完成。
+   * @Jin headers 只负责数据源策略透传，空对象时 native 使用通用默认请求行为。
+   */
+  static nativeConfigureTerrainProvider(handle: number, baseUrl: string, cacheDir: string,
+    maxZoom: number, concurrency: number, tileRadius: number,
+    headers: Record<string, string>): boolean {
+    if (handle === 0) {
+      return false;
+    }
+    return gc.nativeConfigureTerrainProvider(handle, baseUrl, cacheDir, maxZoom, concurrency,
+      tileRadius, JSON.stringify(headers));
+  }
+
+  /** @Jin 开/关 C++ 地形 Provider；关闭时 native 同时清空 DEM。 */
+  static nativeSetTerrainProviderEnabled(handle: number, enabled: boolean): boolean {
+    return handle !== 0 && gc.nativeSetTerrainProviderEnabled(handle, enabled);
+  }
+
+  /** @Jin 请求 C++ Provider 按当前相机视口刷新。 */
+  static nativeRefreshTerrainProvider(handle: number): void {
+    if (handle !== 0) {
+      gc.nativeRefreshTerrainProvider(handle);
+    }
+  }
+
+  /** @Jin 预取 layer.json 到 C++ 内存与磁盘缓存。 */
+  static nativePrefetchTerrainProviderMetadata(handle: number): void {
+    if (handle !== 0) {
+      gc.nativePrefetchTerrainProviderMetadata(handle);
+    }
+  }
+
+  /** @Jin 读取 Provider 诊断 JSON。 */
+  static nativeTerrainProviderStatus(handle: number): string {
+    return handle === 0 ? '{}' : gc.nativeTerrainProviderStatus(handle);
+  }
 
   // ── PROJ / GDAL 桥（bridge 导出的直通包装，门面见 NativeSrs/NativeLayerInfo/NativeVector）──
 
