@@ -180,7 +180,8 @@ private:
     // @Jin 构建「瓦片中心局部坐标」静态网格：顶点存 ecefVertex - tileCenterEcef（float），
     // @Jin 瓦片中心 ECEF 经 centerEcef 输出；占位棋盘色按 (x+y) 奇偶烘焙。几何只与 DEM 内容有关。
     void buildGlobeTileMeshLocal(const GlobeTile &tile, std::vector<float> &verts,
-                                 Vec3 &centerEcef, bool sampleTerrain = true) const;
+                                 Vec3 &centerEcef, bool sampleTerrain = true,
+                                 bool fullResolutionTerrain = true) const;
     // @Jin 取/建瓦片静态 VBO（按 tileKey 缓存，仅重建被新增/淘汰 DEM 覆盖的瓦片），含 LRU 上限。
     struct TileGlobeGpuMesh;
     TileGlobeGpuMesh &acquireTileGlobeMesh(const GlobeTile &tile);
@@ -536,7 +537,20 @@ private:
     uint64_t meshRebuilds_ = 0;
     uint64_t lastTerrainApplied_ = 0;
     uint64_t lastMeshRebuilds_ = 0;
+    // @Jin exp1f 细化诊断：区分叶子高清纹理、祖先粗图、深色占位和低分辨率地形后备网格。
+    uint64_t placeholderDraws_ = 0;
+    uint64_t ancestorTextureDraws_ = 0;
+    uint64_t leafTextureDraws_ = 0;
+    uint64_t terrainFallbackMeshes_ = 0;
+    uint64_t lastPlaceholderDraws_ = 0;
+    uint64_t lastAncestorTextureDraws_ = 0;
+    uint64_t lastLeafTextureDraws_ = 0;
+    uint64_t lastTerrainFallbackMeshes_ = 0;
     size_t terrainDeferred_ = 0;
+    // @Jin 最近一次非交互帧的 3D 瓦片 LOD；手势中用它做细化迟滞，避免为瞬态高级别叶瓦片制造黑块。
+    int lastIdleGlobeTileLevel_ = -1;
+    // @Jin 仅复用于相同 maxLevel 的图层，避免底图和 overlay 的 LOD 上限不同时互相污染迟滞状态。
+    int lastIdleGlobeTileMaxLevel_ = -1;
 
     int viewportWidth_ = 0;
     int viewportHeight_ = 0;

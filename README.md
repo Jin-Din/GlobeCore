@@ -30,7 +30,7 @@ SDK**。
 | 缓存 | 瓦片缓存双后端：`cacheDir` 以 `.mbtiles` 结尾走 SQLite **MBTiles 单文件**（WAL、标准 tiles/metadata 表、TMS y 翻转、扩展列 `added_at` 入库时间，老库自动 ALTER 补列），否则按 `<cacheDir>/<z>/<x>_<y>.tile` 目录落盘；2D/3D 纹理缓存同键复用；取瓦片走 native 后台线程池，就绪异步上屏 | 同上（`cacheDir`） |
 | 本地影像 | tif/img 等 GDAL 可打开格式，双通路：`addRasterLayer` native 重投影后按全球墨卡托即时切片并回写缓存复用（级别由栅格分辨率自动推算）；`addRasterImageLayer` 整幅直读单张贴图按 WGS84 四至贴面（UI 线程零 GDAL 立即返回，超 GL 纹理/内存帽沿 overviews 降采样，全幅 sidecar 磁盘缓存二次打开秒级就绪） | `addRasterLayer` / `addRasterImageLayer` |
 | 三维地形 | quantized-mesh v1.0 双通路：底层保留 `setTerrainTile/clearTerrain` 注入接口；共享 C++ `CesiumTerrainProvider` 已由 native 直接读取相机视口、中心优先生成 DEM 任务，并完成 `layer.json` 解析、EPSG:4326/TMS 与墨卡托 bbox 求交、磁盘缓存、并发下载、重试、去重和流式注入；Harmony NAPI/HAR 与 Android JNI/Kotlin 均暴露同名门面。宿主只注入 `baseUrl/cacheDir/maxZoom/concurrency/tileRadius/headers`，不绑定服务地址或 token；native 按真实 bbox 全局共享覆盖多块 DEM，索引按 high-watermark 解码，DEM 逐帧削峰、地形瓦片静态 VBO（LRU），仅 3D 球体生效；Android/Harmony/Qt 统一生命周期事件（元数据、开始、首块、进度、完成、错误、开关）由平台桥接转投宿主线程 | `configureTerrainProvider` / `setTerrainProviderEnabled` / `refreshTerrainProvider` / `terrainProviderStatus` / `setOnTerrainProviderEventListener` / Qt `terrainProviderEvent` |
-| 瓦片调度 | 后台线程池取瓦片（先盘后网、原子写盘、失败冷却退避），GL 线程仅异步上传并按帧限额；P0-2 exp1e 后视口代际（view-generation）只推进代际、不再立即清空队列/ready，同 key 排队或在途任务可原地升级，已解码待上传瓦片用 ready key 去重；所有瓦片层共享每帧 4 张 / 1MiB 上传预算，当前视口优先、最近旧视口随后补齐；在线图源先投 z-2/z-1 祖先粗瓦，再以屏幕中心优先替换叶子，3D 叶瓦片请求限制为交互 96 块、空闲 192 块，显著压低无效请求量与“逐格蹦出”感；3D 地理四叉树帧间缓存同时校验眼点、离地高度尺度与相机 forward/up，倾斜、旋转、缩放后立即重建可见叶集，避免复用旧视锥造成周边黑区 | `addTileLayer` |
+| 瓦片调度 | 后台线程池取瓦片（先盘后网、原子写盘、失败冷却退避），GL 线程仅异步上传并按帧限额；P0-2 exp1f 后视口代际（view-generation）只推进代际、不再立即清空队列/ready，同 key 排队或在途任务可原地升级，已解码待上传瓦片用 ready key 去重；所有瓦片层共享每帧 4 张 / 1MiB 上传预算，当前视口优先、最近旧视口随后补齐；在线图源先投 z-2/z-1 祖先粗瓦，再以屏幕中心优先替换叶子，3D 叶瓦片请求限制为交互 96 块、空闲 192 块；交互期增加 LOD 迟滞，优先保持祖先粗图连续覆盖，显著压低无效请求量与“先黑块再出图”的逐格蹦出感；3D 地理四叉树帧间缓存同时校验眼点、离地高度尺度与相机 forward/up，倾斜、旋转、缩放后立即重建可见叶集，避免复用旧视锥造成周边黑区 | `addTileLayer` |
 | 矢量 | shp/kml/kmz/dwg/dxf 等 OGR 可打开格式**直读文件**→ 重投影 WGS84 → earcut 三角剖分；面填充/描边/线/点/图标 billboard/文字标注（字形图集，可复用系统 CJK 字体，零 APK 增量） | `addVectorLayer` / `VectorStyle` / `setFontPath` |
 | 大数据矢量 | 按屏幕范围增量重载（Swap-on-ready，重载期无空窗）、单次要素预算、加载中状态轮询、按级别隐藏、样式变更就地换层不闪图 | `updateVectorExtent` / `hasVectorLoading` / `setVectorMinLevel` / `setVectorLayerVisible` / `removeVectorLayer` |
 | 拾取与属性 | 单击命中 `[layerIndex, fid]`；回取要素 WGS84 几何用于选中高亮；屏幕点→经纬度（采集/测量加点）；范围过滤 + 字段白名单 + 几何简化读取、按 FID 全字段回取、属性 SQL 查询、要素计数、按 FID 写回源文件 | `pickVector` / `featureGeometry` / `screenToGeo` / `NativeVector` |
@@ -524,6 +524,23 @@ console.info(view.terrainProviderStatus());
 - 加载后连续拖动/斜视角浏览：交互秒上传峰值 3 张 / 786432B，`frameMaxMs=23.58`，未见失败，首波后多数统计秒 `newConn=0`。
 - 锁顺序修正后的安装冒烟：构建 ID 正确，热缓存 `processed=126 cache=126 network=0 ready=0`，无 native 崩溃；启动首秒 `frameMaxMs=56.47` 仍来自着色器、首批纹理和球面 VBO 初始化，保留为后续启动优化项。
 
+### 实验性交互 LOD 迟滞与低分辨率地形后备（P0-2 exp1f）
+
+> 实验状态：本轮对应构建 ID `v0.1.3-20261026-loadsmooth-exp1f`，目标是修复 3D 倾斜视角缩放时“先黑色块、再替换影像”的观感。初验在 Harmony 真机 `5KLBB25911200313` 通过；仍保留为实验策略，若人工主观反馈认为模糊时间过长，可整体回退本提交。
+
+- 3D 影像 LOD 迟滞：非交互帧记录最近稳定 `targetLevel`；180ms 交互窗口内，四叉树层级使用 `min(targetLevel, lastIdleLevel)`。放大时不追逐瞬态高清叶，缩小时允许切到更粗父级，使画面优先由已上传祖先粗瓦连续覆盖，抬手后再细化高清叶。
+- 状态边界：迟滞状态只复用于相同 `maxLevel` 的图层；surface 重建、清空瓦片纹理、图源切换丢弃纹理和 release 时均复位，避免新上下文或新图源沿用旧 LOD。
+- 地形后备网格：网格预算不足时不再生成 `sampleTerrain=false` 的 8×8 零高程平面，而是仍采样已到达 DEM，只把细分降为 8×8；后续帧再升级为 24×24 完整地形网格，减少低分辨率后备与相邻真实山体之间的高度裂缝。
+- 诊断计数：`TILEPIPE` 新增 `placeholder/ancestor/leaf/fallbackMesh`。其中 `ancestor` 与 `leaf` 是每秒 draw call 次数，不是瓦片块数；`placeholder` 表示没有自身纹理且没有祖先纹理的深色占位绘制，`fallbackMesh` 表示新增 8×8 地形后备网格。
+
+真机验证（Demo 图源 ArcGIS，太白山 tilt=55°）：
+
+- 热缓存 + 地形开 + 双指放大 5.2s：各统计秒 `placeholder=0`，交互帧峰值约 19.98~25.85ms，抬手后高清补齐出现一帧 `frameMaxMs=73.77ms`；`fallbackMesh` 在主要交互秒为 262/100/24/15，随后归零。
+- 热缓存 + 地形开 + 双指缩小 5.2s：各统计秒 `placeholder=0`，交互帧峰值约 15.27~22.14ms，`fallbackMesh` 最高 123/s；连续截图未见黑色空窗。
+- 地形关闭、仅影像双指放大：各统计秒 `placeholder=0`，证明黑块消除来自影像祖先覆盖/LOD 策略，而不是地形层遮挡；抬手后有一帧 `frameMaxMs=89.52ms` 的高清补齐尖峰。
+- 清应用数据冷启动：低级别祖先瓦尚未到达的全球首秒仍有 `placeholder=4180/44`，定位太白山后祖先瓦已建立，冷加载地形与随后缩放期间 `placeholder=0`；冷 DEM `182/182` 全部网络获取、`failures=0`、`firstTileMs=31ms`、`elapsedMs=899ms`。
+- 结论：缩放/浏览中的黑色块路径已被压住；冷启动全球第一秒的根瓦空窗仍存在，彻底消除需进一步预取或内置 z0~z2 低级别瓦，或做底色/雾化过渡。
+
 ### 演示工程 globecore-harmonyos
 
 DevEco Studio（5.0+，API 12 SDK）打开 `globecore-harmonyos/`，`ohpm install` 后直接 run `entry`：
@@ -578,6 +595,7 @@ cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build b
   ⑨ **P2-1 阶段 D1：Android 地形 Provider 门面对齐**：Android `NativeLib/NativeMapView` 新增与 Harmony 同名的 `configureTerrainProvider/setTerrainProviderEnabled/refreshTerrainProvider/prefetchTerrainProviderMetadata/terrainProviderStatus`；JNI 将 Kotlin `Map` 请求头按 `[name0,value0,...]` 展平后还原为 native 键值对，所有视口调度、下载、缓存、重试和注入仍复用共享 C++ Provider。`:globecore:compileDebugKotlin` 与 JNI 单目标 C++ 编译通过；完整 AAR 本机因仓库未放置第三方 `jniLibs/*.a` 前置库暂无法链接。
   ⑩ **P2-1 阶段 D2/D3：统一地形事件与 Qt Provider 门面**：C++ `CesiumTerrainProvider` 新增单行 JSON 事件（`metadata_started/metadata_ready/refresh_started/first_tile/progress/refresh_completed/error/enabled/disabled`），每条携带完整诊断快照，进度事件每轮最多约 10 次；Android JNI 按需附加 JVM 并调用 `NativeMapView.onTerrainProviderEvent` 后 `post` 到主线程，Harmony NAPI 使用容量 32 的 TSFN 非阻塞投递，Qt `MapWidget` 新增同名配置/开关/刷新/状态门面与 `terrainProviderEvent(QString)` signal，并用 `Qt::QueuedConnection` 转投 GUI 线程。Demo 已移除 900/3200/6000ms 轮询，改为事件驱动状态栏。Harmony HAP 编译与真机验证通过：热缓存事件链完整，`delivered=2/2`、`diskHits=2`、`networkRequests=0`、`firstTileMs=2`、`elapsedMs=7`、`failures=0`；关闭地形收到 `disabled`。Android Kotlin 与 JNI/C++ 三个目标编译通过；Qt 桌面端源码已补齐，但本机缺少 GDAL/Qt 桌面依赖，CMake 配置未完成。
   ⑪ **P0-2 exp1e：瓦片/地形加载期交互平滑实验（实验性）**：新增 180ms 交互窗口；所有瓦片层共享 4 张/1MiB 单帧上传预算；TileLoader 不再随相邻视口立即清空队列和 ready，pending/inflight 同 key 可升级代际，新增 ready key 去重；2D 中心优先、3D 交互/空闲分别只请求 96/192 块叶瓦片并保持祖先粗瓦先覆盖；quantized-mesh 解码移到 Provider worker，GL 线程按 2/4 块应用 DEM，地形网格改按局部 DEM signature + revision 精确失效并按 2/4 个预算重建；新增 TILEPIPE 与 HTTP 连接复用诊断。真机冷地形 182/182、失败 0、首块 58ms、总耗时 834ms，DEM 到达秒 frameMaxMs=14.59ms，连续拖动 frameMaxMs=23.58ms。本轮为实验提交，效果不佳可整笔 revert，详见“实验性瓦片/地形加载平滑调度”。
+  ⑫ **P0-2 exp1f：交互 LOD 迟滞与低分辨率地形后备（实验性）**：3D 手势中使用最近非交互帧的稳定瓦片 LOD 做细化迟滞，放大时不追逐瞬态高清叶、缩小时允许父级粗图覆盖，避免自身高清纹理与祖先纹理短暂同时不可用时绘制深色占位；迟滞状态按图层 `maxLevel` 隔离，并在 surface 重建、纹理清空、图源切换和 release 时复位。地形网格预算不足时仍采样已有 DEM，只从 24×24 降为 8×8，不再生成零高程平面；新增 `placeholder/ancestor/leaf/fallbackMesh` 诊断。真机太白山地形开启双指放大/缩小及关闭地形仅影像三组缩放均记录 `placeholder=0`；冷启动全球首秒在根瓦到达前仍有占位，后续需通过低级别瓦预取/内置或底色过渡单独优化。详见“实验性交互 LOD 迟滞与低分辨率地形后备”。
   > 维护约定：**每次改动定稿后同步更新本版本说明**（与代码提交同批），未发版工作累积在本条，发版时再改版本号与“当前发布”标记。
 - **0.1.4.0（当前发布）**：三项合入——
   ① **GeoPackage 工程读写**：新增 `bridge/geopackage_io.cpp`，OGR GPKG 驱动实现工程文件（七表：tracks / measures / photos / media_groups / survey_plots / project_meta / layer_refs）整体读写，Kotlin/ArkTS 侧以 JSON 跨桥传输；写入整文件 tmp+rename **原子替换**，五张要素表 **SetFID 落盘**使记录 id 持久化（重写不重编号），读侧缺列宽容回退、写侧整文件重建自动升级 schema；

@@ -26,7 +26,7 @@ namespace globecore {
 // 每次准备重建 HAR 前，把 GLOBECORE_BUILD_ID 改成一个全新的唯一串（例如末尾序号 +1，或带上你自定义的标记）。
 // 装机日志出现该串 = 跑的确实是你这次改过、并重新构建 + 重新链接的 HAR；
 // 未出现 / 仍是旧串 = app 还在用旧 HAR（引擎源码根本没进设备）。改完务必：重建 HAR → app Sync/ohpm 重新链接 → 卸载重装。
-#define GLOBECORE_BUILD_ID "v0.1.3-20261026-loadsmooth-exp1e"
+#define GLOBECORE_BUILD_ID "v0.1.3-20261026-loadsmooth-exp1f"
 
 // 祖先链请求深度帽：叶子只向上请求 4 级。更深的祖先拉伸 >16× 已无兜底价值，而链条请求数是
 // 数量倍增器；尤其无金字塔栅格源，低级别粗瓦源窗口≈整幅（单块秒级～十几秒），砍深度直接减掉
@@ -1047,6 +1047,9 @@ void Renderer::onSurfaceCreated() {
     // 解码上传（瓦片磁盘缓存仍在，重载很快）；VBO 句柄清零后由下方守卫重新 glGenBuffers 并上传数据。
     // 此处绝不能对旧句柄调 glDelete*——旧上下文已销毁，删除失效名无意义，且可能误删新上下文中的同名对象。
     layerTextures_.clear();
+    // @Jin exp1f 的交互 LOD 迟滞只在有效纹理上下文成立；surface 重建后必须重新学习稳定层级。
+    lastIdleGlobeTileLevel_ = -1;
+    lastIdleGlobeTileMaxLevel_ = -1;
     vboDynamic_ = 0;
     vboUnitQuad_ = 0;
     // 字形图集 GL 纹理属旧上下文：放弃旧句柄（不 glDelete），保留 CPU 图集与字形表；
@@ -1357,6 +1360,9 @@ void Renderer::clearTileTextures() {
         for (auto &kv : texMap) kv.second.tex.release();
     }
     layerTextures_.clear();
+    // @Jin 清空全部瓦片纹理后旧 LOD 不再有对应父瓦兜底，下帧从当前视口重新记录稳定层级。
+    lastIdleGlobeTileLevel_ = -1;
+    lastIdleGlobeTileMaxLevel_ = -1;
 }
 
 void Renderer::discardRemovedLayerTextures() {
@@ -1370,6 +1376,9 @@ void Renderer::discardRemovedLayerTextures() {
         TexMap &texMap = layerTextures_[li];
         for (auto &kv : texMap) kv.second.tex.release();
         texMap.clear();
+        // @Jin 图源切换会丢弃该层全部纹理，同步清空 exp1f LOD 记忆，避免新源沿用旧源手势层级。
+        lastIdleGlobeTileLevel_ = -1;
+        lastIdleGlobeTileMaxLevel_ = -1;
         LOGI("Renderer discardRemovedLayerTextures layer=%d", static_cast<int>(li));
     }
 }
@@ -1520,19 +1529,26 @@ void Renderer::logTilePipelineStats() {
     const uint64_t dHttp2 = net.http2Responses - lastHttp2Responses_;
     const uint64_t dTerrainApplied = terrainApplied_ - lastTerrainApplied_;
     const uint64_t dMeshRebuilds = meshRebuilds_ - lastMeshRebuilds_;
+    const uint64_t dPlaceholder = placeholderDraws_ - lastPlaceholderDraws_;
+    const uint64_t dAncestor = ancestorTextureDraws_ - lastAncestorTextureDraws_;
+    const uint64_t dLeaf = leafTextureDraws_ - lastLeafTextureDraws_;
+    const uint64_t dFallbackMesh = terrainFallbackMeshes_ - lastTerrainFallbackMeshes_;
     const bool active = maxFrameTextureUploads_ > 0 || dProcessed > 0 || dHttpReq > 0 ||
                         pending > 0 || inflight > 0 || ready > 0 || terrainDeferred_ > 0 ||
-                        dTerrainApplied > 0 || dMeshRebuilds > 0 || maxFrameDrawMs_ >= 24.0;
+                        dTerrainApplied > 0 || dMeshRebuilds > 0 || dPlaceholder > 0 ||
+                        dAncestor > 0 || dLeaf > 0 || dFallbackMesh > 0 || maxFrameDrawMs_ >= 24.0;
     if (active) {
         // @Jin 字段覆盖纹理上传、任务状态、网络复用、地形应用和网格重建，真机 hilog 可直接横向对比版本。
-        LOGI("TILEPIPE interact=%d uploads=%d uploadBytes=%zu frameMaxMs=%.2f processed=%llu cache=%llu network=%llu fail=%llu pending=%zu inflight=%zu ready=%zu httpReq=%llu reused=%llu newConn=%llu http2=%llu terrainApplied=%llu terrainDeferred=%zu meshRebuilds=%llu",
+        LOGI("TILEPIPE interact=%d uploads=%d uploadBytes=%zu frameMaxMs=%.2f processed=%llu cache=%llu network=%llu fail=%llu pending=%zu inflight=%zu ready=%zu httpReq=%llu reused=%llu newConn=%llu http2=%llu terrainApplied=%llu terrainDeferred=%zu meshRebuilds=%llu placeholder=%llu ancestor=%llu leaf=%llu fallbackMesh=%llu",
              nav_.isInteracting() ? 1 : 0, maxFrameTextureUploads_, maxFrameTextureUploadBytes_, maxFrameDrawMs_,
              static_cast<unsigned long long>(dProcessed), static_cast<unsigned long long>(dCache),
              static_cast<unsigned long long>(dNetwork), static_cast<unsigned long long>(dFailures),
              pending, inflight, ready, static_cast<unsigned long long>(dHttpReq),
              static_cast<unsigned long long>(dReused), static_cast<unsigned long long>(dNewConn),
              static_cast<unsigned long long>(dHttp2), static_cast<unsigned long long>(dTerrainApplied),
-             terrainDeferred_, static_cast<unsigned long long>(dMeshRebuilds));
+             terrainDeferred_, static_cast<unsigned long long>(dMeshRebuilds),
+             static_cast<unsigned long long>(dPlaceholder), static_cast<unsigned long long>(dAncestor),
+             static_cast<unsigned long long>(dLeaf), static_cast<unsigned long long>(dFallbackMesh));
     }
     lastPipeProcessed_ = processed;
     lastPipeCacheHits_ = cacheHits;
@@ -1544,6 +1560,10 @@ void Renderer::logTilePipelineStats() {
     lastHttp2Responses_ = net.http2Responses;
     lastTerrainApplied_ = terrainApplied_;
     lastMeshRebuilds_ = meshRebuilds_;
+    lastPlaceholderDraws_ = placeholderDraws_;
+    lastAncestorTextureDraws_ = ancestorTextureDraws_;
+    lastLeafTextureDraws_ = leafTextureDraws_;
+    lastTerrainFallbackMeshes_ = terrainFallbackMeshes_;
     lastTileStatsLog_ = now;
     maxFrameDrawMs_ = 0.0;
     maxFrameTextureUploads_ = 0;
@@ -1820,6 +1840,15 @@ bool Renderer::renderGlobeLayer3D(size_t layerIndex, const Navigator::Camera3D &
     // 可见叶瓦片：目标级别与 2D LOD 同源（tileLevel(maxLevel) 保切换时地物粗细连续），
     // 更远处（地平线/背面）由 Tessellator 按屏幕空间误差自动取粗级；墨卡托 (z,x,y) 键与 2D 互通。
     const int targetLevel = nav_.tileLevel(layer.maxLevel);
+    const bool interacting = kExperimentalAdaptiveUploadBudget && nav_.isInteracting();
+    // @Jin exp1f：交互期锁定在抬手前的稳定 LOD，不随手指追新高清叶；缩小时允许降到更粗父级，抬手后再细化。
+    int quadtreeLevel = targetLevel;
+    if (!interacting) {
+        lastIdleGlobeTileLevel_ = targetLevel;
+        lastIdleGlobeTileMaxLevel_ = layer.maxLevel;
+    } else if (lastIdleGlobeTileLevel_ >= 0 && lastIdleGlobeTileMaxLevel_ == layer.maxLevel) {
+        quadtreeLevel = std::min(targetLevel, lastIdleGlobeTileLevel_);
+    }
     const double tanHalf = std::tan(nav_.fieldOfViewDeg() * 0.5 * 3.14159265358979323846 / 180.0);
     TessCamera tc;
     tc.eye = cam.eye;
@@ -1830,11 +1859,11 @@ bool Renderer::renderGlobeLayer3D(size_t layerIndex, const Navigator::Camera3D &
     tc.frustumPlanes = cam.frustumPlanes; // 直接采用 Navigator 预提的 double 平面
     // #11 用带帧间一致性的地理四叉树替代 Tessellator 全量重建：
     // 相机微动时复用上帧叶集（零递归），极冠外推覆盖 85°~90° 空洞。
-    geoQuadtree_.buildVisibleTiles(tc, targetLevel, layer.maxLevel, tanHalf, viewportHeight_,
+    geoQuadtree_.buildVisibleTiles(tc, quadtreeLevel, layer.maxLevel, tanHalf, viewportHeight_,
                                    nav_.lodDetailFactor(), Wgs84Globe::instance(), globeTilesScratch_);
 
     // @Jin 3D 可见叶可远超纹理容量；交互期只请求 96 块、空闲期 192 块，避免远景请求风暴触发限流。
-    const size_t kGlobeLeafRequestBudget = nav_.isInteracting() ? 96U : 192U;
+    const size_t kGlobeLeafRequestBudget = interacting ? 96U : 192U;
     double focusLon = 0.0, focusLat = 0.0, focusAlt = 0.0;
     Wgs84Globe::instance().cartesianToGeographic(cam.center, focusLon, focusLat, focusAlt);
     std::stable_sort(globeTilesScratch_.begin(), globeTilesScratch_.end(),
@@ -1903,6 +1932,7 @@ bool Renderer::renderGlobeLayer3D(size_t layerIndex, const Navigator::Camera3D &
             if (it != texMap.end() && it->second.tex.isValid()) continue;
             int ancLevelA = -1;
             if (findAncestorEntry(texMap, t.z, t.x, t.y, ancLevelA) != nullptr) continue;
+            ++placeholderDraws_; // @Jin 统计没有自身纹理、也没有祖先纹理的深色占位，用于确认黑块是否仍存在。
             const TileGlobeGpuMesh &gm = acquireTileGlobeMesh(t);
             glBindBuffer(GL_ARRAY_BUFFER, gm.vbo);
             glVertexAttribPointer(gc3APos_, 3, GL_FLOAT, GL_FALSE, strideC,
@@ -1941,10 +1971,12 @@ bool Renderer::renderGlobeLayer3D(size_t layerIndex, const Navigator::Camera3D &
         auto it = texMap.find(tileKey(t.z, t.x, t.y));
         if (it != texMap.end() && it->second.tex.isValid()) {
             use = &it->second;
+            ++leafTextureDraws_; // @Jin 统计叶子高清纹理绘制数，和祖先/占位计数一起判断 refinement 效果。
         } else {
             int ancLevel = -1;
             TileTexEntry *anc = findAncestorEntry(texMap, t.z, t.x, t.y, ancLevel);
             if (anc == nullptr) continue; // 无图无祖先 → Pass A 已占位 / overlay 保持透明
+            ++ancestorTextureDraws_; // @Jin 统计父级粗图拉伸覆盖数；手势中应主要增长该项而不是 placeholder。
             anc->lastUsed = frameTick_;
             const int subInt = 1 << (t.z - ancLevel);
             const float sub = static_cast<float>(subInt);
@@ -2189,7 +2221,8 @@ uint64_t Renderer::terrainSignatureForTile(const GlobeTile &tile) const {
 }
 
 void Renderer::buildGlobeTileMeshLocal(const GlobeTile &tile, std::vector<float> &verts,
-                                        Vec3 &centerEcef, bool sampleTerrain) const {
+                                        Vec3 &centerEcef, bool sampleTerrain,
+                                        bool fullResolutionTerrain) const {
     // 包围盒外约 0.75% 外扩：盖住不同级别邻瓦片的 T 形缝隙（深度测试裁决前后，轻微 z-fighting
     // 可接受，同 2D Pass B texelPad 思路）；极地附近经度收敛，外扩仅按跨径比例不改变形状
     const double padLon = (tile.lonMax - tile.lonMin) * 0.0075;
@@ -2207,7 +2240,7 @@ void Renderer::buildGlobeTileMeshLocal(const GlobeTile &tile, std::vector<float>
     // 量级仅几~几十 km，float 精度充足；centerEcef 随 VBO 缓存，绘制时由 uRtcOffset=center-eye 还原。
     globe.geographicToCartesian((tile.lonMin + tile.lonMax) * 0.5,
                                 (tile.latMin + tile.latMax) * 0.5, 0.0, centerEcef);
-    // @Jin 采样关闭时走 8x8 低保真后备网格，保证新瓦片首帧可显示；预算恢复后再用 24x24 地形网格替换。
+    // @Jin 采样地形时收集相交 DEM；预算不足也允许走 8x8 低保真网格，保证新瓦片首帧可显示且不平贴。
     std::vector<const QuantizedMeshData *> terrainDems;
     if (sampleTerrain) {
         // @Jin 渲染叶可能是 z10-z12，而 DEM 注入层较粗；按地理包围盒相交收集，不要求 (z,x,y) 完全相同。
@@ -2218,9 +2251,11 @@ void Renderer::buildGlobeTileMeshLocal(const GlobeTile &tile, std::vector<float>
             if (overlap) terrainDems.push_back(&dem);
         }
     }
-    // @Jin 无地形或低预算后备用 8x8；完整地形覆盖用 24x24，提升山脊和沟谷贴合度。
+    // @Jin 无地形时用 8x8；预算受限时也采样 DEM 但只建 8x8 低分辨率地形，避免零高程后备网格与邻接山体开裂。
     constexpr int kTerrainGridDiv = 24;
-    const int G = (sampleTerrain && !terrainDems.empty()) ? kTerrainGridDiv : kGlobeGridDiv;
+    const int G = (sampleTerrain && !terrainDems.empty())
+                      ? (fullResolutionTerrain ? kTerrainGridDiv : kGlobeGridDiv)
+                      : kGlobeGridDiv;
     // @Jin 几何链路已由真机日志和画面确认生效，先恢复 1.0 真实高程；后续再产品化为 setTerrainExaggeration()。
     constexpr double kTerrainExaggeration = 1.0;
     // @Jin 诊断插桩只统计真实采样网格，后备网格不参与 DEM 命中率口径。
@@ -2329,9 +2364,9 @@ Renderer::TileGlobeGpuMesh &Renderer::acquireTileGlobeMesh(const GlobeTile &tile
     TileGlobeGpuMesh &m = tileGlobeMesh_[key];
     std::vector<float> localVerts;
     Vec3 center{0.0, 0.0, 0.0};
-    // @Jin 没有预算的新瓦片先建 8x8 后备球面；后续帧再按 terrainCurrent=false 标记补完整地形网格。
-    const bool sampleTerrain = canBuildTerrainMesh;
-    buildGlobeTileMeshLocal(tile, localVerts, center, sampleTerrain);
+    // @Jin 没有预算的新瓦片也先采样已有 DEM，只降低到 8x8；后续帧再按 terrainCurrent=false 升级 24x24。
+    const bool buildFullTerrainMesh = canBuildTerrainMesh;
+    buildGlobeTileMeshLocal(tile, localVerts, center, true, buildFullTerrainMesh);
     if (localVerts.empty() || localVerts.size() % kGlobeFloatsPerVertex != 0) {
         m.terrainCurrent = false;
         m.lastUsed = frameTick_;
@@ -2345,12 +2380,13 @@ Renderer::TileGlobeGpuMesh &Renderer::acquireTileGlobeMesh(const GlobeTile &tile
                  localVerts.data(), GL_STATIC_DRAW);
     m.vertexCount = static_cast<int>(localVerts.size() / kGlobeFloatsPerVertex);
     m.centerEcef = center;
-    m.terrainSignature = sampleTerrain ? currentSignature : kEmptyTerrainSignature;
+    m.terrainSignature = currentSignature;
     m.terrainSignatureRevision = terrainCacheRevision_;
-    m.terrainCurrent = sampleTerrain || currentSignature == kEmptyTerrainSignature;
+    m.terrainCurrent = buildFullTerrainMesh || currentSignature == kEmptyTerrainSignature;
     m.lastUsed = frameTick_;
     ++meshRebuilds_;
-    if (sampleTerrain) --globeMeshRebuildBudget_;
+    if (!buildFullTerrainMesh && currentSignature != kEmptyTerrainSignature) ++terrainFallbackMeshes_;
+    if (buildFullTerrainMesh) --globeMeshRebuildBudget_;
     if (!m.terrainCurrent) globeMeshRebuildDeferred_ = true;
 
     if (tileGlobeMesh_.size() > kMaxTileGlobeMesh) {
@@ -4300,6 +4336,9 @@ void Renderer::release() {
     releaseRasterImageGl();
     clearTerrain();
     geoQuadtree_.clear(); // #11 清除四叉树帧间缓存
+    // @Jin 释放渲染器时同时清掉 exp1f 的临时 LOD 状态，重新创建上下文后从首帧开始学习。
+    lastIdleGlobeTileLevel_ = -1;
+    lastIdleGlobeTileMaxLevel_ = -1;
     if (vboDynamic_ != 0) {
         glDeleteBuffers(1, &vboDynamic_);
         vboDynamic_ = 0;
