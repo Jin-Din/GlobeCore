@@ -30,7 +30,7 @@ SDK**。
 | 缓存 | 瓦片缓存双后端：`cacheDir` 以 `.mbtiles` 结尾走 SQLite **MBTiles 单文件**（WAL、标准 tiles/metadata 表、TMS y 翻转、扩展列 `added_at` 入库时间，老库自动 ALTER 补列），否则按 `<cacheDir>/<z>/<x>_<y>.tile` 目录落盘；2D/3D 纹理缓存同键复用；取瓦片走 native 后台线程池，就绪异步上屏 | 同上（`cacheDir`） |
 | 本地影像 | tif/img 等 GDAL 可打开格式，双通路：`addRasterLayer` native 重投影后按全球墨卡托即时切片并回写缓存复用（级别由栅格分辨率自动推算）；`addRasterImageLayer` 整幅直读单张贴图按 WGS84 四至贴面（UI 线程零 GDAL 立即返回，超 GL 纹理/内存帽沿 overviews 降采样，全幅 sidecar 磁盘缓存二次打开秒级就绪） | `addRasterLayer` / `addRasterImageLayer` |
 | 三维地形 | quantized-mesh v1.0 双通路：底层保留 `setTerrainTile/clearTerrain` 注入接口；共享 C++ `CesiumTerrainProvider` 已由 native 直接读取相机视口、中心优先生成 DEM 任务，并完成 `layer.json` 解析、EPSG:4326/TMS 与墨卡托 bbox 求交、磁盘缓存、并发下载、重试、去重和流式注入；Harmony NAPI/HAR 与 Android JNI/Kotlin 均暴露同名门面。宿主只注入 `baseUrl/cacheDir/maxZoom/concurrency/tileRadius/headers`，不绑定服务地址或 token；native 按真实 bbox 全局共享覆盖多块 DEM，索引按 high-watermark 解码，DEM 逐帧削峰、地形瓦片静态 VBO（LRU），仅 3D 球体生效；Android/Harmony/Qt 统一生命周期事件（元数据、开始、首块、进度、完成、错误、开关）由平台桥接转投宿主线程 | `configureTerrainProvider` / `setTerrainProviderEnabled` / `refreshTerrainProvider` / `terrainProviderStatus` / `setOnTerrainProviderEventListener` / Qt `terrainProviderEvent` |
-| 瓦片调度 | 后台线程池取瓦片（先盘后网、原子写盘、失败冷却退避），GL 线程仅异步上传并按帧限额；视口代际（view-generation）在初始化/连续手势时丢弃过期排队与就绪结果、在途同 key 可被新视口复用；在线图源首屏按 z-2/z-1 祖先粗瓦优先投递与出队，先完整低清覆盖再由叶子替换变清，显著压低无效请求量与“逐格蹦出”感；3D 地理四叉树帧间缓存同时校验眼点、离地高度尺度与相机 forward/up，倾斜、旋转、缩放后立即重建可见叶集，避免复用旧视锥造成周边黑区 | `addTileLayer` |
+| 瓦片调度 | 后台线程池取瓦片（先盘后网、原子写盘、失败冷却退避），GL 线程仅异步上传并按帧限额；P0-2 exp1e 后视口代际（view-generation）只推进代际、不再立即清空队列/ready，同 key 排队或在途任务可原地升级，已解码待上传瓦片用 ready key 去重；所有瓦片层共享每帧 4 张 / 1MiB 上传预算，当前视口优先、最近旧视口随后补齐；在线图源先投 z-2/z-1 祖先粗瓦，再以屏幕中心优先替换叶子，3D 叶瓦片请求限制为交互 96 块、空闲 192 块，显著压低无效请求量与“逐格蹦出”感；3D 地理四叉树帧间缓存同时校验眼点、离地高度尺度与相机 forward/up，倾斜、旋转、缩放后立即重建可见叶集，避免复用旧视锥造成周边黑区 | `addTileLayer` |
 | 矢量 | shp/kml/kmz/dwg/dxf 等 OGR 可打开格式**直读文件**→ 重投影 WGS84 → earcut 三角剖分；面填充/描边/线/点/图标 billboard/文字标注（字形图集，可复用系统 CJK 字体，零 APK 增量） | `addVectorLayer` / `VectorStyle` / `setFontPath` |
 | 大数据矢量 | 按屏幕范围增量重载（Swap-on-ready，重载期无空窗）、单次要素预算、加载中状态轮询、按级别隐藏、样式变更就地换层不闪图 | `updateVectorExtent` / `hasVectorLoading` / `setVectorMinLevel` / `setVectorLayerVisible` / `removeVectorLayer` |
 | 拾取与属性 | 单击命中 `[layerIndex, fid]`；回取要素 WGS84 几何用于选中高亮；屏幕点→经纬度（采集/测量加点）；范围过滤 + 字段白名单 + 几何简化读取、按 FID 全字段回取、属性 SQL 查询、要素计数、按 FID 写回源文件 | `pickVector` / `featureGeometry` / `screenToGeo` / `NativeVector` |
@@ -505,6 +505,25 @@ console.info(view.terrainProviderStatus());
 其余 API（矢量/栅格/叠加层/拾取/定位标记/手势）与 Kotlin 侧逐一对应，参「API 概览与快速上手」；
 生命周期无需手动 onPause/onResume：native EGL 线程随 XComponent 加载/卸载自动 attach/detach。
 
+### 实验性瓦片/地形加载平滑调度（P0-2 exp1e）
+
+> 实验状态：本轮对应构建 ID `v0.1.3-20261026-loadsmooth-exp1e`，用于验证“影像/DEM 瓦片加载期间操作地图卡顿”的削峰方案。若真机主观体验不佳，应整体 `git revert` 本轮 experiment 提交；仅把 `kExperimentalAdaptiveUploadBudget` 改为 `false` 只能关闭交互/空闲预算切换，不能回退 ready 去重、DEM 后台解码和地形局部签名等全部改动。
+
+- 交互检测：`Navigator::isInteracting()` 在 pan/zoom/rotate/tilt 后保留 180ms 交互窗口，Renderer 据此区分手势中与抬手后的空闲补齐。
+- 影像请求队列：`TileLoader::beginView()` 只推进视口代际，不再立即清空排队项和已解码结果；同 z/x/y 的 pending/inflight 任务会原地升级到新视口，减少连续手势中的重复读盘、下载和解码。
+- Ready 去重与预算：新增 `readyKeys_`，已解码但尚未上传的瓦片不会在下一帧重复处理；`drainReady(maxCount,maxBytes)` 先交付当前视口，再用剩余预算接收最近旧视口结果。底图和注记层共享单帧 **4 张 / 1MiB RGBA** 上传预算。
+- 3D 请求收敛：可见叶先按 z 降序、同级按视口中心距离排序；交互期只请求 96 块叶瓦片，空闲期 192 块。祖先粗瓦仍先入队，用于先形成完整低清覆盖，再细化中心高清叶。
+- DEM 后台解码：quantized-mesh 解码和高度栅格化从 GL 线程移到 `setTerrainTile()` 调用线程（Provider worker）。GL 线程每帧只应用已解码 DEM，预算为交互期 2 块、空闲期 4 块；`terrainPendingKeys_` 防止同一服务 DEM 被重复解码，`terrainGeneration_` 丢弃 `clearTerrain()` 前后的迟到结果。
+- 地形 VBO 局部失效：每个渲染瓦片按相交 DEM key 计算 `terrainSignature`，并以 `terrainCacheRevision_` 跳过稳态扫描；只有覆盖 DEM 集合变化的瓦片重建。单帧网格重建预算为交互 2 个、空闲 4 个；预算不足的新瓦片先建低分辨率球面后备网格，后续帧升级 24×24 地形网格，避免首批 DEM 触发全场景 VBO 重传。
+- 网络与诊断：HttpClient 增加请求、连接复用/新建、HTTP/1.1/HTTP2 计数，并启用 TCP keep-alive 与 300s DNS 缓存；Renderer 每秒输出 `TILEPIPE`，字段包括交互状态、上传峰值、帧峰值、cache/network、pending/inflight/ready、HTTP 连接复用、DEM 应用和网格重建数。
+
+真机验证（Harmony 设备 `5KLBB25911200313`，Demo 图源 ArcGIS，太白山 tilt 视角）：
+
+- 清应用数据后冷加载 DEM：`deliveredTiles=182/182`、`networkRequests=182`、`failures=0`、`firstTileMs=58`、`elapsedMs=834`。
+- DEM 集中到达秒：`terrainApplied=182`、`meshRebuilds=318`、`frameMaxMs=14.59`；截图确认真实山脊起伏，无黑屏。
+- 加载后连续拖动/斜视角浏览：交互秒上传峰值 3 张 / 786432B，`frameMaxMs=23.58`，未见失败，首波后多数统计秒 `newConn=0`。
+- 锁顺序修正后的安装冒烟：构建 ID 正确，热缓存 `processed=126 cache=126 network=0 ready=0`，无 native 崩溃；启动首秒 `frameMaxMs=56.47` 仍来自着色器、首批纹理和球面 VBO 初始化，保留为后续启动优化项。
+
 ### 演示工程 globecore-harmonyos
 
 DevEco Studio（5.0+，API 12 SDK）打开 `globecore-harmonyos/`，`ohpm install` 后直接 run `entry`：
@@ -558,6 +577,7 @@ cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build b
   ⑧ **P2-1 阶段 C：C++ 地形 Provider 与视口调度**：新增平台无关 `terrain/CesiumTerrainProvider`，由 native 直接读取 navigator 相机视口并按中心优先生成 7×7 引擎瓦片任务；内置 `layer.json` 元数据预取、磁盘缓存（`layer.json` 与 `<z>/<x>_<y>.terrain` 均临时文件 + rename）、固定并发、失败重试、视口代际取消、单轮/跨刷新 LRU 去重，以及 `GlobeEngine::setTerrainTile` 直接流式注入。Harmony NAPI/HAR 新增 `configureTerrainProvider/setTerrainProviderEnabled/refreshTerrainProvider/prefetchTerrainProviderMetadata/terrainProviderStatus`，宿主不再负责 DEM 网格换算、下载和逐块调度；`clearTerrain` 会同步失效 Provider 交付 LRU。真机太白山热缓存 `182/182` 磁盘命中、`network=0`、首块 `8ms`、总耗时 `101ms`；清数据冷缓存 `182` 个唯一 DEM、`182` 次网络、首块 `106ms`、总耗时 `3003ms`、去重 `84`、失败 `0`。
   ⑨ **P2-1 阶段 D1：Android 地形 Provider 门面对齐**：Android `NativeLib/NativeMapView` 新增与 Harmony 同名的 `configureTerrainProvider/setTerrainProviderEnabled/refreshTerrainProvider/prefetchTerrainProviderMetadata/terrainProviderStatus`；JNI 将 Kotlin `Map` 请求头按 `[name0,value0,...]` 展平后还原为 native 键值对，所有视口调度、下载、缓存、重试和注入仍复用共享 C++ Provider。`:globecore:compileDebugKotlin` 与 JNI 单目标 C++ 编译通过；完整 AAR 本机因仓库未放置第三方 `jniLibs/*.a` 前置库暂无法链接。
   ⑩ **P2-1 阶段 D2/D3：统一地形事件与 Qt Provider 门面**：C++ `CesiumTerrainProvider` 新增单行 JSON 事件（`metadata_started/metadata_ready/refresh_started/first_tile/progress/refresh_completed/error/enabled/disabled`），每条携带完整诊断快照，进度事件每轮最多约 10 次；Android JNI 按需附加 JVM 并调用 `NativeMapView.onTerrainProviderEvent` 后 `post` 到主线程，Harmony NAPI 使用容量 32 的 TSFN 非阻塞投递，Qt `MapWidget` 新增同名配置/开关/刷新/状态门面与 `terrainProviderEvent(QString)` signal，并用 `Qt::QueuedConnection` 转投 GUI 线程。Demo 已移除 900/3200/6000ms 轮询，改为事件驱动状态栏。Harmony HAP 编译与真机验证通过：热缓存事件链完整，`delivered=2/2`、`diskHits=2`、`networkRequests=0`、`firstTileMs=2`、`elapsedMs=7`、`failures=0`；关闭地形收到 `disabled`。Android Kotlin 与 JNI/C++ 三个目标编译通过；Qt 桌面端源码已补齐，但本机缺少 GDAL/Qt 桌面依赖，CMake 配置未完成。
+  ⑪ **P0-2 exp1e：瓦片/地形加载期交互平滑实验（实验性）**：新增 180ms 交互窗口；所有瓦片层共享 4 张/1MiB 单帧上传预算；TileLoader 不再随相邻视口立即清空队列和 ready，pending/inflight 同 key 可升级代际，新增 ready key 去重；2D 中心优先、3D 交互/空闲分别只请求 96/192 块叶瓦片并保持祖先粗瓦先覆盖；quantized-mesh 解码移到 Provider worker，GL 线程按 2/4 块应用 DEM，地形网格改按局部 DEM signature + revision 精确失效并按 2/4 个预算重建；新增 TILEPIPE 与 HTTP 连接复用诊断。真机冷地形 182/182、失败 0、首块 58ms、总耗时 834ms，DEM 到达秒 frameMaxMs=14.59ms，连续拖动 frameMaxMs=23.58ms。本轮为实验提交，效果不佳可整笔 revert，详见“实验性瓦片/地形加载平滑调度”。
   > 维护约定：**每次改动定稿后同步更新本版本说明**（与代码提交同批），未发版工作累积在本条，发版时再改版本号与“当前发布”标记。
 - **0.1.4.0（当前发布）**：三项合入——
   ① **GeoPackage 工程读写**：新增 `bridge/geopackage_io.cpp`，OGR GPKG 驱动实现工程文件（七表：tracks / measures / photos / media_groups / survey_plots / project_meta / layer_refs）整体读写，Kotlin/ArkTS 侧以 JSON 跨桥传输；写入整文件 tmp+rename **原子替换**，五张要素表 **SetFID 落盘**使记录 id 持久化（重写不重编号），读侧缺列宽容回退、写侧整文件重建自动升级 schema；

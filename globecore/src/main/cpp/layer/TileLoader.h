@@ -6,6 +6,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -44,8 +45,20 @@ public:
         int y = 0;
         int width = 0;
         int height = 0;
-        uint64_t generation = 0; // @Jin: 标记瓦片由哪一个视口代际产出，GL 线程丢弃已滑出视口的旧结果。
+        uint64_t generation = 0; // @Jin: 标记瓦片由哪一个视口代际产出，GL 线程优先交付当前代际结果。
         std::vector<uint8_t> rgba;  // 已解码 RGBA8888（width*height*4）
+    };
+
+    /// @Jin 瓦片管线快照：Renderer 按固定周期聚合打印，用于量化每帧上传、缓存命中、网络完成与失败。
+    struct StatsSnapshot {
+        uint64_t processed = 0;
+        uint64_t cacheHits = 0;
+        uint64_t networkHits = 0;
+        uint64_t rasterGenerated = 0;
+        uint64_t failures = 0;
+        size_t pending = 0;
+        size_t inflight = 0;
+        size_t ready = 0;
     };
 
     explicit TileLoader(TileCache &cache, int numThreads = 8);
@@ -79,9 +92,13 @@ public:
     void beginView(uint64_t viewSignature);
 
     /// 取走就绪瓦片（GL 线程每帧调用）。out 追加，不清空原有内容。
-    /// [maxCount] 为本次最多取走的数量（<0 表示全部）：限制单帧解码上传量，避免一批瓦片同时就绪时
-    /// GL 线程集中解码造成掉帧（时快时慢）；未取走的留在队列，下一帧继续（渐进补齐，视觉连续）。
-    void drainReady(std::vector<ReadyTile> &out, int maxCount = -1);
+    /// @Jin [maxCount]/[maxBytes] 共同限制本次上传量；当前视口代际优先，未取走的留到后续帧。
+    /// @Jin maxBytes 让 Renderer 可跨多个瓦片层共享同一帧显存上传预算，避免双层各自 32 块造成 GL 尖峰。
+    void drainReady(std::vector<ReadyTile> &out, int maxCount = -1,
+                    size_t maxBytes = std::numeric_limits<size_t>::max());
+
+    /// @Jin 线程安全读取聚合统计，供 Renderer 输出请求/缓存/上传诊断。
+    StatsSnapshot stats() const;
 
     /// 是否仍有未完成的瓦片工作（排队/下载中 或 就绪待上传）。供 Renderer 判断是否需再画一帧：
     /// RENDERMODE_WHEN_DIRTY 省电模式下，瓦片异步到位需据此触发重绘；全部就绪后返回 false 停绘。
@@ -109,6 +126,8 @@ private:
     std::condition_variable cv_;
     std::deque<Request> queue_;
     std::unordered_set<uint64_t> pending_;
+    // @Jin 排队项 key -> 最新需要它的视口代际；新视口复用同 key 时原地升级，无需清空重排。
+    std::unordered_map<uint64_t, uint64_t> pendingGeneration_;
     // @Jin: 在途瓦片 key -> 视口代际；视口切换后仍被新视口需要时可原地升级，避免同 key 重复联网。
     std::unordered_map<uint64_t, uint64_t> inflight_;
     uint64_t viewGeneration_ = 1;
@@ -120,8 +139,9 @@ private:
     std::vector<std::thread> workers_;
 
     // 下载就绪队列（独立锁，GL 线程 drain、工作线程 push）
-    std::mutex readyMtx_;
+    mutable std::mutex readyMtx_; // @Jin stats() 为 const 诊断接口，仍需读取 ready_ 数量。
     std::deque<ReadyTile> ready_;
+    mutable std::unordered_set<uint64_t> readyKeys_; // @Jin 已解码待上传瓦片去重，const stats 诊断时也可防御性修复集合。
 
     // URL 模板（独立锁）+ 子域轮询计数 + 栅格数据源路径与四至（共用 urlMtx_：二者互斥、均后台读）
     mutable std::mutex urlMtx_;

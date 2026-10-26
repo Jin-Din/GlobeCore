@@ -238,6 +238,7 @@ void Navigator::panByPixels(double dxPx, double dyPx) {
         centerLon_ += dEast / (EQUATORIAL_RADIUS * cosLat) * rad2Deg;
         while (centerLon_ < -180.0) centerLon_ += 360.0;
         while (centerLon_ >= 180.0) centerLon_ -= 360.0;
+        markInteractionUnlocked(); // @Jin 标记 3D 平移，交互期间降低后台资源上传峰值。
         return;
     }
     double cwx = 0.0, cwy = 0.0;
@@ -249,6 +250,7 @@ void Navigator::panByPixels(double dxPx, double dyPx) {
     cwx -= (dxPx / viewportWidth_) * spanW;
     cwy -= (dyPx / viewportHeight_) * spanH;
     setCenterWorld(cwx, cwy);
+    markInteractionUnlocked(); // @Jin 标记 2D 平移，交互期间降低后台资源上传峰值。
 }
 
 void Navigator::zoomBy(double factor, double focusXpx, double focusYpx) {
@@ -272,6 +274,7 @@ void Navigator::zoomBy(double factor, double focusXpx, double focusYpx) {
             centerLat_ = MercatorProjection::clampLatitude(aLat + s * (centerLat_ - aLat));
         }
         // 焦点落在地平线外（射线未命中）时退化为只改高度不动中心，同 参考实现 capture 失败即 invalidate
+        markInteractionUnlocked(); // @Jin 标记 3D 缩放活动。
         return;
     }
     // 1) 缩放前焦点处的世界坐标与其 NDC（缩放中屏幕位置不变）
@@ -288,6 +291,7 @@ void Navigator::zoomBy(double factor, double focusXpx, double focusYpx) {
     const double cwx = fwx - ndcX * hw;
     const double cwy = fwy + ndcY * hh;
     setCenterWorld(cwx, cwy);
+    markInteractionUnlocked(); // @Jin 标记 2D 缩放活动。
 }
 
 void Navigator::rotateHeading(double deltaDeg) {
@@ -297,6 +301,7 @@ void Navigator::rotateHeading(double deltaDeg) {
     // 环绕归一到 [-180, 180)：手势逐帧累加防无界增长（三角函数渲染不受影响，但回读/持久化保持紧凑）
     while (heading_ >= 180.0) heading_ -= 360.0;
     while (heading_ < -180.0) heading_ += 360.0;
+    markInteractionUnlocked(); // @Jin 标记 3D 旋转活动。
 }
 
 void Navigator::rotateTilt(double deltaDeg) {
@@ -307,6 +312,19 @@ void Navigator::rotateTilt(double deltaDeg) {
     // 到底后继续同向拖动无效果，反向即回，无需额外状态）
     if (tilt_ < 0.0) tilt_ = 0.0;
     if (tilt_ > MAX_TILT_DEG) tilt_ = MAX_TILT_DEG;
+    markInteractionUnlocked(); // @Jin 标记 3D 俯仰活动。
+}
+
+bool Navigator::isInteracting() const {
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (!hasInteractionTime_) return false;
+    // @Jin 180ms 覆盖一次连续手势的帧间隔与抬手后的收尾帧，之后才恢复空闲上传预算。
+    return std::chrono::steady_clock::now() - lastInteractionTime_ < std::chrono::milliseconds(180);
+}
+
+void Navigator::markInteractionUnlocked() {
+    lastInteractionTime_ = std::chrono::steady_clock::now();
+    hasInteractionTime_ = true;
 }
 
 double Navigator::zoom() const {

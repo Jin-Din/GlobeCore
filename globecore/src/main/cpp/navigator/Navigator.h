@@ -2,6 +2,7 @@
 #define GLOBECORE_NAVIGATOR_NAVIGATOR_H
 
 #include <array>
+#include <chrono>
 #include <mutex>
 
 #include "geom/Camera.h"
@@ -93,6 +94,10 @@ public:
     /// 故 camera3D 每帧按当前高度钳制**有效倾角**使斜距 ≤ 当地半径；存储值不动，拉回即恢复。
     void rotateTilt(double deltaDeg);
 
+    /// @Jin 是否处于最近的手势活动窗口：Renderer 据此在交互期间降低纹理上传和地形网格重建预算，
+    /// @Jin 避免后台补齐资源与手指操作争用 GL/CPU；抬手后窗口自动结束并恢复较高补齐速度。
+    bool isInteracting() const;
+
     /// 设置屏幕密度（对齐参考实现的 setupViewport(w,h,displayMetrics.density) 口径），
     /// 作为 LOD 细分判据的 densityFactor（见 tileLevel）。默认 1.0。
     void setDisplayDensity(double density);
@@ -174,6 +179,8 @@ private:
     void setCenterWorld(double wx, double wy);
     /// 将相机高度钳制到 zoom∈[MIN_LEVEL,MAX_LEVEL] 对应的高度区间（视口未知时跳过）
     void clampAltitude();
+    /// @Jin 记录一次会改变画面的手势活动；调用方必须已持有 mtx_。
+    void markInteractionUnlocked();
 
     // 视图模式：2D（默认，现有正交墨卡托通路零回归）/ 3D（透视球体通路，P1 新建）。
     ViewMode mode_ = ViewMode::MODE_2D;
@@ -199,6 +206,9 @@ private:
     // maxLevel 由各图层逐层传入 tileLevel(maxLevel)，不再存全局态。
     double densityFactor_ = 1.0;
     double detailControl_ = 1.0;
+    // @Jin 手势静默窗口：最后一次 pan/zoom/rotate/tilt 后短时间内仍视为交互中，避免抬手瞬间预算突增造成跳帧。
+    std::chrono::steady_clock::time_point lastInteractionTime_{};
+    bool hasInteractionTime_ = false;
 };
 
 } // namespace globecore

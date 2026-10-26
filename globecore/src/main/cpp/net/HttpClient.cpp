@@ -4,6 +4,7 @@
 
 #include <curl/curl.h>
 
+#include <atomic>
 #include <mutex>
 
 namespace globecore {
@@ -14,6 +15,15 @@ namespace {
 
 std::once_flag g_initOnce;
 bool g_initOk = false;
+
+// @Jin 进程级网络诊断计数；只在请求线程做原子递增，不参与下载/缓存决策。
+std::atomic<uint64_t> g_requests{0};
+std::atomic<uint64_t> g_completed{0};
+std::atomic<uint64_t> g_failures{0};
+std::atomic<uint64_t> g_reusedConnections{0};
+std::atomic<uint64_t> g_newConnections{0};
+std::atomic<uint64_t> g_http2Responses{0};
+std::atomic<uint64_t> g_http1Responses{0};
 
 // libcurl 写回调：把响应字节追加到 std::vector<uint8_t>
 size_t writeCallback(char *ptr, size_t size, size_t nmemb, void *userdata) {
@@ -77,6 +87,18 @@ void HttpClient::setCaBundle(const std::string &caInfoPath) {
     caBundlePath_ = caInfoPath;
 }
 
+HttpClient::StatsSnapshot HttpClient::stats() {
+    StatsSnapshot snapshot;
+    snapshot.requests = g_requests.load();
+    snapshot.completed = g_completed.load();
+    snapshot.failures = g_failures.load();
+    snapshot.reusedConnections = g_reusedConnections.load();
+    snapshot.newConnections = g_newConnections.load();
+    snapshot.http2Responses = g_http2Responses.load();
+    snapshot.http1Responses = g_http1Responses.load();
+    return snapshot;
+}
+
 bool HttpClient::get(const std::string &url, std::vector<uint8_t> &outBytes, long timeoutMs,
                      const std::atomic<bool> *abortFlag,
                      const std::vector<std::pair<std::string, std::string>> &headers) {
@@ -89,6 +111,7 @@ bool HttpClient::get(const std::string &url, std::vector<uint8_t> &outBytes, lon
     }
     curl_easy_reset(curl); // 选项清回默认（含校验/回调），但保留 handle 内连接缓存——keep-alive 复用不丢
 
+    g_requests.fetch_add(1); // @Jin 统计真实进入 libcurl 的请求数。
     outBytes.clear();
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
@@ -97,6 +120,19 @@ bool HttpClient::get(const std::string &url, std::vector<uint8_t> &outBytes, lon
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);       // 多线程环境下必须，避免 alarm 信号
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L); // 跟随 3xx
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "globecore/0.2.8.1");
+    // @Jin 单 host 瓦片源优先协商 HTTP/2，并保持 TCP keep-alive；旧版 libcurl 缺少常量时保持原协议行为。
+#if LIBCURL_VERSION_NUM >= 0x072F00
+    const curl_version_info_data *curlInfo = curl_version_info(CURLVERSION_NOW);
+    if (curlInfo != nullptr && (curlInfo->features & CURL_VERSION_HTTP2) != 0) {
+        curl_easy_setopt(curl, CURLOPT_HTTP_VERSION, CURL_HTTP_VERSION_2TLS);
+    }
+#endif
+#if LIBCURL_VERSION_NUM >= 0x071900
+    curl_easy_setopt(curl, CURLOPT_TCP_KEEPALIVE, 1L);
+    curl_easy_setopt(curl, CURLOPT_TCP_KEEPIDLE, 30L);
+    curl_easy_setopt(curl, CURLOPT_TCP_KEEPINTVL, 15L);
+#endif
+    curl_easy_setopt(curl, CURLOPT_DNS_CACHE_TIMEOUT, 300L);
 
     // @Jin 宿主注入的请求头用于 Referer/Token 等数据源策略；请求结束统一释放，不污染线程常驻 handle。
     curl_slist *headerList = nullptr;
@@ -145,11 +181,31 @@ bool HttpClient::get(const std::string &url, std::vector<uint8_t> &outBytes, lon
 
     long httpCode = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+    // @Jin 记录连接复用和协议版本，真机日志可直接确认请求慢是否仍出在重复 TCP/TLS 握手。
+    long newConnections = 0;
+    long httpVersion = 0;
+    curl_easy_getinfo(curl, CURLINFO_NUM_CONNECTS, &newConnections);
+#if LIBCURL_VERSION_NUM >= 0x073200
+    curl_easy_getinfo(curl, CURLINFO_HTTP_VERSION, &httpVersion);
+#endif
+    if (newConnections > 0) {
+        g_newConnections.fetch_add(static_cast<uint64_t>(newConnections));
+    } else if (rc == CURLE_OK && httpCode >= 200 && httpCode < 300) {
+        g_reusedConnections.fetch_add(1);
+    }
+#if LIBCURL_VERSION_NUM >= 0x073200
+    if (httpVersion >= CURL_HTTP_VERSION_2_0) {
+        g_http2Responses.fetch_add(1);
+    } else if (httpVersion == CURL_HTTP_VERSION_1_1 || httpVersion == CURL_HTTP_VERSION_1_0) {
+        g_http1Responses.fetch_add(1);
+    }
+#endif
     // @Jin curl_slist 仅本请求有效；连接缓存属于 easy handle，不受 header list 释放影响。
     curl_slist_free_all(headerList);
     // 刻意不 cleanup：handle 线程常驻，连接缓存跨请求复用（线程退出由 ThreadCurl 析构回收）
 
     if (rc != CURLE_OK) {
+        g_failures.fetch_add(1);
         // 主动中断（abort）属正常关机路径，降为 debug 级避免刷屏
         if (abortFlag != nullptr && abortFlag->load()) {
             outBytes.clear();
@@ -160,10 +216,12 @@ bool HttpClient::get(const std::string &url, std::vector<uint8_t> &outBytes, lon
         return false;
     }
     if (httpCode < 200 || httpCode >= 300) {
+        g_failures.fetch_add(1);
         LOGW("curl GET 非 2xx（HTTP %ld）url=%s", httpCode, url.c_str());
         outBytes.clear();
         return false;
     }
+    g_completed.fetch_add(1); // @Jin 仅 HTTP 2xx 计为成功完成。
     return true;
 }
 

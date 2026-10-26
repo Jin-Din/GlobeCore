@@ -7,6 +7,7 @@
 #include "render/ImageDecoder.h"
 #include "util/Log.h"
 
+#include <algorithm>
 #include <cmath>
 #include <utility>
 
@@ -110,27 +111,14 @@ bool TileLoader::hasRasterSource() const {
 }
 
 void TileLoader::beginView(uint64_t viewSignature) {
-    // @Jin: 相同视口的补帧/续帧不清队列，保证已下载瓦片能按预算渐进上传；视口签名变化才切换代际。
-    bool sameView = false;
-    {
-        std::lock_guard<std::mutex> lk(mtx_);
-        sameView = hasViewSignature_ && viewSignature_ == viewSignature;
-    }
-    if (sameView) return;
-
+    // @Jin 视口变化只推进代际，不立刻清空队列/已解码结果：连续手势时同 key 可原地升级，
+    // @Jin 已经下载并解码的可见瓦片也不会因相邻两帧视口微调而反复丢弃、重读、重解码。
     {
         std::lock_guard<std::mutex> lk(mtx_);
         if (hasViewSignature_ && viewSignature_ == viewSignature) return;
         hasViewSignature_ = true;
         viewSignature_ = viewSignature;
         ++viewGeneration_;
-        // @Jin: 只清理尚未开工的排队项；在途项由 inflight_ 代际判断，能复用的升级、不能复用的不交付。
-        queue_.clear();
-        pending_.clear();
-    }
-    {
-        std::lock_guard<std::mutex> lk(readyMtx_);
-        ready_.clear(); // @Jin: 旧视口已解码结果不再抢占本帧 GL 纹理上传预算。
     }
 }
 
@@ -156,9 +144,18 @@ void TileLoader::request(int z, int x, int y) {
 
     const uint64_t k = key(z, x, y);
     {
+        // @Jin 先在 ready 集合去重：瓦片已解码但受单帧预算限制尚未上传时，下一帧不应再次读盘/联网。
+        std::lock_guard<std::mutex> readyLock(readyMtx_);
+        if (readyKeys_.count(k) != 0) return;
+    }
+    {
         std::lock_guard<std::mutex> lk(mtx_);
         if (stop_) return;
-        if (pending_.count(k) != 0) return; // @Jin: 已排队的同 key 不重复入队。
+        if (pending_.count(k) != 0) {
+            // @Jin 新视口仍需要同 key 时只升级排队代际，保留原队列位置并避免重复请求。
+            pendingGeneration_[k] = viewGeneration_;
+            return;
+        }
         auto inFlight = inflight_.find(k);
         if (inFlight != inflight_.end()) {
             // @Jin: 旧视口已在读取/下载、但新视口仍需要该瓦时，直接把在途任务升级为新代际，避免重复请求。
@@ -172,35 +169,80 @@ void TileLoader::request(int z, int x, int y) {
             failedUntil_.erase(fit);
         }
         pending_.insert(k);
+        pendingGeneration_[k] = viewGeneration_;
         queue_.push_back(Request{z, x, y, viewGeneration_});
         // 超限丢最旧：被丢者同步移出 pending_，若仍可见下一帧会重新入队（去重不受损）
         while (queue_.size() > kMaxQueue) {
             const Request &oldest = queue_.front();
-            pending_.erase(key(oldest.z, oldest.x, oldest.y));
+            const uint64_t oldestKey = key(oldest.z, oldest.x, oldest.y);
+            pending_.erase(oldestKey);
+            pendingGeneration_.erase(oldestKey);
             queue_.pop_front();
         }
     }
     cv_.notify_one();
 }
 
-void TileLoader::drainReady(std::vector<ReadyTile> &out, int maxCount) {
-    std::lock_guard<std::mutex> lk(readyMtx_);
+void TileLoader::drainReady(std::vector<ReadyTile> &out, int maxCount, size_t maxBytes) {
     int taken = 0;
+    size_t bytes = 0;
     uint64_t currentGeneration = 0;
     {
+        // @Jin 先在独立临界区读取代际，避免持有 readyMtx_ 后再嵌套 mtx_，与 stats() 的加锁顺序保持一致。
         std::lock_guard<std::mutex> lk(mtx_);
         currentGeneration = viewGeneration_;
     }
-    // @Jin: 从队首逐项检查，过期结果直接丢弃；同视口结果仍遵循单帧上传预算。
-    while (!ready_.empty() && (maxCount < 0 || taken < maxCount)) {
-        if (ready_.front().generation != currentGeneration) {
-            ready_.pop_front();
-            continue;
+    std::lock_guard<std::mutex> lk(readyMtx_);
+    // @Jin 两遍扫描：先交付当前视口结果，再用剩余预算接收最近旧视口结果；旧结果仍可进入纹理缓存，
+    // @Jin 不再像旧实现那样在相邻手势帧之间直接丢弃，从而消除“加载中越操作越不显示”的抖动。
+    const auto takePass = [&](bool currentPass) {
+        for (auto it = ready_.begin(); it != ready_.end();) {
+            if (maxCount >= 0 && taken >= maxCount) break;
+            const bool isCurrent = (it->generation == currentGeneration);
+            if (isCurrent != currentPass) {
+                ++it;
+                continue;
+            }
+            const size_t tileBytes = static_cast<size_t>(std::max(0, it->width)) *
+                                     static_cast<size_t>(std::max(0, it->height)) * 4ULL;
+            // @Jin 至少允许首块通过，避免单张高位图大于整帧预算时长期饿死；其余块严格受剩余字节限制。
+            const size_t remainingBytes = bytes < maxBytes ? maxBytes - bytes : 0;
+            if (taken > 0 && tileBytes > remainingBytes) {
+                break;
+            }
+            readyKeys_.erase(key(it->z, it->x, it->y));
+            out.push_back(std::move(*it));
+            it = ready_.erase(it);
+            ++taken;
+            bytes += tileBytes;
         }
-        out.push_back(std::move(ready_.front()));
-        ready_.pop_front();
-        ++taken;
+    };
+    takePass(true);
+    takePass(false);
+}
+
+TileLoader::StatsSnapshot TileLoader::stats() const {
+    StatsSnapshot snapshot;
+    snapshot.processed = statProcessed_.load();
+    snapshot.cacheHits = statCacheHits_.load();
+    snapshot.networkHits = statNetworkHits_.load();
+    snapshot.rasterGenerated = statRasterGenerated_.load();
+    snapshot.failures = statFailures_.load();
+    {
+        std::lock_guard<std::mutex> lk(mtx_);
+        snapshot.pending = pending_.size();
+        snapshot.inflight = inflight_.size();
     }
+    {
+        std::lock_guard<std::mutex> lk(readyMtx_);
+        snapshot.ready = ready_.size();
+        if (readyKeys_.size() != ready_.size()) {
+            // @Jin 防御性修复集合：若历史异常造成不一致，以 ready_ 为准重建，避免 key 永远被误判为就绪。
+            readyKeys_.clear();
+            for (const auto &tile : ready_) readyKeys_.insert(key(tile.z, tile.x, tile.y));
+        }
+    }
+    return snapshot;
 }
 
 bool TileLoader::hasPendingOrReady() {
@@ -221,6 +263,7 @@ void TileLoader::cancelPending() {
         std::lock_guard<std::mutex> lk(mtx_);
         queue_.clear();
         pending_.clear();
+        pendingGeneration_.clear();
         inflight_.clear();
         ++viewGeneration_;
         hasViewSignature_ = false;
@@ -229,6 +272,7 @@ void TileLoader::cancelPending() {
     {
         std::lock_guard<std::mutex> lk(readyMtx_);
         ready_.clear();
+        readyKeys_.clear();
     }
     // @Jin: 不置 stop_/abort_：墓碑槽位仍持有本对象，工作线程无活可干时回到 cv_.wait 挂起。
     // @Jin: 代际已经递增，旧 GDAL/网络任务即使跑完，其结果也不会进入当前 ready 队列。
@@ -247,21 +291,41 @@ void TileLoader::workerLoop() {
             cv_.wait(lk, [this] { return stop_ || !queue_.empty(); });
             if (stop_) return;
             if (queue_.empty()) continue;
-            // @Jin: 出队策略按数据源区分：在线标准 XYZ 首屏先取 z-1/z-2 祖先粗瓦，用少量瓦片快速铺满屏幕；
-            // @Jin: 粗瓦请求完成后会从队列消失，worker 自然转入可见级叶子，形成“先完整低清、再局部变清”。
-            // @Jin: 本地 GDAL 栅格仍保持最细叶子优先，因为无金字塔粗瓦可能触发整幅重投影，单块曾实测数秒以上。
-            // @Jin: 同级都取下标更大的新请求，保留连续手势期间当前视口优先的跟手性。
+            // @Jin 出队前先升级仍被当前视口需要的同 key 请求，并清掉已经滑出视口的旧代际项；
+            // @Jin 这样连续手势不会让过期请求占住 worker，也不会误删已由本帧 request() 原地复用的任务。
+            for (auto it = queue_.begin(); it != queue_.end();) {
+                const uint64_t queuedKey = key(it->z, it->x, it->y);
+                const auto pendingGen = pendingGeneration_.find(queuedKey);
+                if (pendingGen != pendingGeneration_.end()) it->generation = pendingGen->second;
+                if (it->generation != viewGeneration_) {
+                    pending_.erase(queuedKey);
+                    pendingGeneration_.erase(queuedKey);
+                    it = queue_.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+            if (queue_.empty()) continue;
+            // @Jin 出队策略按数据源区分：在线标准 XYZ 首屏先取 z-1/z-2 祖先粗瓦，用少量瓦片快速铺满屏幕；
+            // @Jin 粗瓦请求完成后会从队列消失，worker 自然转入可见级叶子，形成“先完整低清、再局部变清”。
+            // @Jin 本地 GDAL 栅格仍保持最细叶子优先，因为无金字塔粗瓦可能触发整幅重投影，单块曾实测数秒以上。
+            // @Jin 同级保持 request() 的插入顺序，配合 Renderer 的“屏幕中心优先”排序，先补中心再补外围。
             size_t best = 0;
             for (size_t i = 1; i < queue_.size(); ++i) {
                 if (preferCoarseOnlineTile) {
-                    if (queue_[i].z <= queue_[best].z) best = i; // @Jin: 在线图源低 z 优先，同级取更新。
+                    if (queue_[i].z < queue_[best].z) best = i; // @Jin 在线图源低 z 优先。
                 } else {
-                    if (queue_[i].z >= queue_[best].z) best = i; // @Jin: 本地栅格高 z 优先，同级取更新。
+                    if (queue_[i].z > queue_[best].z) best = i; // @Jin 本地栅格高 z 优先。
                 }
             }
             req = queue_[best];
             queue_.erase(queue_.begin() + static_cast<std::ptrdiff_t>(best));
             const uint64_t k = key(req.z, req.x, req.y);
+            const auto pendingGen = pendingGeneration_.find(k);
+            if (pendingGen != pendingGeneration_.end()) {
+                req.generation = pendingGen->second; // @Jin 使用新视口升级后的代际，避免可复用任务被误判过期。
+                pendingGeneration_.erase(pendingGen);
+            }
             pending_.erase(k);
             inflight_[k] = req.generation;
         }
@@ -395,6 +459,7 @@ void TileLoader::workerLoop() {
                     rt.height = h;
                     rt.generation = req.generation;
                     rt.rgba = std::move(rgba);
+                    readyKeys_.insert(key(req.z, req.x, req.y));
                     ready_.push_back(std::move(rt));
                 }
             } else {

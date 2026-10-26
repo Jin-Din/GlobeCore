@@ -20,6 +20,17 @@ namespace globecore {
  */
 class HttpClient {
 public:
+    /// @Jin 网络层聚合快照：验证 ArcGIS 等单 host 图源的连接复用与 HTTP/2 协商是否生效。
+    struct StatsSnapshot {
+        uint64_t requests = 0;
+        uint64_t completed = 0;
+        uint64_t failures = 0;
+        uint64_t reusedConnections = 0;
+        uint64_t newConnections = 0;
+        uint64_t http2Responses = 0;
+        uint64_t http1Responses = 0;
+    };
+
     /// 进程内一次性全局初始化（curl_global_init，线程安全、幂等）。成功返回 true。
     static bool globalInit();
 
@@ -44,6 +55,9 @@ public:
 
     /// 设置 CA 证书包路径（cacert.pem），用于 HTTPS 证书校验；空串表示用默认行为
     static void setCaBundle(const std::string &caInfoPath);
+
+    /// @Jin 线程安全读取进程级网络统计。
+    static StatsSnapshot stats();
 
 private:
     static std::string caBundlePath_;

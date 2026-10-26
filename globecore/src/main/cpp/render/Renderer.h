@@ -3,6 +3,7 @@
 
 #include <GLES2/gl2.h>
 
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -90,7 +91,8 @@ public:
 
     /// 注入/更新一块 quantized-mesh 地形瓦片（解码 bytes → 存入 LRU 缓存）。
     /// 供 buildGlobeTileMesh 在生成球面网格时采样高度（替代 alt=0 贴地）。
-    /// bytes 为空则清除该 tile 的缓存。须在 GL 线程调用（与 buildGlobeTileMesh 同帧/上下文）。
+    /// @Jin bytes 为空则忽略该更新；服务 DEM 的重活在调用线程解码，GL 线程仅接收已解码结果。
+    /// @Jin 解码在调用线程（Provider worker）完成，GL 线程只移动已解码数据，避免 DEM 栅格化阻塞渲染。
     ///
     /// 【feature/terrain-pre】新增四至参数：标准 quantized-mesh header 不含 bbox，
     /// 必须由调用方按所用地形服务的分块方案算出瓦片四至。
@@ -178,10 +180,16 @@ private:
     // @Jin 构建「瓦片中心局部坐标」静态网格：顶点存 ecefVertex - tileCenterEcef（float），
     // @Jin 瓦片中心 ECEF 经 centerEcef 输出；占位棋盘色按 (x+y) 奇偶烘焙。几何只与 DEM 内容有关。
     void buildGlobeTileMeshLocal(const GlobeTile &tile, std::vector<float> &verts,
-                                 Vec3 &centerEcef) const;
-    // @Jin 取/建瓦片静态 VBO（按 tileKey 缓存，terrainVersion_ 变化时原地重建），含 LRU 上限。
+                                 Vec3 &centerEcef, bool sampleTerrain = true) const;
+    // @Jin 取/建瓦片静态 VBO（按 tileKey 缓存，仅重建被新增/淘汰 DEM 覆盖的瓦片），含 LRU 上限。
     struct TileGlobeGpuMesh;
     TileGlobeGpuMesh &acquireTileGlobeMesh(const GlobeTile &tile);
+    /// @Jin 计算某渲染瓦片当前覆盖到的 DEM 集合签名，用于精确失效局部网格而不是全场景重建。
+    uint64_t terrainSignatureForTile(const GlobeTile &tile) const;
+    /// @Jin 使用跨图层共享预算交付就绪瓦片，返回实际上传张数。
+    int drainLayerReady(TileLoader &loader, TexMap &texMap);
+    /// @Jin 每秒输出一次上传/缓存/网络/失败与最长帧耗时，供真机对比加载期卡顿。
+    void logTilePipelineStats();
 
     /// 3D 定位 marker（P2.b）：把 marker 经纬度 CPU 投影到屏幕像素（复用 viewProjRtc，含相机朝向），
     /// 在屏幕像素空间用 screenOrtho 画罗盘图标 / 蓝点白边圆 + 移动方向箭头（箭头方向由「沿 heading
@@ -466,19 +474,21 @@ private:
     GLint gfiTexture_ = -1;
 
     GLuint vboGlobeMesh_ = 0;              // 3D 网格动态 VBO（保留：其它通路备用；瓦片已改静态缓存）
-    // @Jin 【卡顿优化】瓦片静态网格 VBO 缓存：几何按 tileKey 缓存，仅在 terrainVersion_ 变化时
-    // @Jin 原地重建；稳态浏览（平移/旋转、无 DEM 增删）时逐瓦片只更新 uRtcOffset 等 uniform 并 draw，
-    // @Jin 彻底消除原「每帧 544 顶点重建 × 可见瓦片数 + 每瓦片一次 glBufferData」的 CPU/GPU 开销。
+    // @Jin 【卡顿优化】瓦片静态网格 VBO 缓存：几何按 tileKey 缓存，仅当该瓦片覆盖到的 DEM 集合变化时
+    // @Jin 重建；稳态浏览与其它区域地形到达时，逐瓦片只更新 uRtcOffset 等 uniform 并 draw。
     struct TileGlobeGpuMesh {
         GLuint vbo = 0;                       // 瓦片私有 VBO（几何静态，GL_STATIC_DRAW）
         int vertexCount = 0;                  // 顶点数（TRIANGLE_STRIP）
         Vec3 centerEcef{0.0, 0.0, 0.0};       // 瓦片中心 ECEF（double 计算后转 float 保存）
-        uint64_t terrainVersion = 0;          // 构建时的地形版本号（不一致即重建）
+        uint64_t terrainSignature = 0;        // @Jin 构建时覆盖 DEM 集合签名（不一致即重建）
+        uint64_t terrainSignatureRevision = 0; // @Jin 上次重算签名时的地形缓存修订号，未变化时跳过全缓存扫描。
+        bool terrainCurrent = false;          // @Jin 是否已按目标 DEM 集合完成构建
         uint64_t lastUsed = 0;                // LRU 时间戳（frameTick_）
     };
     std::unordered_map<uint64_t, TileGlobeGpuMesh> tileGlobeMesh_;
     static constexpr size_t kMaxTileGlobeMesh = 512; // @Jin ≤544v×32B×512≈9MB 显存上限
-    uint64_t terrainVersion_ = 0; // @Jin terrainCache_ 每发生一次增/删/清空自增，作瓦片 VBO 失效号
+    int globeMeshRebuildBudget_ = 0; // @Jin 单帧允许重建的地形网格数，避免 DEM 到达时全场景 VBO 同时重传。
+    bool globeMeshRebuildDeferred_ = false; // @Jin 本帧有地形网格延后，驱动 WHEN_DIRTY 继续补帧。
     std::vector<GlobeTile> globeTilesScratch_; // 可见叶瓦片 scratch（逐层复用，避免反复堆分配）
     std::vector<float> globeMeshScratch_;      // 单瓦片网格 scratch（Pass B 逐瓦片上传用）
     GeographicQuadtree geoQuadtree_;           // #11 带帧间一致性的地理四叉树（替代 Tessellator 全量重建）
@@ -500,6 +510,33 @@ private:
     // 去重后的工作集，避免「驱逐→下帧 miss→重请求→图源限流(429)」风暴（曾只剩棋盘）。
     // native OOM 已由 TileLoader.ready_ 高水位背压堆主，不靠本值；本值只决定远景能否驻留清晰。设备显存偏紧时可下调。
     static constexpr size_t kMaxTextureBytesPerLayer = 256ull * 1024 * 1024;
+
+    // @Jin 单帧纹理上传预算由所有瓦片层共享；交互期低预算保手势帧率，空闲期提高预算快速补齐。
+    int frameTextureUploadLimit_ = 0;
+    int frameTextureUploads_ = 0;
+    size_t frameTextureUploadBytes_ = 0;
+    size_t frameTextureUploadByteLimit_ = 0;
+
+    // @Jin 资源管线诊断：按秒聚合上传峰值、缓存、网络、连接复用、地形应用和最长绘制耗时。
+    std::chrono::steady_clock::time_point frameStartedAt_{};
+    std::chrono::steady_clock::time_point lastTileStatsLog_{};
+    bool hasTileStatsLog_ = false;
+    double maxFrameDrawMs_ = 0.0;
+    int maxFrameTextureUploads_ = 0;
+    size_t maxFrameTextureUploadBytes_ = 0;
+    uint64_t lastPipeProcessed_ = 0;
+    uint64_t lastPipeCacheHits_ = 0;
+    uint64_t lastPipeNetworkHits_ = 0;
+    uint64_t lastPipeFailures_ = 0;
+    uint64_t lastHttpRequests_ = 0;
+    uint64_t lastHttpReusedConnections_ = 0;
+    uint64_t lastHttpNewConnections_ = 0;
+    uint64_t lastHttp2Responses_ = 0;
+    uint64_t terrainApplied_ = 0;
+    uint64_t meshRebuilds_ = 0;
+    uint64_t lastTerrainApplied_ = 0;
+    uint64_t lastMeshRebuilds_ = 0;
+    size_t terrainDeferred_ = 0;
 
     int viewportWidth_ = 0;
     int viewportHeight_ = 0;
@@ -552,6 +589,7 @@ private:
     // @Jin: 不能按引擎 key 保存，否则相邻引擎瓦片引用同一服务 DEM 时会重复解码并挤占 LRU。
     std::unordered_map<uint64_t, QuantizedMeshData> terrainCache_;
     std::deque<uint64_t> terrainLru_; // 最近使用顺序（front=最旧）
+    uint64_t terrainCacheRevision_ = 1; // @Jin DEM 插入、淘汰或清空时递增，用于跳过稳态帧的签名重算。
     static constexpr size_t kMaxTerrainTiles = 240; // @Jin: 按唯一服务 DEM 条目计数，控制内存上限。
 
     // ── 地形注入队列（feature/terrain-pre）──
@@ -561,14 +599,18 @@ private:
     // 这样既免了锁住整段建网格过程，也不会有跨线程写 terrainCache_ 的数据竞争。
     struct PendingTerrain {
         int z = 0, x = 0, y = 0;
-        std::vector<uint8_t> bytes;   // 空 = 删除该 tile
+        uint64_t key = 0;             // @Jin 服务 DEM 全局去重键（Provider worker 已计算）
+        uint64_t generation = 0;      // @Jin 清空代际，阻止 clearTerrain 前启动的旧解码回灌
+        QuantizedMeshData decoded;    // @Jin 已在 worker 线程完成 quantized-mesh 解码与高度栅格化
         double lonMin = 0, latMin = 0, lonMax = 0, latMax = 0;
-        bool clearAll = false;        // true = 清空全部地形
+        bool clearAll = false;        // @Jin true = 清空全部地形
     };
     std::mutex terrainMtx_;
     std::vector<PendingTerrain> terrainPending_;
+    std::unordered_map<uint64_t, uint64_t> terrainPendingKeys_; // @Jin 服务 DEM key -> 解码代际，防重复解码。
+    uint64_t terrainGeneration_ = 0; // @Jin clearTerrain 递增，旧 worker 解码结果会因代际不符被丢弃。
     /// 消费待注入队列并写入 terrainCache_。仅 GL 线程调用（onDrawFrame 帧首）。
-    bool drainTerrainPending(); // @Jin 返回是否仍有未解码 DEM（驱动按需渲染下的连续分批解码）
+    bool drainTerrainPending(); // @Jin 返回是否仍有待应用 DEM，驱动按需渲染继续补帧。
 
     // ==================== #9 RHI 抽象层 ====================
     // 后端无关渲染硬件接口：onSurfaceCreated 中由 RHIFactory 创建（默认 GLES2Backend），
