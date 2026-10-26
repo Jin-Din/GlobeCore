@@ -47,7 +47,7 @@ inline double wrapLonDelta(double deg) {
 inline void nearestPointOfTile(const Vec3 &eye, double eyeLonDeg, double eyeLatDeg,
                                const Globe &globe,
                                double lonMin, double lonMax, double latMin, double latMax,
-                               Vec3 &outNearest, double &outDist2) {
+                               Vec3 &outNearest, double &outDist2, double surfaceHeightM = 0.0) {
     const double nLat = clampd(eyeLatDeg, latMin, latMax);
     double nLon = eyeLonDeg;
     if (nLon < lonMin || nLon > lonMax) {
@@ -55,7 +55,8 @@ inline void nearestPointOfTile(const Vec3 &eye, double eyeLonDeg, double eyeLatD
         const double dMax = std::fabs(wrapLonDelta(eyeLonDeg - lonMax));
         nLon = (dMin <= dMax) ? lonMin : lonMax;
     }
-    globe.geographicToCartesian(nLon, nLat, 0.0, outNearest);
+    // @Jin 最近点参与地平线、视锥和 SSE；地形开启时需抬到保守高程，避免近景山脊在选择阶段被剪掉。
+    globe.geographicToCartesian(nLon, nLat, surfaceHeightM, outNearest);
     const Vec3 d = outNearest - eye;
     outDist2 = d.dot(d);
 }
@@ -73,6 +74,8 @@ struct SubdivCtx {
     double viewportHeight = 1.0;
     double detailFactor = 1.0;
     double R = 0.0;
+    // @Jin 当前已加载地形的全局保守高程；宁多留瓦片交给深度测试，也不能误删近景地形。
+    double surfaceMarginM = 0.0;
     const Globe *globe = nullptr;
 };
 
@@ -118,7 +121,8 @@ void subdivide(int z, int x, int y, const SubdivCtx &c, std::vector<GlobeTile> &
         testHorizon(nearest);
         for (int i = 0; i < 3; ++i) {
             for (int j = 0; j < 3; ++j) {
-                c.globe->geographicToCartesian(lonArr[i], latArr[j], 0.0, p);
+                // @Jin 视锥 AABB 与地平线采样使用同一地形安全壳，覆盖 DEM 抬升后的真实顶点范围。
+                c.globe->geographicToCartesian(lonArr[i], latArr[j], c.surfaceMarginM, p);
                 if (p.x < xmin) xmin = p.x; if (p.x > xmax) xmax = p.x;
                 if (p.y < ymin) ymin = p.y; if (p.y > ymax) ymax = p.y;
                 if (p.z < zmin) zmin = p.z; if (p.z > zmax) zmax = p.z;
@@ -128,12 +132,12 @@ void subdivide(int z, int x, int y, const SubdivCtx &c, std::vector<GlobeTile> &
         if ((lonMax - lonMin) > 180.0) {
             const double latC = 0.5 * (latMin + latMax);
             const double lonC = 0.5 * (lonMin + lonMax);
-            c.globe->geographicToCartesian(lonC + 90.0, latC, 0.0, p);
+            c.globe->geographicToCartesian(lonC + 90.0, latC, c.surfaceMarginM, p);
             if (p.x < xmin) xmin = p.x; if (p.x > xmax) xmax = p.x;
             if (p.y < ymin) ymin = p.y; if (p.y > ymax) ymax = p.y;
             if (p.z < zmin) zmin = p.z; if (p.z > zmax) zmax = p.z;
             testHorizon(p);
-            c.globe->geographicToCartesian(lonC - 90.0, latC, 0.0, p);
+            c.globe->geographicToCartesian(lonC - 90.0, latC, c.surfaceMarginM, p);
             if (p.x < xmin) xmin = p.x; if (p.x > xmax) xmax = p.x;
             if (p.y < ymin) ymin = p.y; if (p.y > ymax) ymax = p.y;
             if (p.z < zmin) zmin = p.z; if (p.z > zmax) zmax = p.z;
@@ -141,11 +145,11 @@ void subdivide(int z, int x, int y, const SubdivCtx &c, std::vector<GlobeTile> &
         }
         // 极冠补点（外推后 latMax/latMin 可能已为 90/-90，采样点自然覆盖极冠）
         if (isNorthPolar) {
-            c.globe->geographicToCartesian(0.0, 90.0, 0.0, p);
+            c.globe->geographicToCartesian(0.0, 90.0, c.surfaceMarginM, p);
             testHorizon(p);
         }
         if (isSouthPolar) {
-            c.globe->geographicToCartesian(0.0, -90.0, 0.0, p);
+            c.globe->geographicToCartesian(0.0, -90.0, c.surfaceMarginM, p);
             testHorizon(p);
         }
     }
@@ -197,7 +201,8 @@ void subdivide(int z, int x, int y, const SubdivCtx &c, std::vector<GlobeTile> &
             tileToBounds(z + 1, cc.cx, cc.cy, clonMin, clonMax, clatMin, clatMax);
             Vec3 np; double nd2 = 0.0;
             nearestPointOfTile(c.eye, c.eyeLonDeg, c.eyeLatDeg, *c.globe,
-                               clonMin, clonMax, clatMin, clatMax, np, nd2);
+                               clonMin, clonMax, clatMin, clatMax, np, nd2,
+                               c.surfaceMarginM);
             cc.d2 = nd2;
         }
     }
@@ -215,7 +220,8 @@ void subdivide(int z, int x, int y, const SubdivCtx &c, std::vector<GlobeTile> &
 
 void GeographicQuadtree::buildVisibleTiles(const TessCamera &cam, int targetLevel, int maxLevel,
                                           double tanHalfFov, int viewportHeightPx, double detailFactor,
-                                          const Globe &globe, std::vector<GlobeTile> &out) {
+                                          const Globe &globe, std::vector<GlobeTile> &out,
+                                          double terrainCullMarginM) {
     if (viewportHeightPx <= 0) { out.clear(); return; }
     if (targetLevel < 0) targetLevel = 0;
     if (maxLevel < 0) maxLevel = 0;
@@ -230,7 +236,8 @@ void GeographicQuadtree::buildVisibleTiles(const TessCamera &cam, int targetLeve
     // @Jin 朝向变化、离地高度缩放及明显平移都必须重建；旧逻辑在 50 km 高度允许约 64 km 位移，
     // @Jin 倾斜/缩放后仍复用旧叶集，真机表现为中心影像带之外出现大片黑区。
     if (hasPrev_ && !cameraChangedSignificantly(cam, eyeAlt, tanHalfFov, viewportHeightPx,
-                                                 targetLevel, maxLevel, detailFactor)) {
+                                                 targetLevel, maxLevel, detailFactor,
+                                                 terrainCullMarginM)) {
         out = prevVisible_; // 复用上帧可见叶集（含极冠外推后的经纬度边界）
         return;
     }
@@ -244,6 +251,8 @@ void GeographicQuadtree::buildVisibleTiles(const TessCamera &cam, int targetLeve
     c.eyeLatDeg = eyeLatDeg;
     const double eyeLen = cam.eye.length();
     c.R = globe.equatorialRadius();
+    // @Jin 只接受非负余量；首批 DEM 注入后，下一帧四叉树会因余量变化自动重建。
+    c.surfaceMarginM = terrainCullMarginM > 0.0 ? terrainCullMarginM : 0.0;
     if (eyeLen > 1e-12) c.eyeDir = cam.eye * (1.0 / eyeLen);
     c.eyeLen = eyeLen;
     c.targetLevel = targetLevel;
@@ -266,16 +275,23 @@ void GeographicQuadtree::buildVisibleTiles(const TessCamera &cam, int targetLeve
     prevTargetLevel_ = targetLevel;
     prevMaxLevel_ = maxLevel;
     prevDetailFactor_ = detailFactor;
+    prevTerrainCullMarginM_ = c.surfaceMarginM;
     hasPrev_ = true;
 }
 
 bool GeographicQuadtree::cameraChangedSignificantly(const TessCamera &cam, double eyeAlt,
                                                     double tanHalfFov, int viewportH,
                                                     int targetLevel, int maxLevel,
-                                                    double detailFactor) const {
+                                                    double detailFactor,
+                                                    double terrainCullMarginM) const {
     // 参数变更 → 必须全量重建
     if (viewportH != prevViewportH_ || targetLevel != prevTargetLevel_ ||
         maxLevel != prevMaxLevel_ || detailFactor != prevDetailFactor_) return true;
+    // @Jin 地形从无到有或最大高程明显变化时，旧的海拔 0 可见叶集不能继续复用。
+    if (std::fabs((terrainCullMarginM > 0.0 ? terrainCullMarginM : 0.0) -
+                  prevTerrainCullMarginM_) > 1.0) {
+        return true;
+    }
     // FOV 变更（缩放手势会改 fov）
     if (std::fabs(tanHalfFov - prevTanHalfFov_) > 1e-6) return true;
 

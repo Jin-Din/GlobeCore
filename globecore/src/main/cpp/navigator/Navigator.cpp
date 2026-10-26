@@ -50,6 +50,14 @@ void Navigator::setDisplayDensity(double density) {
     densityFactor_ = density > 0.0 ? density : 1.0;
 }
 
+void Navigator::setTerrainSurfaceHeights(double targetHeightM, double safetyHeightM) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    // @Jin 只接受非负高度；地形关闭或当前中心无 DEM 覆盖时归零，相机模型自动回到椭球面。
+    terrainTargetHeightM_ = targetHeightM > 0.0 ? targetHeightM : 0.0;
+    terrainSafetyHeightM_ = std::max(terrainTargetHeightM_,
+                                     safetyHeightM > 0.0 ? safetyHeightM : 0.0);
+}
+
 void Navigator::setDetailControl(double detailControl) {
     std::lock_guard<std::mutex> lk(mtx_);
     detailControl_ = detailControl > 0.0 ? detailControl : 1.0;
@@ -81,8 +89,10 @@ Navigator::Camera3D Navigator::camera3DUnlocked() const {
     Camera3D c;
     if (viewportWidth_ <= 0 || viewportHeight_ <= 0) return c; // valid=false
     const Wgs84Globe &g = Wgs84Globe::instance();
-    g.geographicToCartesian(centerLon_, centerLat_, altitude_, c.eye);
-    g.geographicToCartesian(centerLon_, centerLat_, 0.0, c.center);
+    // @Jin 目标点抬到 DEM 表面后，altitude_ 的语义在 3D 下为“相对目标地形表面的高度”。
+    const double terrainTargetHeight = terrainTargetHeightM_;
+    g.geographicToCartesian(centerLon_, centerLat_, terrainTargetHeight + altitude_, c.eye);
+    g.geographicToCartesian(centerLon_, centerLat_, terrainTargetHeight, c.center);
     // 局部 ENU 基准（单位向量）：法向 n、东 e、北 north
     const double lat = centerLat_ * kPi / 180.0;
     const double lon = centerLon_ * kPi / 180.0;
@@ -120,16 +130,22 @@ Navigator::Camera3D Navigator::camera3DUnlocked() const {
         }
         const Vec3 uDir = c.up; // 水平屏幕上方（已归一、⟂ nrm）
         const Vec3 forward = uDir * std::sin(t) - nrm * std::cos(t); // 单位视线（由 -nrm 向地平线倾 t，指向 T）
-        c.eye = c.center - forward * (altitude_ / std::cos(t));      // 目标不动，眼后退且保持眼高
+        constexpr double kMinTerrainClearanceM = 150.0;
+        // @Jin 若当前视野缓存内的山脊高于目标点，强制增加斜距，保证眼点始终位于安全地形壳之上。
+        const double altitudeAboveTerrain = std::max(
+            altitude_, terrainSafetyHeightM_ - terrainTargetHeight + kMinTerrainClearanceM);
+        const double slantDistance = altitudeAboveTerrain / std::cos(t);
+        c.eye = c.center - forward * slantDistance; // 目标不动，眼后退且保持眼高
         c.up = uDir * std::cos(t) + nrm * std::sin(t);
     }
     c.forward = (c.center - c.eye).normalized();
     c.view = Matrix4::lookAt(c.eye, c.center, c.up);
     const double aspect = static_cast<double>(viewportWidth_) / static_cast<double>(viewportHeight_);
     const double fovRad = fieldOfViewDeg_ * kPi / 180.0;
-    double nearD = altitude_ > 200.0 ? altitude_ * 0.02 : 0.5;
+    const double eyeToTarget = (c.center - c.eye).length();
+    double nearD = eyeToTarget > 200.0 ? eyeToTarget * 0.02 : 0.5;
     if (nearD <= 0.0) nearD = 1.0;
-    const double farD = altitude_ + 2.2 * Wgs84Globe::A; // 覆盖到地平线及背面
+    const double farD = eyeToTarget + 2.2 * Wgs84Globe::A; // 覆盖到地平线及背面
     c.nearDistance = nearD;
     c.farDistance = farD;
     c.proj = Matrix4::perspective(static_cast<float>(fovRad), static_cast<float>(aspect),

@@ -30,7 +30,7 @@ SDK**。
 | 缓存 | 瓦片缓存双后端：`cacheDir` 以 `.mbtiles` 结尾走 SQLite **MBTiles 单文件**（WAL、标准 tiles/metadata 表、TMS y 翻转、扩展列 `added_at` 入库时间，老库自动 ALTER 补列），否则按 `<cacheDir>/<z>/<x>_<y>.tile` 目录落盘；2D/3D 纹理缓存同键复用；取瓦片走 native 后台线程池，就绪异步上屏 | 同上（`cacheDir`） |
 | 本地影像 | tif/img 等 GDAL 可打开格式，双通路：`addRasterLayer` native 重投影后按全球墨卡托即时切片并回写缓存复用（级别由栅格分辨率自动推算）；`addRasterImageLayer` 整幅直读单张贴图按 WGS84 四至贴面（UI 线程零 GDAL 立即返回，超 GL 纹理/内存帽沿 overviews 降采样，全幅 sidecar 磁盘缓存二次打开秒级就绪） | `addRasterLayer` / `addRasterImageLayer` |
 | 三维地形 | quantized-mesh v1.0 双通路：底层保留 `setTerrainTile/clearTerrain` 注入接口；共享 C++ `CesiumTerrainProvider` 已由 native 直接读取相机视口、中心优先生成 DEM 任务，并完成 `layer.json` 解析、EPSG:4326/TMS 与墨卡托 bbox 求交、磁盘缓存、并发下载、重试、去重和流式注入；Harmony NAPI/HAR 与 Android JNI/Kotlin 均暴露同名门面。宿主只注入 `baseUrl/cacheDir/maxZoom/concurrency/tileRadius/headers`，不绑定服务地址或 token；native 按真实 bbox 全局共享覆盖多块 DEM，索引按 high-watermark 解码，DEM 逐帧削峰、地形瓦片静态 VBO（LRU），仅 3D 球体生效；Android/Harmony/Qt 统一生命周期事件（元数据、开始、首块、进度、完成、错误、开关）由平台桥接转投宿主线程 | `configureTerrainProvider` / `setTerrainProviderEnabled` / `refreshTerrainProvider` / `terrainProviderStatus` / `setOnTerrainProviderEventListener` / Qt `terrainProviderEvent` |
-| 瓦片调度 | 后台线程池取瓦片（先盘后网、原子写盘、失败冷却退避），GL 线程仅异步上传并按帧限额；P0-2 exp1f 后视口代际（view-generation）只推进代际、不再立即清空队列/ready，同 key 排队或在途任务可原地升级，已解码待上传瓦片用 ready key 去重；所有瓦片层共享每帧 4 张 / 1MiB 上传预算，当前视口优先、最近旧视口随后补齐；在线图源先投 z-2/z-1 祖先粗瓦，再以屏幕中心优先替换叶子，3D 叶瓦片请求限制为交互 96 块、空闲 192 块；交互期增加 LOD 迟滞，优先保持祖先粗图连续覆盖，大倾角近景按相机三维距离排队并保证全部可见叶至少具备 z-2 粗祖先覆盖，显著压低无效请求量与“先黑块再出图/近景黑面”的观感；3D 地理四叉树帧间缓存同时校验眼点、离地高度尺度与相机 forward/up，倾斜、旋转、缩放后立即重建可见叶集，避免复用旧视锥造成周边黑区 | `addTileLayer` |
+| 瓦片调度 | 后台线程池取瓦片（先盘后网、原子写盘、失败冷却退避），GL 线程仅异步上传并按帧限额；P0-2 exp1f 后视口代际（view-generation）只推进代际、不再立即清空队列/ready，同 key 排队或在途任务可原地升级，已解码待上传瓦片用 ready key 去重；所有瓦片层共享每帧 4 张 / 1MiB 上传预算，当前视口优先、最近旧视口随后补齐；在线图源先投 z-2/z-1 祖先粗瓦，再以屏幕中心优先替换叶子，3D 叶瓦片请求限制为交互 96 块、空闲 192 块；交互期增加 LOD 迟滞，优先保持祖先粗图连续覆盖，大倾角近景按相机三维距离排队并保证全部可见叶至少具备 z-2 粗祖先覆盖，显著压低无效请求量与“先黑块再出图/近景黑面”的观感；3D 地理四叉树帧间缓存同时校验眼点、离地高度尺度、地形安全高程与相机 forward/up，倾斜、旋转、缩放后立即重建可见叶集；exp1h 起地平线/视锥/AABB/SSE 使用 DEM 安全壳，3D 相机目标点落在真实地形表面并按附近山脊保留最小净空，避免复用旧视锥或眼点穿入山体造成黑区 | `addTileLayer` |
 | 矢量 | shp/kml/kmz/dwg/dxf 等 OGR 可打开格式**直读文件**→ 重投影 WGS84 → earcut 三角剖分；面填充/描边/线/点/图标 billboard/文字标注（字形图集，可复用系统 CJK 字体，零 APK 增量） | `addVectorLayer` / `VectorStyle` / `setFontPath` |
 | 大数据矢量 | 按屏幕范围增量重载（Swap-on-ready，重载期无空窗）、单次要素预算、加载中状态轮询、按级别隐藏、样式变更就地换层不闪图 | `updateVectorExtent` / `hasVectorLoading` / `setVectorMinLevel` / `setVectorLayerVisible` / `removeVectorLayer` |
 | 拾取与属性 | 单击命中 `[layerIndex, fid]`；回取要素 WGS84 几何用于选中高亮；屏幕点→经纬度（采集/测量加点）；范围过滤 + 字段白名单 + 几何简化读取、按 FID 全字段回取、属性 SQL 查询、要素计数、按 FID 写回源文件 | `pickVector` / `featureGeometry` / `screenToGeo` / `NativeVector` |
@@ -552,6 +552,16 @@ console.info(view.terrainProviderStatus());
 - 真机结果：复现“太白山 → 地形 → tilt=55° → 短放大到正常近景大倾角”后，连续帧和静止帧未见近景黑面，`placeholder=0`；热缓存地形 `182/182` 磁盘命中、`networkRequests=0`、`failures=0`。
 - 边界：自动测试中持续放大到相机贴入/穿入山体时，画面仍可能因地形遮挡呈黑色，此时 `placeholder=0`，不是影像缺瓦；后续应单独增加“相机相对地形表面的最小安全高度/有效倾角钳制”。
 
+### 实验性地形安全剔除与相机安全高度（P0-2 exp1h）
+
+> 实验状态：本轮对应构建 ID `v0.1.3-20261026-loadsmooth-exp1h`。exp1g 解决了影像 placeholder 黑块，但真机继续在“3D + 地形 + 大倾角近景”看到黑面；新日志确认为 `placeholder=0`，根因转为地形几何剔除和相机安全高度。仍按实验提交管理，若近景最小观察距离或请求量不符合预期，可整体回退本提交。
+
+- 根因一：`GeographicQuadtree` 的地平线、视锥 AABB、最近点和 SSE 均按海拔 0 采样；太白山 DEM 最高约 2.7km，近景大倾角时真实山脊会越过椭球面包围盒，导致覆盖屏幕下缘的地形/影像叶瓦片在选择阶段被误剔除。
+- 地形安全壳：Renderer 从当前 `terrainCache_` 求最大 DEM 高程并附加 300m 余量（9000m 安全帽），通过新增 `terrainCullMarginM` 参数传给四叉树；最近点、3×3 AABB、极冠补点、子瓦片 DFS 距离和帧间缓存失效均使用该安全高程。宁可保守多保留瓦片交给深度测试，也不误删近景地形。
+- 根因二：连续放大后眼点可能进入或贴近附近山脊，此时影像仍已绘制（`placeholder=0`），但视野会被背光山体占满而呈整屏暗面。Renderer 每帧在生成 3D 相机前把目标点 DEM 高度和当前缓存安全高同步给 Navigator。
+- 相机安全高度：3D 目标点改为真实 DEM 表面，`altitude` 表示相对目标地形表面的高度；倾斜时若全局地形安全壳高于目标点，则按至少 150m 净空增加斜距，防止眼点穿入山脊。near/far 同步改用实际眼点—目标斜距，避免近距离地形被近裁剪面切掉。
+- 真机结果：冷启动确认构建 ID 后执行“秦岭太白山 → 加载地形 → tilt=55° → 放大 2 档”，地形 `182/182`、`failures=0`、`placeholder=0`，屏幕下缘近景连续；按钮重排后不遮挡观察区域。自动连续放大到地形 z15 时，服务端会出现一批 182 个越界/限流失败，属于后续 Provider 可用级别与请求治理任务，不影响本次正常近景机位结论。
+
 ### 演示工程 globecore-harmonyos
 
 DevEco Studio（5.0+，API 12 SDK）打开 `globecore-harmonyos/`，`ohpm install` 后直接 run `entry`：
@@ -608,6 +618,7 @@ cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build b
   ⑪ **P0-2 exp1e：瓦片/地形加载期交互平滑实验（实验性）**：新增 180ms 交互窗口；所有瓦片层共享 4 张/1MiB 单帧上传预算；TileLoader 不再随相邻视口立即清空队列和 ready，pending/inflight 同 key 可升级代际，新增 ready key 去重；2D 中心优先、3D 交互/空闲分别只请求 96/192 块叶瓦片并保持祖先粗瓦先覆盖；quantized-mesh 解码移到 Provider worker，GL 线程按 2/4 块应用 DEM，地形网格改按局部 DEM signature + revision 精确失效并按 2/4 个预算重建；新增 TILEPIPE 与 HTTP 连接复用诊断。真机冷地形 182/182、失败 0、首块 58ms、总耗时 834ms，DEM 到达秒 frameMaxMs=14.59ms，连续拖动 frameMaxMs=23.58ms。本轮为实验提交，效果不佳可整笔 revert，详见“实验性瓦片/地形加载平滑调度”。
   ⑫ **P0-2 exp1f：交互 LOD 迟滞与低分辨率地形后备（实验性）**：3D 手势中使用最近非交互帧的稳定瓦片 LOD 做细化迟滞，放大时不追逐瞬态高清叶、缩小时允许父级粗图覆盖，避免自身高清纹理与祖先纹理短暂同时不可用时绘制深色占位；迟滞状态按图层 `maxLevel` 隔离，并在 surface 重建、纹理清空、图源切换和 release 时复位。地形网格预算不足时仍采样已有 DEM，只从 24×24 降为 8×8，不再生成零高程平面；新增 `placeholder/ancestor/leaf/fallbackMesh` 诊断。真机太白山地形开启双指放大/缩小及关闭地形仅影像三组缩放均记录 `placeholder=0`；冷启动全球首秒在根瓦到达前仍有占位，后续需通过低级别瓦预取/内置或底色过渡单独优化。详见“实验性交互 LOD 迟滞与低分辨率地形后备”。
   ⑬ **P0-2 exp1g：大倾角近景黑面修复（实验性）**：3D 可见叶改为按地形表面中心到相机的三维距离排序，保证屏幕下方最近区域优先获得高清叶；底图 z-2 粗祖先请求覆盖全部可见叶，预算外近景瓦片不再因“自身高清纹理和祖先纹理均缺失”而永久绘制深色占位；排序距离通过 scratch 数组每帧预计算，地形 VBO LRU 从 512 提到 1024，避免 700+ 可见叶时网格缓存反复淘汰重建。真机太白山正常近景大倾角视角下 `placeholder=0`、近景无黑面；相机穿入山体的过近机位另列地形安全高度任务。详见“实验性大倾角近景黑面修复”。
+  ⑭ **P0-2 exp1h：地形安全剔除与相机安全高度（实验性）**：四叉树地平线/视锥/AABB/SSE 接收 DEM 安全高程，地形抬高后的近景山脊不再按海拔 0 被误剔除；Renderer 每帧向 Navigator 同步目标点地形高和全局安全高，3D 目标点落在 DEM 表面，倾斜时保持至少 150m 净空，near/far 改用实际斜距。真机太白山地形开启、55° 倾角、近景放大时 `182/182、failures=0、placeholder=0`，屏幕下缘连续无黑面。详见“实验性地形安全剔除与相机安全高度”。
   > 维护约定：**每次改动定稿后同步更新本版本说明**（与代码提交同批），未发版工作累积在本条，发版时再改版本号与“当前发布”标记。
 - **0.1.4.0（当前发布）**：三项合入——
   ① **GeoPackage 工程读写**：新增 `bridge/geopackage_io.cpp`，OGR GPKG 驱动实现工程文件（七表：tracks / measures / photos / media_groups / survey_plots / project_meta / layer_refs）整体读写，Kotlin/ArkTS 侧以 JSON 跨桥传输；写入整文件 tmp+rename **原子替换**，五张要素表 **SetFID 落盘**使记录 id 持久化（重写不重编号），读侧缺列宽容回退、写侧整文件重建自动升级 schema；

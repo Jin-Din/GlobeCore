@@ -70,6 +70,9 @@ public:
     /// 设置视口尺寸（像素），由 GLSurfaceView onSurfaceChanged 传入
     void setViewport(int widthPx, int heightPx);
 
+    /// @Jin 每帧由 Renderer 注入当前目标点地形高与附近安全高，防止 3D 眼点穿入山体。
+    void setTerrainSurfaceHeights(double targetHeightM, double safetyHeightM);
+
     /// 设置相机：以 [Camera] 值对象整体写入（对应 参考实现 Camera）。除中心/高度外，
     /// 一并记录 heading/tilt/roll/altitudeMode（当前 2D 渲染暂未消费、仅建模留存），并用其 fieldOfView
     /// 参与 altitude↔zoom 换算。加锁，可任意线程调用。
@@ -206,6 +209,9 @@ private:
     // maxLevel 由各图层逐层传入 tileLevel(maxLevel)，不再存全局态。
     double densityFactor_ = 1.0;
     double detailControl_ = 1.0;
+    // @Jin 3D 相机把目标点抬到真实 DEM 表面；safety 是当前地形缓存中的保守最高点。
+    double terrainTargetHeightM_ = 0.0;
+    double terrainSafetyHeightM_ = 0.0;
     // @Jin 手势静默窗口：最后一次 pan/zoom/rotate/tilt 后短时间内仍视为交互中，避免抬手瞬间预算突增造成跳帧。
     std::chrono::steady_clock::time_point lastInteractionTime_{};
     bool hasInteractionTime_ = false;

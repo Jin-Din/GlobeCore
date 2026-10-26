@@ -36,7 +36,8 @@ public:
     /// 接口与 Tessellator::buildVisibleTiles 对齐，可直接替换。
     void buildVisibleTiles(const TessCamera &cam, int targetLevel, int maxLevel,
                            double tanHalfFov, int viewportHeightPx, double detailFactor,
-                           const Globe &globe, std::vector<GlobeTile> &out);
+                           const Globe &globe, std::vector<GlobeTile> &out,
+                           double terrainCullMarginM = 0.0);
 
     /// 清除帧间缓存（上下文重建/换图源时调用）
     void clear();
@@ -53,12 +54,14 @@ private:
     int prevTargetLevel_ = -1;
     int prevMaxLevel_ = -1;
     double prevDetailFactor_ = -1.0;
+    // @Jin 地形剔除余量变化（首批 DEM 到达或清空地形）也必须重建可见叶集。
+    double prevTerrainCullMarginM_ = -1.0;
     std::vector<GlobeTile> prevVisible_;
 
     /// @Jin 判断相机是否发生会影响可见叶集的变化；朝向变化必须立即重建，眼点阈值按离地高度缩放。
     bool cameraChangedSignificantly(const TessCamera &cam, double eyeAlt, double tanHalfFov,
                                     int viewportH, int targetLevel, int maxLevel,
-                                    double detailFactor) const;
+                                    double detailFactor, double terrainCullMarginM) const;
 };
 
 } // namespace globecore

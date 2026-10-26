@@ -47,7 +47,7 @@ namespace globecore {
  */
 class Renderer {
 public:
-    Renderer(const Navigator &navigator, const std::vector<std::unique_ptr<TileLayer>> &layers,
+    Renderer(Navigator &navigator, const std::vector<std::unique_ptr<TileLayer>> &layers,
              const std::vector<std::unique_ptr<VectorLayer>> &vectorLayers,
              const std::vector<std::unique_ptr<RasterImageLayer>> &rasterImageLayers);
     ~Renderer();
@@ -125,6 +125,10 @@ private:
     /// 查询某经纬度处的地形高度（米，椭球面以上）。
     /// @Jin: 3D 渲染瓦片存在多级 LOD，查询按 DEM bbox 覆盖关系匹配，而不是要求渲染瓦片 key 与注入 key 相同。
     double sampleTerrainHeight(const GlobeTile &tile, double lon, double lat) const;
+    /// @Jin 从当前 DEM 集合求全局保守高程，供四叉树把地形抬升纳入地平线/视锥剔除。
+    double terrainCullMarginM() const;
+    /// @Jin 在生成 3D 相机前同步目标地形高与安全壳，避免放大时眼点落入山脊。
+    void updateNavigatorTerrainFrame();
 
 private:
     /// 瓦片 (z,x,y) 打包为唯一键
@@ -309,7 +313,7 @@ private:
     /// 释放全部全幅层纹理（须在 GL 线程调用）。
     void releaseRasterImageGl();
 
-    const Navigator &nav_;
+    Navigator &nav_; // @Jin exp1h 改为可变引用：GL 帧内需把 DEM 安全高度回传给相机模型。
     // 图层向量（由 GlobeEngine 持有，本类引用）：按加入顺序绘制，底图在前、注记 overlay 在后
     const std::vector<std::unique_ptr<TileLayer>> &layers_;
     // 矢量图层向量（由 GlobeEngine 持有，本类引用）：绘制在底图瓦片层与注记 overlay 层之间

@@ -26,7 +26,7 @@ namespace globecore {
 // 每次准备重建 HAR 前，把 GLOBECORE_BUILD_ID 改成一个全新的唯一串（例如末尾序号 +1，或带上你自定义的标记）。
 // 装机日志出现该串 = 跑的确实是你这次改过、并重新构建 + 重新链接的 HAR；
 // 未出现 / 仍是旧串 = app 还在用旧 HAR（引擎源码根本没进设备）。改完务必：重建 HAR → app Sync/ohpm 重新链接 → 卸载重装。
-#define GLOBECORE_BUILD_ID "v0.1.3-20261026-loadsmooth-exp1g"
+#define GLOBECORE_BUILD_ID "v0.1.3-20261026-loadsmooth-exp1h"
 
 // 祖先链请求深度帽：叶子只向上请求 4 级。更深的祖先拉伸 >16× 已无兜底价值，而链条请求数是
 // 数量倍增器；尤其无金字塔栅格源，低级别粗瓦源窗口≈整幅（单块秒级～十几秒），砍深度直接减掉
@@ -1021,7 +1021,7 @@ void resetVectorUpload(VectorLayer &vl, bool del) {
 
 } // namespace
 
-Renderer::Renderer(const Navigator &navigator, const std::vector<std::unique_ptr<TileLayer>> &layers,
+Renderer::Renderer(Navigator &navigator, const std::vector<std::unique_ptr<TileLayer>> &layers,
                    const std::vector<std::unique_ptr<VectorLayer>> &vectorLayers,
                    const std::vector<std::unique_ptr<RasterImageLayer>> &rasterImageLayers)
     : nav_(navigator), layers_(layers), vectorLayers_(vectorLayers), rasterImageLayers_(rasterImageLayers) {}
@@ -1397,6 +1397,12 @@ bool Renderer::onDrawFrame() {
     // 地形注入：先把非 GL 线程排入的 DEM 数据落到 terrainCache_（GL 线程独占写）
     // 置于最前，2D/3D 两条通路都能在同一帧内看到新注入的地形。
     const bool moreTerrain = drainTerrainPending();
+    if (nav_.viewMode() == Navigator::ViewMode::MODE_3D) {
+        updateNavigatorTerrainFrame();
+    } else {
+        // @Jin 2D 不消费地形高度；切回 2D 时清零，避免模式共享相机状态带入无效抬升。
+        nav_.setTerrainSurfaceHeights(0.0, 0.0);
+    }
     // 视图模式分发：3D 球体走独立管线（透视+深度+贴球网格，复用瓦片纹理缓存），2D 正交通路零回归
     // @Jin 还有待应用 DEM 或延后的地形网格时强制再请一帧，保证按需渲染下平滑补齐。
     if (nav_.viewMode() == Navigator::ViewMode::MODE_3D) {
@@ -1859,8 +1865,11 @@ bool Renderer::renderGlobeLayer3D(size_t layerIndex, const Navigator::Camera3D &
     tc.frustumPlanes = cam.frustumPlanes; // 直接采用 Navigator 预提的 double 平面
     // #11 用带帧间一致性的地理四叉树替代 Tessellator 全量重建：
     // 相机微动时复用上帧叶集（零递归），极冠外推覆盖 85°~90° 空洞。
+    // @Jin exp1h：四叉树原先只按椭球面做地平线/视锥剔除，太白山近景大倾角时山脊会被整块误删。
+    const double terrainCullMargin = terrainCullMarginM();
     geoQuadtree_.buildVisibleTiles(tc, quadtreeLevel, layer.maxLevel, tanHalf, viewportHeight_,
-                                   nav_.lodDetailFactor(), Wgs84Globe::instance(), globeTilesScratch_);
+                                   nav_.lodDetailFactor(), Wgs84Globe::instance(), globeTilesScratch_,
+                                   terrainCullMargin);
 
     // @Jin 3D 可见叶可远超纹理容量；交互期只请求 96 块、空闲期 192 块，避免远景请求风暴触发限流。
     const size_t kGlobeLeafRequestBudget = interacting ? 96U : 192U;
@@ -2207,6 +2216,33 @@ void Renderer::setSunDirection(const Vec3 &dir) {
     sunDir_ = len > 1e-9 ? dir / len : Vec3{1.0, 0.0, 0.3};
     // 外部显式指定太阳方向 → 退出「跟随相机」模式，之后 3D 每帧不再用相机位置覆盖 sunDir_。
     sunFollowCamera_ = false;
+}
+
+double Renderer::terrainCullMarginM() const {
+    float maxHeight = 0.0f;
+    for (const auto &entry : terrainCache_) {
+        if (entry.second.aboveMax > maxHeight) maxHeight = entry.second.aboveMax;
+    }
+    if (!(maxHeight > 0.0f)) return 0.0;
+    // @Jin 300m 余量覆盖栅格化误差、邻接瓦片和山脊边界；9000m 是实验阶段的全球安全帽。
+    return std::min(static_cast<double>(maxHeight) + 300.0, 9000.0);
+}
+
+void Renderer::updateNavigatorTerrainFrame() {
+    const Camera camera = nav_.camera();
+    double targetHeight = 0.0;
+    double safetyHeight = 0.0;
+    for (const auto &entry : terrainCache_) {
+        const QuantizedMeshData &dem = entry.second;
+        safetyHeight = std::max(safetyHeight, static_cast<double>(dem.aboveMax) + 300.0);
+        if (camera.longitude >= dem.lonMin && camera.longitude <= dem.lonMax &&
+            camera.latitude >= dem.latMin && camera.latitude <= dem.latMax) {
+            // @Jin 目标点高度必须取真实插值，安全高才使用 DEM 头部的区域最大值。
+            targetHeight = std::max(targetHeight, dem.sampleHeight(camera.longitude, camera.latitude));
+        }
+    }
+    safetyHeight = std::min(safetyHeight, 9000.0);
+    nav_.setTerrainSurfaceHeights(targetHeight, std::max(targetHeight, safetyHeight));
 }
 
 double Renderer::sampleTerrainHeight(const GlobeTile &tile, double lon, double lat) const {
