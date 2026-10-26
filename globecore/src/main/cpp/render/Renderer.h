@@ -487,10 +487,14 @@ private:
         uint64_t lastUsed = 0;                // LRU 时间戳（frameTick_）
     };
     std::unordered_map<uint64_t, TileGlobeGpuMesh> tileGlobeMesh_;
-    static constexpr size_t kMaxTileGlobeMesh = 512; // @Jin ≤544v×32B×512≈9MB 显存上限
+    static constexpr size_t kMaxTileGlobeMesh = 1024; // @Jin exp1g：大倾角近景可见叶约 700+；24×24 地形 VBO 上限约 24MiB，避免 LRU 每帧抖动重建。
     int globeMeshRebuildBudget_ = 0; // @Jin 单帧允许重建的地形网格数，避免 DEM 到达时全场景 VBO 同时重传。
     bool globeMeshRebuildDeferred_ = false; // @Jin 本帧有地形网格延后，驱动 WHEN_DIRTY 继续补帧。
     std::vector<GlobeTile> globeTilesScratch_; // 可见叶瓦片 scratch（逐层复用，避免反复堆分配）
+    // @Jin exp1g：3D 瓦片按相机距离排序时复用索引、距离和重排 scratch，避免比较器重复扫描 DEM。
+    std::vector<double> globeTilePriorityDistance2_;
+    std::vector<size_t> globeTilePriorityOrder_;
+    std::vector<GlobeTile> globeTilesReorderedScratch_;
     std::vector<float> globeMeshScratch_;      // 单瓦片网格 scratch（Pass B 逐瓦片上传用）
     GeographicQuadtree geoQuadtree_;           // #11 带帧间一致性的地理四叉树（替代 Tessellator 全量重建）
 

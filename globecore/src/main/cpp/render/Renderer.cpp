@@ -26,7 +26,7 @@ namespace globecore {
 // 每次准备重建 HAR 前，把 GLOBECORE_BUILD_ID 改成一个全新的唯一串（例如末尾序号 +1，或带上你自定义的标记）。
 // 装机日志出现该串 = 跑的确实是你这次改过、并重新构建 + 重新链接的 HAR；
 // 未出现 / 仍是旧串 = app 还在用旧 HAR（引擎源码根本没进设备）。改完务必：重建 HAR → app Sync/ohpm 重新链接 → 卸载重装。
-#define GLOBECORE_BUILD_ID "v0.1.3-20261026-loadsmooth-exp1f"
+#define GLOBECORE_BUILD_ID "v0.1.3-20261026-loadsmooth-exp1g"
 
 // 祖先链请求深度帽：叶子只向上请求 4 级。更深的祖先拉伸 >16× 已无兜底价值，而链条请求数是
 // 数量倍增器；尤其无金字塔栅格源，低级别粗瓦源窗口≈整幅（单块秒级～十几秒），砍深度直接减掉
@@ -1866,9 +1866,28 @@ bool Renderer::renderGlobeLayer3D(size_t layerIndex, const Navigator::Camera3D &
     const size_t kGlobeLeafRequestBudget = interacting ? 96U : 192U;
     double focusLon = 0.0, focusLat = 0.0, focusAlt = 0.0;
     Wgs84Globe::instance().cartesianToGeographic(cam.center, focusLon, focusLat, focusAlt);
-    std::stable_sort(globeTilesScratch_.begin(), globeTilesScratch_.end(),
-                     [focusLon, focusLat](const GlobeTile &a, const GlobeTile &b) {
-                         // @Jin 先保近景高级别；同级别按瓦片中心到视点地面中心的距离排序，中心带优先补图。
+    // @Jin exp1g：大倾角近景必须按相机三维距离排队；旧口径先按 z、再按屏幕中心经纬距，
+    // @Jin 会让屏幕下方离相机最近但略偏中心的叶瓦片排在 192 个请求预算之外并长期画黑。
+    globeTilePriorityDistance2_.assign(globeTilesScratch_.size(), 0.0);
+    globeTilePriorityOrder_.resize(globeTilesScratch_.size());
+    for (size_t i = 0; i < globeTilesScratch_.size(); ++i) {
+        const GlobeTile &t = globeTilesScratch_[i];
+        const double tLon = (t.lonMin + t.lonMax) * 0.5;
+        const double tLat = (t.latMin + t.latMax) * 0.5;
+        Vec3 tileCenter{};
+        Wgs84Globe::instance().geographicToCartesian(tLon, tLat, sampleTerrainHeight(t, tLon, tLat), tileCenter);
+        const Vec3 d = tileCenter - cam.eye;
+        globeTilePriorityDistance2_[i] = d.dot(d);
+        globeTilePriorityOrder_[i] = i;
+    }
+    std::stable_sort(globeTilePriorityOrder_.begin(), globeTilePriorityOrder_.end(),
+                     [&](size_t ia, size_t ib) {
+                         const double da2 = globeTilePriorityDistance2_[ia];
+                         const double db2 = globeTilePriorityDistance2_[ib];
+                         if (std::fabs(da2 - db2) > 1.0) return da2 < db2;
+                         const GlobeTile &a = globeTilesScratch_[ia];
+                         const GlobeTile &b = globeTilesScratch_[ib];
+                         // @Jin 距离几乎相同（高空正视）时保留高级别、中心优先，兼顾常规全球视角的清晰度。
                          if (a.z != b.z) return a.z > b.z;
                          const double aLon = (a.lonMin + a.lonMax) * 0.5;
                          const double aLat = (a.latMin + a.latMax) * 0.5;
@@ -1876,10 +1895,13 @@ bool Renderer::renderGlobeLayer3D(size_t layerIndex, const Navigator::Camera3D &
                          const double bLat = (b.latMin + b.latMax) * 0.5;
                          const double aLonDiff = std::min(std::abs(aLon - focusLon), 360.0 - std::abs(aLon - focusLon));
                          const double bLonDiff = std::min(std::abs(bLon - focusLon), 360.0 - std::abs(bLon - focusLon));
-                         const double da = aLonDiff + std::abs(aLat - focusLat);
-                         const double db = bLonDiff + std::abs(bLat - focusLat);
-                         return da < db;
+                         return (aLonDiff + std::abs(aLat - focusLat)) <
+                                (bLonDiff + std::abs(bLat - focusLat));
                      });
+    globeTilesReorderedScratch_.clear();
+    globeTilesReorderedScratch_.reserve(globeTilesScratch_.size());
+    for (size_t index : globeTilePriorityOrder_) globeTilesReorderedScratch_.push_back(globeTilesScratch_[index]);
+    globeTilesScratch_.swap(globeTilesReorderedScratch_);
     const size_t leafBudget = std::min(globeTilesScratch_.size(), kGlobeLeafRequestBudget);
 
     // @Jin 3D 可见叶集稳定排序后再生成签名；同一组瓦片的补帧不清队列，相机移动导致集合变化时推进代际。
@@ -1887,8 +1909,15 @@ bool Renderer::renderGlobeLayer3D(size_t layerIndex, const Navigator::Camera3D &
 
     // @Jin 3D 请求策略只覆盖预算内叶：先铺祖先粗瓦，再请求自身纹理，预算外远景仅用已有祖先兜底。
     // @Jin 在途去重、ready 高水位和跨图层上传预算共同限制并发、内存与 GL 峰值。
+    // @Jin exp1g：高清叶只给前 192 个近景瓦片，但底图最粗的 z-2 祖先要覆盖全部可见叶。
+    // @Jin 否则大倾角下预算外近景瓦片既没有自身纹理、也没有父纹理，会静止停留在 placeholder 黑面。
+    const size_t coverageAncestorBudget = (!layer.overlay && kAncestorChainDepth >= 2)
+                                              ? globeTilesScratch_.size()
+                                              : leafBudget;
     for (int k = kAncestorChainDepth; k >= 1; --k) {
-        for (size_t i = 0; i < leafBudget; ++i) {
+        // @Jin 只对最粗祖先做全可见覆盖；z-1 仍受近景预算约束，避免每帧产生大量高清请求。
+        const size_t ancestorBudget = (k == kAncestorChainDepth) ? coverageAncestorBudget : leafBudget;
+        for (size_t i = 0; i < ancestorBudget; ++i) {
             const GlobeTile &t = globeTilesScratch_[i];
             const int ancestorLevel = t.z - k;
             if (ancestorLevel >= 0) {
