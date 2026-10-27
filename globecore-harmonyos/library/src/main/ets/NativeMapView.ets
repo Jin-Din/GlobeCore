@@ -180,6 +180,15 @@ export struct NativeMapView {
     this.requestRender();
   }
 
+  /** @Jin 由 C++ SDK 统一驱动相机动画，Harmony 宿主只传目标姿态，Android/Harmony 可共用同一 API 口径。 */
+  flyToCamera(camera: Camera, durationMs: number = 1600.0): void {
+    NativeLib.nativeFlyToCamera(this.nativeHandle,
+      camera.latitude, camera.longitude, camera.altitude,
+      camera.heading, camera.tilt, camera.roll,
+      camera.fieldOfView, Number(camera.altitudeMode), durationMs);
+    this.requestRender();
+  }
+
   /** 读回当前相机；句柄已释放/surface 未建返回 undefined */
   getCamera(): Camera | undefined {
     const pose = NativeLib.nativeGetCamera(this.nativeHandle);

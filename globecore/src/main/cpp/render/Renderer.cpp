@@ -26,7 +26,7 @@ namespace globecore {
 // 每次准备重建 HAR 前，把 GLOBECORE_BUILD_ID 改成一个全新的唯一串（例如末尾序号 +1，或带上你自定义的标记）。
 // 装机日志出现该串 = 跑的确实是你这次改过、并重新构建 + 重新链接的 HAR；
 // 未出现 / 仍是旧串 = app 还在用旧 HAR（引擎源码根本没进设备）。改完务必：重建 HAR → app Sync/ohpm 重新链接 → 卸载重装。
-#define GLOBECORE_BUILD_ID "v0.1.3-20261026-loadsmooth-exp1h"
+#define GLOBECORE_BUILD_ID "v0.1.3-20261027-drape-strokefix2"
 
 // 祖先链请求深度帽：叶子只向上请求 4 级。更深的祖先拉伸 >16× 已无兜底价值，而链条请求数是
 // 数量倍增器；尤其无金字塔栅格源，低级别粗瓦源窗口≈整幅（单块秒级～十几秒），砍深度直接减掉
@@ -2249,6 +2249,10 @@ double Renderer::sampleTerrainHeight(const GlobeTile &tile, double lon, double l
     (void)tile;
     // @Jin: 3D 叶瓦片会随屏幕误差在 z9-z12 等多级 LOD 间切换，而 ArkTS 当前只注入固定引擎级的一批 DEM；
     // @Jin: 因此这里不能再按渲染瓦片自身的 (z,x,y) 精确取缓存，需按经纬度从覆盖该点的 DEM bbox 中采样。
+    return sampleTerrainHeightLonLat(lon, lat);
+}
+
+double Renderer::sampleTerrainHeightLonLat(double lon, double lat) const {
     for (const auto &entry : terrainCache_) {
         const QuantizedMeshData &dem = entry.second;
         if (lon >= dem.lonMin && lon <= dem.lonMax && lat >= dem.latMin && lat <= dem.latMax) {
@@ -3478,8 +3482,372 @@ void Renderer::drawVectorIcons(double cwx, double cwy, double hw, const Matrix4 
 
 // ==================== P2.e 3D 矢量层：分帧流式上传（chunk + 世界 ECEF AABB，绘制侧视锥剔除，口径对齐 2D uploadVectorChunks） ====================
 
+uint64_t Renderer::overlayDrapedTerrainSignature(const VectorLayer &vl) const {
+    double xmin = 0.0, ymin = 0.0, xmax = 0.0, ymax = 0.0;
+    bool any = false;
+    auto accRel = [&](float x, float y) {
+        if (!any) { xmin = xmax = x; ymin = ymax = y; any = true; return; }
+        xmin = std::min(xmin, static_cast<double>(x)); xmax = std::max(xmax, static_cast<double>(x));
+        ymin = std::min(ymin, static_cast<double>(y)); ymax = std::max(ymax, static_cast<double>(y));
+    };
+    for (size_t i = 0; i + kColorFloatsPerVertex - 1 < vl.geom.fillVerts.size(); i += kColorFloatsPerVertex)
+        accRel(vl.geom.fillVerts[i], vl.geom.fillVerts[i + 1]);
+    auto accStroke = [&](const std::vector<float> &v) {
+        for (size_t i = 0; i + kLineFloatsPerVertex - 1 < v.size(); i += kLineFloatsPerVertex)
+            accRel(v[i], v[i + 1]);
+    };
+    accStroke(vl.geom.outlineVerts);
+    accStroke(vl.geom.lineVerts);
+    for (size_t i = 0; i + 1 < vl.geom.pointCoords.size(); i += 2)
+        accRel(vl.geom.pointCoords[i], vl.geom.pointCoords[i + 1]);
+    if (!any) return 0;
+
+    double lonMin = 0.0, latMin = 0.0, lonMax = 0.0, latMax = 0.0;
+    const double corners[4][2] = {{xmin, ymin}, {xmax, ymin}, {xmax, ymax}, {xmin, ymax}};
+    for (auto &c : corners) {
+        double lon = 0.0, lat = 0.0;
+        worldXYToGeographic(vl.geom.originWx + c[0], vl.geom.originWy + c[1], lon, lat);
+        if (&c[0] == &corners[0][0]) { lonMin = lonMax = lon; latMin = latMax = lat; }
+        lonMin = std::min(lonMin, lon); lonMax = std::max(lonMax, lon);
+        latMin = std::min(latMin, lat); latMax = std::max(latMax, lat);
+    }
+    constexpr double kPadDeg = 0.002; // @Jin 约 200m 外扩，覆盖边缘插值和 DEM 瓦片边界。
+    lonMin -= kPadDeg; lonMax += kPadDeg; latMin -= kPadDeg; latMax += kPadDeg;
+
+    // @Jin 先收集命中 DEM 瓦片的稳定 word 再排序哈希：terrainCache_ 是 unordered_map，
+    // @Jin 瓦片到达/淘汰后桶遍历顺序会变化，直接边遍历边 FNV 会让同一批 DEM 算出不同签名，
+    // @Jin 导致叠加层每帧误判“地形变了”而反复重建 VBO（真机日志可见 sig 每帧都变、疯狂重建）。
+    std::vector<uint64_t> words;
+    words.reserve(16);
+    for (const auto &entry : terrainCache_) {
+        const QuantizedMeshData &dem = entry.second;
+        if (lonMax < dem.lonMin || lonMin > dem.lonMax || latMax < dem.latMin || latMin > dem.latMax) continue;
+        // @Jin key 与区域最大高都参与签名：同一范围内新增、删除或内容替换才让 overlay 重建。
+        const uint64_t word = entry.first ^ (static_cast<uint64_t>(static_cast<int64_t>(dem.aboveMax)) * 1099511628211ULL);
+        words.push_back(word);
+    }
+    std::sort(words.begin(), words.end()); // @Jin 顺序无关，保证签名对同一组 DEM 稳定。
+    uint64_t sig = 1469598103934665603ULL;
+    for (uint64_t word : words) {
+        sig ^= word;
+        sig *= 1099511628211ULL;
+    }
+    sig ^= static_cast<uint64_t>(words.size()) * 1469598103ULL;
+    return sig;
+}
+
+void Renderer::uploadGlobeOverlayDrapedChunks(VectorLayer &vl) {
+    const VectorGeometry &geom = vl.geom;
+    const double ox = geom.originWx;
+    const double oy = geom.originWy;
+    const Vec3 anchor = worldXYToCartesian(ox, oy, 0.0);
+    vl.globeAnchor = anchor;
+
+    // @Jin 贴地偏移只取很小的固定值：真实起伏由逐顶点 DEM 高程承担，offset 仅防 z-fighting。
+    constexpr double kDrapeLiftMeters = 1.5;
+    constexpr int kMaxDrapeSubdivide = 7; // @Jin 小区域最多 128 等分，保证沟谷/山脊贴合精度。
+    constexpr double kDrapeMinEdgeMeters = 20.0; // @Jin 小区域样例的最密目标边长。
+    constexpr double kDrapeMaxEdgeCapMeters = 32000.0; // @Jin 省级等大叠加层的最粗目标边长，防止固定 20m 顶点爆炸。
+    constexpr size_t kDrapeFillVertexBudget = 180000; // @Jin 单层 fill 贴地输出顶点硬预算（约 6 万三角形）。
+    constexpr size_t kDrapeStrokeCornerBudget = 120000; // @Jin 单层线/描边加密角点硬预算。
+    constexpr size_t kDrapeSubdivideFillSourceLimit = 20000; // @Jin 原始 fill 顶点已很多的大 GeoJSON 不再递归细分，只采原始顶点。
+    constexpr size_t kDrapeDensifyStrokeSourceLimit = 12000; // @Jin 原始线/描边角点已足够密的大图层不再插点。
+
+    // @Jin 计算叠加层相对坐标 bbox：贴地细分密度按覆盖跨度自适应。省级 GeoJSON 横跨数千公里时，
+    // @Jin 目标边自动放到几十公里级；太白山样例仅数公里时保持约 20m。这样既保留小区域贴地精度，
+    // @Jin 又避免全国大面在 3D 中被递归细分到数百万/千万三角形而冻结 GL 线程。
+    double relXmin = 0.0, relYmin = 0.0, relXmax = 0.0, relYmax = 0.0;
+    bool hasRelBounds = false;
+    auto accRelXY = [&](float rx, float ry) {
+        if (!hasRelBounds) { relXmin = relXmax = rx; relYmin = relYmax = ry; hasRelBounds = true; return; }
+        relXmin = std::min(relXmin, static_cast<double>(rx)); relXmax = std::max(relXmax, static_cast<double>(rx));
+        relYmin = std::min(relYmin, static_cast<double>(ry)); relYmax = std::max(relYmax, static_cast<double>(ry));
+    };
+    for (size_t i = 0; i + kColorFloatsPerVertex - 1 < geom.fillVerts.size(); i += kColorFloatsPerVertex)
+        accRelXY(geom.fillVerts[i], geom.fillVerts[i + 1]);
+    auto accStrokeBounds = [&](const std::vector<float> &src) {
+        for (size_t i = 0; i + kLineFloatsPerVertex - 1 < src.size(); i += kLineFloatsPerVertex)
+            accRelXY(src[i], src[i + 1]);
+    };
+    accStrokeBounds(geom.outlineVerts);
+    accStrokeBounds(geom.lineVerts);
+    for (size_t i = 0; i + 1 < geom.pointCoords.size(); i += 2) accRelXY(geom.pointCoords[i], geom.pointCoords[i + 1]);
+    constexpr double kWorldCircumferenceMeters = 2.0 * 3.14159265358979323846 * 6378137.0;
+    const double spanWorld = hasRelBounds ? std::max(relXmax - relXmin, relYmax - relYmin) : 0.0;
+    const double spanMeters = spanWorld * kWorldCircumferenceMeters;
+    double targetEdgeMeters = std::max(kDrapeMinEdgeMeters, std::min(kDrapeMaxEdgeCapMeters, spanMeters / 224.0));
+    const size_t sourceFillVertexCount = geom.fillVerts.size() / kColorFloatsPerVertex;
+    const size_t sourceStrokeVertexCount = geom.outlineVerts.size() / kLineFloatsPerVertex + geom.lineVerts.size() / kLineFloatsPerVertex;
+    const bool allowFillSubdivide = sourceFillVertexCount <= kDrapeSubdivideFillSourceLimit;
+    const bool allowStrokeDensify = sourceStrokeVertexCount <= kDrapeDensifyStrokeSourceLimit;
+    size_t fillDrapedVertexCount = 0;
+    size_t strokeDrapedCornerCount = 0;
+    bool fillBudgetHit = false;
+    bool strokeBudgetHit = false;
+    if (!allowFillSubdivide) fillBudgetHit = true; // @Jin 大层走“只采原始顶点”保护路径，日志与预算命中共用标志。
+    if (!allowStrokeDensify) strokeBudgetHit = true;
+
+    struct DrapeVertex {
+        double wx = 0.0, wy = 0.0;
+        float rgba[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    };
+    auto toLonLat = [&](double wx, double wy, double &lon, double &lat) {
+        worldXYToGeographic(ox + wx, oy + wy, lon, lat);
+    };
+    int drapedSampleHits = 0;
+    int drapedSampleTotal = 0;
+    double drapedAltMin = 1e300, drapedAltMax = -1e300;
+    auto cartFor = [&](const DrapeVertex &v) -> Vec3 {
+        double lon = 0.0, lat = 0.0;
+        toLonLat(v.wx, v.wy, lon, lat);
+        const double demAlt = sampleTerrainHeightLonLat(lon, lat);
+        const bool hit = (demAlt != 0.0); // @Jin 海面真实 0 无法与未命中区分；太白山样例非海面，先用 0 诊断未命中。
+        ++drapedSampleTotal;
+        if (hit) ++drapedSampleHits;
+        drapedAltMin = std::min(drapedAltMin, demAlt);
+        drapedAltMax = std::max(drapedAltMax, demAlt);
+        const double alt = demAlt + kDrapeLiftMeters;
+        return worldXYToCartesian(ox + v.wx, oy + v.wy, alt);
+    };
+    auto distanceWor = [&](const DrapeVertex &a, const DrapeVertex &b) {
+        // @Jin 用 ECEF 弦长判断是否细分，经纬度和墨卡托在山坡小区域内都足够近似。
+        return (cartFor(a) - cartFor(b)).length();
+    };
+    auto mixVertex = [&](const DrapeVertex &a, const DrapeVertex &b, double t) {
+        DrapeVertex m;
+        m.wx = a.wx + (b.wx - a.wx) * t;
+        m.wy = a.wy + (b.wy - a.wy) * t;
+        for (int i = 0; i < 4; ++i) m.rgba[i] = a.rgba[i] + (b.rgba[i] - a.rgba[i]) * static_cast<float>(t);
+        return m;
+    };
+    auto pushFill = [&](std::vector<float> &verts, double bb[6], const DrapeVertex &v) {
+        const Vec3 p = cartFor(v);
+        globeAabbExtend(bb, p);
+        pushGlobeFillVert(verts, static_cast<float>(p.x - anchor.x),
+                          static_cast<float>(p.y - anchor.y),
+                          static_cast<float>(p.z - anchor.z),
+                          v.rgba[0], v.rgba[1], v.rgba[2], v.rgba[3], 1.0f);
+    };
+    auto emitTriangle = [&](std::vector<float> &verts, double bb[6],
+                            const DrapeVertex &rootA, const DrapeVertex &rootB, const DrapeVertex &rootC) {
+        if (!allowFillSubdivide) {
+            // @Jin 大 GeoJSON 快速路径：原始三角网已经足够密，不再计算边长/递归，只逐顶点采 DEM。
+            pushFill(verts, bb, rootA);
+            pushFill(verts, bb, rootB);
+            pushFill(verts, bb, rootC);
+            fillDrapedVertexCount += 3u;
+            return;
+        }
+        struct PendingTri { DrapeVertex a, b, c; int depth; };
+        std::vector<PendingTri> stack;
+        stack.push_back({rootA, rootB, rootC, 0});
+        while (!stack.empty()) {
+            PendingTri cur = stack.back();
+            stack.pop_back();
+            const double ab = distanceWor(cur.a, cur.b);
+            const double bc = distanceWor(cur.b, cur.c);
+            const double ca = distanceWor(cur.c, cur.a);
+            if (allowFillSubdivide && fillDrapedVertexCount + 3u <= kDrapeFillVertexBudget && cur.depth < kMaxDrapeSubdivide &&
+                (ab > targetEdgeMeters || bc > targetEdgeMeters || ca > targetEdgeMeters)) {
+                // @Jin 最长边中点细分，避免递归 lambda 自引用，也避免大三角形内部横跨沟谷/山脊。
+                if (ab >= bc && ab >= ca) {
+                    DrapeVertex m = mixVertex(cur.a, cur.b, 0.5);
+                    stack.push_back({m, cur.b, cur.c, cur.depth + 1});
+                    stack.push_back({cur.a, m, cur.c, cur.depth + 1});
+                } else if (bc >= ca) {
+                    DrapeVertex m = mixVertex(cur.b, cur.c, 0.5);
+                    stack.push_back({cur.a, m, cur.c, cur.depth + 1});
+                    stack.push_back({cur.a, cur.b, m, cur.depth + 1});
+                } else {
+                    DrapeVertex m = mixVertex(cur.c, cur.a, 0.5);
+                    stack.push_back({m, cur.b, cur.c, cur.depth + 1});
+                    stack.push_back({cur.a, cur.b, m, cur.depth + 1});
+                }
+                continue;
+            }
+            pushFill(verts, bb, cur.a);
+            pushFill(verts, bb, cur.b);
+            pushFill(verts, bb, cur.c);
+            fillDrapedVertexCount += 3u; // @Jin 统计实际贴地输出顶点；超出预算后后续三角形不再细分。
+            if (fillDrapedVertexCount >= kDrapeFillVertexBudget) fillBudgetHit = true;
+        }
+    };
+
+    // @Jin 面填充：源数据已经是 earcut 三角形，递归细分后逐顶点采 DEM，并以 mode=1 禁止 shader 再统一抬高。
+    {
+        std::vector<float> verts;
+        double bb[6];
+        globeAabbInit(bb);
+        const size_t triCount = geom.fillVerts.size() / kColorFloatsPerVertex / 3u;
+        for (size_t ti = 0; ti < triCount; ++ti) {
+            DrapeVertex tri[3];
+            for (int vi = 0; vi < 3; ++vi) {
+                const size_t i = (ti * 3u + static_cast<size_t>(vi)) * kColorFloatsPerVertex;
+                tri[vi].wx = geom.fillVerts[i];
+                tri[vi].wy = geom.fillVerts[i + 1];
+                tri[vi].rgba[0] = geom.fillVerts[i + 2];
+                tri[vi].rgba[1] = geom.fillVerts[i + 3];
+                tri[vi].rgba[2] = geom.fillVerts[i + 4];
+                tri[vi].rgba[3] = geom.fillVerts[i + 5];
+            }
+            emitTriangle(verts, bb, tri[0], tri[1], tri[2]);
+            if (verts.size() > 240000u) {
+                // @Jin 超大叠加层按块上传，避免单 VBO 过大造成 GL 驱动卡顿。
+                if (!verts.empty()) vl.globeFillChunks.push_back(uploadGlobeChunk(verts, bb, kGlobeFillFloatsPerVertex));
+                verts.clear();
+                globeAabbInit(bb);
+            }
+        }
+        if (!verts.empty()) vl.globeFillChunks.push_back(uploadGlobeChunk(verts, bb, kGlobeFillFloatsPerVertex));
+    }
+
+    auto buildStroke = [&](const std::vector<float> &src, const std::vector<std::pair<int, int>> &ranges,
+                          std::vector<VectorLayer::GlobeChunk> &chunks) {
+        std::vector<float> verts;
+        double bb[6];
+        globeAabbInit(bb);
+        for (size_t ri = 0; ri < ranges.size(); ++ri) {
+            const int firstVert = ranges[ri].first;
+            const int cornerCount = ranges[ri].second / 2;
+            if (cornerCount < 2) continue;
+            std::vector<DrapeVertex> corners;
+            corners.reserve(std::min<size_t>(static_cast<size_t>(cornerCount) * 4u, 4096u)); // @Jin 预留从 16 倍收紧，大省界避免无效扩容。
+            for (int c = 0; c < cornerCount; ++c) {
+                const float *v = src.data() + static_cast<size_t>(firstVert + 2 * c) * kLineFloatsPerVertex;
+                DrapeVertex cur;
+                cur.wx = v[0];
+                cur.wy = v[1];
+                for (int k = 0; k < 4; ++k) cur.rgba[k] = v[4 + k];
+                if (c > 0) {
+                    if (!allowStrokeDensify) { corners.push_back(cur); continue; } // @Jin 大层快速路径：不计算线段长度、不插点。
+                    // @Jin 必须拷贝上一角点：下面会继续向 corners 插点，vector 扩容会导致引用悬空；
+                    // @Jin 悬空引用会让插值经纬度读到垃圾内存并生成跨屏幕的飞线。
+                    const DrapeVertex prev = corners.back();
+                    const double len = distanceWor(prev, cur);
+                    int inserts = std::max(0, static_cast<int>(std::ceil(len / targetEdgeMeters)) - 1);
+                    inserts = std::min(inserts, 64); // @Jin 单段加密上限，小区域足够贴合，超长线段分多段处理。
+                    // @Jin 扣除本段尚未写入的原始角点，保证线/描边总角点不超过硬预算。
+                    const size_t remainingRaw = static_cast<size_t>(cornerCount - c);
+                    if (strokeDrapedCornerCount + remainingRaw >= kDrapeStrokeCornerBudget) inserts = 0;
+                    else inserts = std::min<size_t>(inserts, kDrapeStrokeCornerBudget - strokeDrapedCornerCount - remainingRaw);
+                    for (int q = 1; q <= inserts; ++q) corners.push_back(mixVertex(prev, cur, static_cast<double>(q) / (inserts + 1)));
+                }
+                corners.push_back(cur);
+            }
+            strokeDrapedCornerCount += corners.size(); // @Jin 统计原始+加密角点；预算耗尽后后续线段不再加密。
+            if (strokeDrapedCornerCount >= kDrapeStrokeCornerBudget) strokeBudgetHit = true;
+            std::vector<Vec3> pts;
+            std::vector<DrapeVertex> coloredCorners = corners;
+            pts.reserve(coloredCorners.size());
+            for (const auto &cv : coloredCorners) {
+                const Vec3 p = cartFor(cv);
+                globeAabbExtend(bb, p); // @Jin AABB 用绝对 ECEF 做视锥剔除
+                // @Jin 修复：stroke 三角带此前误存绝对 ECEF（约 6.37e6 米），shader 再叠加
+                // @Jin uOffset=anchor-eye 后位置完全错误、整条线被视锥剔除而不可见；与 fill/point
+                // @Jin 同口径改为存相对图层锚点的 RTC 坐标。
+                pts.push_back(Vec3{p.x - anchor.x, p.y - anchor.y, p.z - anchor.z});
+            }
+            if (!verts.empty() && !pts.empty()) {
+                // @Jin chunk 内不同 range 继续用退化桥连接，保持单次 GL_TRIANGLE_STRIP 合批。
+                const size_t last = verts.size() - kGlobeStrokeFloatsPerVertex;
+                for (int k = 0; k < kGlobeStrokeFloatsPerVertex; ++k) verts.push_back(verts[last + k]);
+                const float *bridgeColor = src.data() + static_cast<size_t>(firstVert) * kLineFloatsPerVertex;
+                pushGlobeStrokeVert(verts, pts.front(), pts.front(), pts.front(), +1.0f,
+                                    bridgeColor[4], bridgeColor[5], bridgeColor[6], bridgeColor[7], 1.0f);
+            }
+            for (size_t i = 0; i < pts.size(); ++i) {
+                const Vec3 &prevV = (i > 0) ? pts[i - 1] : pts[i];
+                const Vec3 &curV = pts[i];
+                const Vec3 &nextV = (i + 1 < pts.size()) ? pts[i + 1] : pts[i];
+                const DrapeVertex &cv = coloredCorners[i];
+                pushGlobeStrokeVert(verts, prevV, curV, nextV, +1.0f,
+                                    cv.rgba[0], cv.rgba[1], cv.rgba[2], cv.rgba[3], 1.0f);
+                pushGlobeStrokeVert(verts, prevV, curV, nextV, -1.0f,
+                                    cv.rgba[0], cv.rgba[1], cv.rgba[2], cv.rgba[3], 1.0f);
+            }
+        }
+        if (!verts.empty()) chunks.push_back(uploadGlobeChunk(verts, bb, kGlobeStrokeFloatsPerVertex));
+    };
+    // @Jin 面描边和线都沿线段加密，否则原始稀疏折线只会两端贴地、中段仍埋入山体。
+    buildStroke(geom.outlineVerts, geom.outlineRanges, vl.globeOutlineChunks);
+    buildStroke(geom.lineVerts, geom.lineRanges, vl.globeLineChunks);
+
+    auto buildPoint = [&](const DrapeVertex &v, std::vector<float> &verts, double bb[6], bool icon) {
+        const Vec3 p = cartFor(v);
+        globeAabbExtend(bb, p);
+        const Vec3 c{p.x - anchor.x, p.y - anchor.y, p.z - anchor.z};
+        if (icon) {
+            // @Jin y 从中心构图的 [-1,+1] 改为 [0,+2]，让 PNG 底部针尖落在 DEM 采样点而不是图片中心。
+            pushGlobeIconVert(verts, c, -1.0f, 2.0f, 0.0f, 0.0f, v.rgba[0], v.rgba[1], v.rgba[2], v.rgba[3], 1.0f);
+            pushGlobeIconVert(verts, c, 1.0f, 2.0f, 1.0f, 0.0f, v.rgba[0], v.rgba[1], v.rgba[2], v.rgba[3], 1.0f);
+            pushGlobeIconVert(verts, c, 1.0f, 0.0f, 1.0f, 1.0f, v.rgba[0], v.rgba[1], v.rgba[2], v.rgba[3], 1.0f);
+            pushGlobeIconVert(verts, c, -1.0f, 2.0f, 0.0f, 0.0f, v.rgba[0], v.rgba[1], v.rgba[2], v.rgba[3], 1.0f);
+            pushGlobeIconVert(verts, c, 1.0f, 0.0f, 1.0f, 1.0f, v.rgba[0], v.rgba[1], v.rgba[2], v.rgba[3], 1.0f);
+            pushGlobeIconVert(verts, c, -1.0f, 0.0f, 0.0f, 1.0f, v.rgba[0], v.rgba[1], v.rgba[2], v.rgba[3], 1.0f);
+        } else {
+            static const std::vector<std::pair<float, float>> unitCircle = [] {
+                std::vector<std::pair<float, float>> pts;
+                pts.reserve(kMarkerSegments + 1);
+                for (int s = 0; s <= kMarkerSegments; ++s) {
+                    const float a = static_cast<float>(2.0 * 3.14159265358979 * s / kMarkerSegments);
+                    pts.emplace_back(std::cos(a), std::sin(a));
+                }
+                return pts;
+            }();
+            for (int s = 0; s < kMarkerSegments; ++s) {
+                pushGlobePointVert(verts, c, 0.0f, 0.0f, v.rgba[0], v.rgba[1], v.rgba[2], v.rgba[3], 1.0f);
+                pushGlobePointVert(verts, c, unitCircle[s].first, unitCircle[s].second, v.rgba[0], v.rgba[1], v.rgba[2], v.rgba[3], 1.0f);
+                pushGlobePointVert(verts, c, unitCircle[s + 1].first, unitCircle[s + 1].second, v.rgba[0], v.rgba[1], v.rgba[2], v.rgba[3], 1.0f);
+            }
+        }
+    };
+    const size_t ptN = geom.pointCoords.size() / 2u;
+    if (ptN > 0) {
+        std::vector<float> verts;
+        double bb[6];
+        globeAabbInit(bb);
+        const bool icon = !vl.iconRgba.empty();
+        for (size_t i = 0; i < ptN; ++i) {
+            DrapeVertex v;
+            v.wx = geom.pointCoords[2 * i];
+            v.wy = geom.pointCoords[2 * i + 1];
+            v.rgba[0] = vl.style.pointR; v.rgba[1] = vl.style.pointG; v.rgba[2] = vl.style.pointB; v.rgba[3] = vl.style.pointA;
+            buildPoint(v, verts, bb, icon);
+        }
+        if (icon) {
+            if (!vl.iconTex.isValid() && !vl.iconTex.uploadRGBA(vl.iconRgba.data(), vl.iconW, vl.iconH)) {
+                // @Jin 图标纹理失败时保留空 chunk 安全状态，后续可回退普通点通路排查。
+            } else {
+                vl.globeIconChunks.push_back(uploadGlobeChunk(verts, bb, kGlobeIconFloatsPerVertex));
+            }
+        } else {
+            vl.globePointChunks.push_back(uploadGlobeChunk(verts, bb, kGlobePointFloatsPerVertex));
+        }
+    }
+
+    vl.globeUploadFeat = geom.featSpans.size();
+    vl.globeUploadPoint = ptN;
+    vl.globeUploadExtrude = geom.extrudeVerts.size();
+    vl.globeDrapedTerrainSignature = overlayDrapedTerrainSignature(vl); // @Jin 记录本层实际覆盖 DEM 的签名，而不是全局 revision。
+    vl.globeUploadDone = true;
+    vl.streamingUpload.store(false);
+    const bool finiteAlt = std::isfinite(drapedAltMin) && std::isfinite(drapedAltMax);
+    if (fillBudgetHit || strokeBudgetHit) {
+        LOGI("[GlobeVec] @Jin draped large-layer guard spanKm=%.1f edgeM=%.1f fillVerts=%zu/%zu fillGuard=%d strokeCorners=%zu/%zu strokeGuard=%d", spanMeters / 1000.0, targetEdgeMeters, fillDrapedVertexCount, kDrapeFillVertexBudget, fillBudgetHit ? 1 : 0, strokeDrapedCornerCount, kDrapeStrokeCornerBudget, strokeBudgetHit ? 1 : 0);
+    }
+    LOGI("[GlobeVec] @Jin overlay DEM draped upload sig=%llu hits=%d/%d alt=[%.1f,%.1f] fill=%zu outline=%zu line=%zu pts=%zu",
+         static_cast<unsigned long long>(vl.globeDrapedTerrainSignature), drapedSampleHits, drapedSampleTotal,
+         finiteAlt ? drapedAltMin : 0.0, finiteAlt ? drapedAltMax : 0.0,
+         vl.globeFillChunks.size(), vl.globeOutlineChunks.size(), vl.globeLineChunks.size(), ptN);
+}
+
 void Renderer::uploadGlobeVecChunks(VectorLayer &vl) {
     if (vl.globeUploadDone) return;
+    // @Jin 动态叠加层走实验性 DEM 贴地烘焙；文件矢量层仍保持原 alt=0/静态高程路径，便于快速回退。
+    if (vl.isOverlay) {
+        uploadGlobeOverlayDrapedChunks(vl);
+        return;
+    }
     const VectorGeometry &geom = vl.geom;
     const double ox = geom.originWx;
     const double oy = geom.originWy;
@@ -3787,8 +4155,14 @@ bool Renderer::renderGlobeVectors3D(const Navigator::Camera3D &cam, const Matrix
             if (vl.loader->hasPendingOrReady()) needRedraw = true;
         }
         if (!vectorLayerShown(vl, camLevel) || vl.geom.empty()) continue;
+        // @Jin DEM 到达后动态叠加层要按新高程重建 3D VBO，否则第一次上传时 alt=0 的线面会一直埋在地形里。
+        if (vl.isOverlay && vl.globeUploadDone && vl.globeDrapedTerrainSignature != overlayDrapedTerrainSignature(vl)) {
+            resetVectorUpload(vl, /*del=*/true);
+            vl.globeDrapedTerrainSignature = 0;
+            needRedraw = true;
+        }
         // P2.e 分帧流式上传：未完成每帧推进一个预算片并请求续绘（图斑整块整块长出）；
-        // 完成后顶点纯几何（相对固定锚点、alt=0 烘焙），平移与缩放均零重建零重传。
+        // 完成后顶点纯几何（相对固定锚点、静态高程烘焙），平移与缩放均零重建零重传。
         if (!vl.globeUploadDone) {
             uploadGlobeVecChunks(vl);
             needRedraw = true;
@@ -3825,6 +4199,10 @@ bool Renderer::renderGlobeVectors3D(const Navigator::Camera3D &cam, const Matrix
         for (auto &vlp : vectorLayers_) {
             VectorLayer &vl = *vlp;
             if (!vectorLayerShown(vl, camLevel) || vl.globeFillChunks.empty()) continue;
+            // @Jin 实验（可回退）：贴地动态叠加层与影像地形网格共面，密采沟谷的面片元会被粗地形三角面
+            // @Jin 深度剔除，表现为“面破碎、一块显示一块被遮”。叠加层 depthMask=FALSE 走画家序，
+            // @Jin 对 isOverlay 关闭地形深度测试让其稳定盖在地表；文件矢量仍保留深度测试。
+            if (vl.isOverlay) glDisable(GL_DEPTH_TEST); else glEnable(GL_DEPTH_TEST);
             glUniform3f(gfUOffset_, static_cast<float>(vl.globeAnchor.x - cam.eye.x),
                         static_cast<float>(vl.globeAnchor.y - cam.eye.y),
                         static_cast<float>(vl.globeAnchor.z - cam.eye.z));
@@ -3845,6 +4223,7 @@ bool Renderer::renderGlobeVectors3D(const Navigator::Camera3D &cam, const Matrix
                 glDrawArrays(GL_TRIANGLES, 0, ch.vertexCount);
             }
         }
+        glEnable(GL_DEPTH_TEST); // @Jin 实验后恢复深度，供 Pass 2b extrude 侧墙使用
         glDisable(GL_POLYGON_OFFSET_FILL);
         glDisableVertexAttribArray(gfAPos_);
         glDisableVertexAttribArray(gfAColor_);
@@ -3931,6 +4310,8 @@ bool Renderer::renderGlobeVectors3D(const Navigator::Camera3D &cam, const Matrix
         for (auto &vlp : vectorLayers_) {
             VectorLayer &vl = *vlp;
             if (!vectorLayerShown(vl, camLevel)) continue;
+            // @Jin 实验（可回退）：线/描边叠层同样关闭对地形的深度测试，避免顺沟谷的折线三角带被粗地形面整体埋住。
+            if (vl.isOverlay) glDisable(GL_DEPTH_TEST); else glEnable(GL_DEPTH_TEST);
             // 描边/线宽与 2D 同口径：style.outlineWidth/lineWidth 直接当像素宽度处理（无 density），
             // 取一半得像素半宽，shader 里乘 side 与 miter 后除视口得 NDC 偏移。
             // 逐层 uOffset = 本层固定锚点 − eye（平移只改此 uniform，不重建顶点）
@@ -3951,6 +4332,7 @@ bool Renderer::renderGlobeVectors3D(const Navigator::Camera3D &cam, const Matrix
         glDisableVertexAttribArray(gsASide_);
         glDisableVertexAttribArray(gsAColor_);
         glDisableVertexAttribArray(gsAMode_);
+        glEnable(GL_DEPTH_TEST); // @Jin 实验后恢复深度测试，供后续注记/marker 等通道使用
         glBindBuffer(GL_ARRAY_BUFFER, 0);
     }
 
@@ -3972,6 +4354,8 @@ bool Renderer::renderGlobeVectors3D(const Navigator::Camera3D &cam, const Matrix
             if (!vectorLayerShown(vl, camLevel)) continue;
             if (!vl.iconRgba.empty()) continue; // 有图标层交给图标 billboard，此处不画圆
             if (vl.globePointChunks.empty()) continue;
+            // @Jin 实验（可回退）：贴地点圆叠层关闭对地形的深度测试，锚点圆不再被近景坡面剔除。
+            if (vl.isOverlay) glDisable(GL_DEPTH_TEST); else glEnable(GL_DEPTH_TEST);
             const float radiusPx = static_cast<float>(vl.style.pointRadiusDp) * density;
             if (radiusPx <= 0.0f) continue;
             glUniform2f(gpUHalfPx_, radiusPx, radiusPx);
@@ -4000,6 +4384,7 @@ bool Renderer::renderGlobeVectors3D(const Navigator::Camera3D &cam, const Matrix
         glDisableVertexAttribArray(gpACorner_);
         glDisableVertexAttribArray(gpAColor_);
         glDisableVertexAttribArray(gpAMode_);
+        glEnable(GL_DEPTH_TEST); // @Jin 实验后恢复深度测试，供后续注记/marker 等通道使用
         glBindBuffer(GL_ARRAY_BUFFER, 0);
     }
 
@@ -4022,6 +4407,8 @@ bool Renderer::renderGlobeVectors3D(const Navigator::Camera3D &cam, const Matrix
             VectorLayer &vl = *vlp;
             if (!vectorLayerShown(vl, camLevel)) continue;
             if (vl.iconRgba.empty() || vl.globeIconChunks.empty()) continue;
+            // @Jin 实验（可回退）：图标叠层与点同口径处理（图标当前也贴地）。
+            if (vl.isOverlay) glDisable(GL_DEPTH_TEST); else glEnable(GL_DEPTH_TEST);
             // 懒上传/上下文重建后重传图标纹理（与 2D 同口径；iconRgba 构造后只读、无竞争）
             if (!vl.iconTex.isValid() &&
                 !vl.iconTex.uploadRGBA(vl.iconRgba.data(), vl.iconW, vl.iconH))
@@ -4057,6 +4444,7 @@ bool Renderer::renderGlobeVectors3D(const Navigator::Camera3D &cam, const Matrix
         glDisableVertexAttribArray(giATexCoord_);
         glDisableVertexAttribArray(giAColor_);
         glDisableVertexAttribArray(giaMode_);
+        glEnable(GL_DEPTH_TEST); // @Jin 实验后恢复深度测试，供后续注记/marker 等通道使用
         glBindBuffer(GL_ARRAY_BUFFER, 0);
     }
 

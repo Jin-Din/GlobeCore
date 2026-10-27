@@ -129,6 +129,16 @@ export class NativeLib {
     }
   }
 
+  /** @Jin 在 C++ GL 帧循环中平滑飞到目标相机；durationMs<=0 时由 native 退化为即时 setCamera。 */
+  static nativeFlyToCamera(handle: number, latitudeDeg: number, longitudeDeg: number,
+    altitudeMeters: number, headingDeg: number, tiltDeg: number, rollDeg: number,
+    fieldOfViewDeg: number, altitudeMode: number, durationMs: number): void {
+    if (handle !== 0) {
+      gc.nativeFlyToCamera(handle, latitudeDeg, longitudeDeg, altitudeMeters,
+        headingDeg, tiltDeg, rollDeg, fieldOfViewDeg, altitudeMode, durationMs);
+    }
+  }
+
   /** 读回 [lat, lon, alt, heading, tilt, roll, fov, altMode]；句柄已释放返回 null */
   static nativeGetCamera(handle: number): number[] | null {
     if (handle === 0) {

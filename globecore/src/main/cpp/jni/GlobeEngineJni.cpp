@@ -282,6 +282,28 @@ Java_com_zys_globecore_NativeLib_nativeSetCamera(JNIEnv * /*env*/, jobject /*thi
     toGlobeEngine(handle)->setCamera(cam);
 }
 
+
+// @Jin 平滑飞到目标相机；动画由 C++ GlobeEngine 帧循环驱动，Android 与 Harmony 共用同一 native 能力。
+JNIEXPORT void JNICALL
+Java_com_zys_globecore_NativeLib_nativeFlyToCamera(JNIEnv * /*env*/, jobject /*thiz*/, jlong handle,
+                                                   jdouble latitudeDeg, jdouble longitudeDeg, jdouble altitudeMeters,
+                                                   jdouble headingDeg, jdouble tiltDeg, jdouble rollDeg,
+                                                   jdouble fieldOfViewDeg, jint altitudeMode, jdouble durationMs) {
+    if (handle == 0) return;
+    globecore::Camera cam;
+    cam.latitude = latitudeDeg;
+    cam.longitude = longitudeDeg;
+    cam.altitude = altitudeMeters;
+    cam.heading = headingDeg;
+    cam.tilt = tiltDeg;
+    cam.roll = rollDeg;
+    cam.fieldOfView = fieldOfViewDeg;
+    cam.altitudeMode = (altitudeMode >= 0 && altitudeMode <= 3)
+                           ? static_cast<globecore::AltitudeMode>(altitudeMode)
+                           : globecore::AltitudeMode::ABSOLUTE;
+    toGlobeEngine(handle)->flyToCamera(cam, durationMs);
+}
+
 // 读回相机完整姿态，返回 [latitude, longitude, altitude, heading, tilt, roll, fieldOfView, altitudeMode(序数)]（长度 8）。
 // 供 Kotlin NativeMapView.getCamera() 组装 [Camera]；句柄已释放返回 null。
 JNIEXPORT jdoubleArray JNICALL

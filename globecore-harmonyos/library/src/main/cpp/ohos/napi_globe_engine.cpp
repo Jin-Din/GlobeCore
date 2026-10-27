@@ -485,6 +485,39 @@ napi_value NativeSetCamera(napi_env env, napi_callback_info info) {
     return nullptr;
 }
 
+
+napi_value NativeFlyToCamera(napi_env env, napi_callback_info info) {
+    napi_value args[10];
+    gcohos::NapiGetArgs(env, info, 10, args);
+    int64_t handle = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return nullptr;
+    double lat = 0, lon = 0, alt = 0, heading = 0, tilt = 0, roll = 0, fov = 0, durationMs = 1600.0;
+    int32_t altMode = 0;
+    gcohos::NapiGetDouble(env, args[1], lat);
+    gcohos::NapiGetDouble(env, args[2], lon);
+    gcohos::NapiGetDouble(env, args[3], alt);
+    gcohos::NapiGetDouble(env, args[4], heading);
+    gcohos::NapiGetDouble(env, args[5], tilt);
+    gcohos::NapiGetDouble(env, args[6], roll);
+    gcohos::NapiGetDouble(env, args[7], fov);
+    gcohos::NapiGetInt32(env, args[8], altMode);
+    gcohos::NapiGetDouble(env, args[9], durationMs);
+    globecore::Camera cam;
+    cam.latitude = lat;
+    cam.longitude = lon;
+    cam.altitude = alt;
+    cam.heading = heading;
+    cam.tilt = tilt;
+    cam.roll = roll;
+    cam.fieldOfView = fov;
+    // @Jin 越界高度模式回退 ABSOLUTE，保持 nativeSetCamera 的参数容错口径。
+    cam.altitudeMode = (altMode >= 0 && altMode <= 3)
+                           ? static_cast<globecore::AltitudeMode>(altMode)
+                           : globecore::AltitudeMode::ABSOLUTE;
+    toGlobeEngine(handle)->flyToCamera(cam, durationMs);
+    return nullptr;
+}
+
 napi_value NativeGetCamera(napi_env env, napi_callback_info info) {
     napi_value args[1];
     gcohos::NapiGetArgs(env, info, 1, args);
@@ -1273,6 +1306,7 @@ napi_value RegisterGlobeEngine(napi_env env, napi_value exports) {
         {"nativeDetach", nullptr, NativeDetach, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeRequestRender", nullptr, NativeRequestRender, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeSetCamera", nullptr, NativeSetCamera, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"nativeFlyToCamera", nullptr, NativeFlyToCamera, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeGetCamera", nullptr, NativeGetCamera, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeSetViewMode", nullptr, NativeSetViewMode, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeGetViewMode", nullptr, NativeGetViewMode, nullptr, nullptr, nullptr, napi_default, nullptr},

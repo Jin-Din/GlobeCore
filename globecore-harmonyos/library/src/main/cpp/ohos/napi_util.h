@@ -76,13 +76,29 @@ inline std::vector<double> NapiGetFloat64Array(napi_env env, napi_value v) {
     napi_value buf = nullptr;
     size_t offset = 0;
     if (napi_get_typedarray_info(env, v, &type, &length, &data, &buf, &offset) != napi_ok) return out;
-    if (type == napi_float64_array && data != nullptr && length > 0) {
+    // @Jin 兼容修复：部分 HarmonyOS NAPI 的 length 返回的是“字节数”而不是元素个数
+    // @Jin（真机实测 Float64Array 6 个元素返回 48）。这里用底层 ArrayBuffer 容量反推元素数做归一：
+    // @Jin length 超过按元素计算的容量时，判定为字节长度并除以元素字节数，避免把 3 个点读成 24 个、
+    // @Jin 坐标尾部补 0，导致叠加层线/面几何被错误放大后丢弃、只剩点。
+    auto elemCount = [&](size_t elemSize) -> size_t {
+        size_t bufBytes = 0;
+        void *bufData = nullptr;
+        if (napi_get_arraybuffer_info(env, buf, &bufData, &bufBytes) == napi_ok && bufBytes >= offset) {
+            const size_t capElems = (bufBytes - offset) / elemSize;
+            if (length > capElems) return length / elemSize; // @Jin 字节长度口径
+            return length < capElems ? length : capElems;    // @Jin 标准元素口径（subarray 时取较小者）
+        }
+        return length / elemSize; // @Jin 取不到 buffer 时按字节长度兜底
+    };
+    if (type == napi_float64_array && data != nullptr) {
+        const size_t n = elemCount(sizeof(double));
         const double *p = static_cast<const double *>(data);
-        out.assign(p, p + length);
-    } else if (type == napi_int32_array && data != nullptr && length > 0) {
+        out.assign(p, p + n);
+    } else if (type == napi_int32_array && data != nullptr) {
+        const size_t n = elemCount(sizeof(int32_t));
         const int32_t *p = static_cast<const int32_t *>(data);
-        out.reserve(length);
-        for (size_t i = 0; i < length; ++i) out.push_back(static_cast<double>(p[i]));
+        out.reserve(n);
+        for (size_t i = 0; i < n; ++i) out.push_back(static_cast<double>(p[i]));
     }
     return out;
 }
@@ -126,10 +142,20 @@ inline std::vector<int32_t> NapiGetInt32Array(napi_env env, napi_value v) {
     napi_value buf = nullptr;
     size_t offset = 0;
     if (napi_get_typedarray_info(env, v, &type, &length, &data, &buf, &offset) != napi_ok) return out;
-    if (type == napi_int32_array && data != nullptr && length > 0) {
-        const int32_t *p = static_cast<const int32_t *>(data);
-        out.assign(p, p + length);
+    if (type != napi_int32_array || data == nullptr) return out;
+    // @Jin 同 NapiGetFloat64Array：length 在部分 HarmonyOS NAPI 上是字节数，按 Int32(4 字节) 归一元素数，
+    // @Jin 否则图标 ARGB 像素（如 48x48=2304）会被当成 9216 个 int 越界读取。
+    size_t n = length;
+    size_t bufBytes = 0;
+    void *bufData = nullptr;
+    if (napi_get_arraybuffer_info(env, buf, &bufData, &bufBytes) == napi_ok && bufBytes >= offset) {
+        const size_t capElems = (bufBytes - offset) / sizeof(int32_t);
+        n = (length > capElems) ? (length / sizeof(int32_t)) : (length < capElems ? length : capElems);
+    } else {
+        n = length / sizeof(int32_t);
     }
+    const int32_t *p = static_cast<const int32_t *>(data);
+    out.assign(p, p + n);
     return out;
 }
 

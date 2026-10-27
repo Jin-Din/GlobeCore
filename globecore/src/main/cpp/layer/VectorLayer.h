@@ -122,6 +122,8 @@ struct VectorLayer {
     size_t globeUploadPoint = 0;
     size_t globeUploadExtrude = 0;
     bool globeUploadDone = false; // 两游标均到尾部：几何已全部上 GPU（此前逐帧续传+续绘）
+    // @Jin 3D 动态叠加层上一次贴地烘焙使用的 DEM revision；DEM 到达或淘汰后据此重建 VBO。
+    uint64_t globeDrapedTerrainSignature = 0;
     // 3D 顶点相对「图层固定锚点」烘焙（不相对 eye）：globeAnchor = 几何原点 ECEF（只随几何变），顶点
     // 纯几何 alt=0。每帧把 uOffset = globeAnchor − eye、uVecAlt = 贴地高度传进着色器（高度沿表面法向抬升）
     // → 平移与缩放时顶点都不变、零重建零重传（3D 平移/缩放卡顿根治）。

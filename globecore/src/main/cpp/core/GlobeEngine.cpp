@@ -13,6 +13,25 @@
 #include "vector/VectorReader.h"
 
 namespace globecore {
+namespace {
+// @Jin 相机飞行使用平滑 smoothstep：起止速度为零，长距离飞视点不会生硬突跳。
+double flightEase(double t) {
+    if (t <= 0.0) return 0.0;
+    if (t >= 1.0) return 1.0;
+    return t * t * (3.0 - 2.0 * t);
+}
+
+// @Jin 标量线性插值；相机各字段口径简单，经纬度另行走最短角度/大圆友好插值。
+double lerpDouble(double a, double b, double t) { return a + (b - a) * t; }
+
+// @Jin heading 取最短角方向，避免从 350° 飞到 10° 时反向转一整圈。
+double lerpDegreesShortest(double a, double b, double t) {
+    double d = b - a;
+    while (d > 180.0) d -= 360.0;
+    while (d < -180.0) d += 360.0;
+    return a + d * t;
+}
+} // namespace
 
 GlobeEngine::GlobeEngine() : renderer_(navigator_, layers_, vectorLayers_, rasterImageLayers_) {
     // 图层由 app 经 addTileLayer 逐个加入（影像底图 + 注记叠加）；相机/图源装配见 MainActivity。
@@ -44,6 +63,8 @@ void GlobeEngine::surfaceChanged(int width, int height) {
 }
 
 void GlobeEngine::drawFrame() {
+    // @Jin flyTo 必须先于地形跟随和 Renderer：本帧相机确定后，地形 Provider 只围绕最终/当前视野调度。
+    const bool cameraFlightWantsFrame = updateCameraFlight();
     // @Jin 地形自动跟随放在帧首检查：native 手势只更新 Navigator，也能在静止后由 GL 线程统一防抖刷新 DEM。
     const bool terrainFollowWantsFrame = updateTerrainAutoFollow();
     // Renderer 返回「是否需再画一帧」（后台仍有瓦片在途/待上传）；省电模式下据此自请求下一帧，
@@ -72,11 +93,75 @@ void GlobeEngine::drawFrame() {
             pickCv_.notify_one();
         }
     }
-    if ((needRedraw || terrainFollowWantsFrame) && renderCallback_) renderCallback_();
+    if ((needRedraw || terrainFollowWantsFrame || cameraFlightWantsFrame) && renderCallback_) renderCallback_();
 }
 
 void GlobeEngine::setCamera(const Camera &camera) {
+    cancelCameraFlight();
     navigator_.setCamera(camera);
+}
+
+void GlobeEngine::flyToCamera(const Camera &camera, double durationMs) {
+    if (!(durationMs > 0.0) || navigator_.viewportWidth() <= 0 || navigator_.viewportHeight() <= 0) {
+        // @Jin surface 尚未就绪或调用方明确要求即时切换时，保持旧 API 的确定性。
+        setCamera(camera);
+        if (renderCallback_) renderCallback_();
+        return;
+    }
+    Camera target = camera;
+    if (!(target.fieldOfView > 0.0 && target.fieldOfView < 180.0)) {
+        target.fieldOfView = Camera{}.fieldOfView;
+    }
+    {
+        std::lock_guard<std::mutex> lk(cameraFlightMtx_);
+        cameraFlight_.active = true;
+        cameraFlight_.start = navigator_.camera();
+        cameraFlight_.target = target;
+        cameraFlight_.startTs = std::chrono::steady_clock::now();
+        cameraFlight_.duration = std::chrono::duration<double, std::milli>(std::min(durationMs, 10000.0));
+    }
+    if (renderCallback_) renderCallback_();
+}
+
+bool GlobeEngine::updateCameraFlight() {
+    Camera next;
+    bool finishNow = false;
+    {
+        std::lock_guard<std::mutex> lk(cameraFlightMtx_);
+        if (!cameraFlight_.active) return false;
+        const double elapsed = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - cameraFlight_.startTs).count();
+        const double t = cameraFlight_.duration.count() > 0.0
+            ? elapsed / cameraFlight_.duration.count() : 1.0;
+        if (t >= 1.0) {
+            next = cameraFlight_.target;
+            cameraFlight_.active = false;
+            finishNow = true;
+        } else {
+            const double e = flightEase(t);
+            const Camera &a = cameraFlight_.start;
+            const Camera &b = cameraFlight_.target;
+            // @Jin Demo 视点均在同一半球，线性经纬插值足够平滑；跨日界线的大圆插值留待后续封装。
+            next.latitude = lerpDouble(a.latitude, b.latitude, e);
+            next.longitude = lerpDouble(a.longitude, b.longitude, e);
+            while (next.longitude > 180.0) next.longitude -= 360.0;
+            while (next.longitude < -180.0) next.longitude += 360.0;
+            next.altitude = lerpDouble(a.altitude, b.altitude, e);
+            next.heading = lerpDegreesShortest(a.heading, b.heading, e);
+            next.tilt = lerpDouble(a.tilt, b.tilt, e);
+            next.roll = lerpDouble(a.roll, b.roll, e);
+            next.fieldOfView = lerpDouble(a.fieldOfView, b.fieldOfView, e);
+            next.altitudeMode = b.altitudeMode;
+        }
+    }
+    // @Jin 动画插值帧不经过 setCamera，避免每帧 cancelCameraFlight 反向取锁；结束帧精确落到目标相机。
+    navigator_.setCamera(next);
+    return !finishNow;
+}
+
+void GlobeEngine::cancelCameraFlight() {
+    std::lock_guard<std::mutex> lk(cameraFlightMtx_);
+    cameraFlight_.active = false;
 }
 
 Camera GlobeEngine::getCamera() const {
@@ -84,6 +169,7 @@ Camera GlobeEngine::getCamera() const {
 }
 
 void GlobeEngine::setViewMode(int mode) {
+    cancelCameraFlight(); // @Jin 宿主切换 2D/3D 时取消旧插值，避免飞行动画继续写入上一模式相机。
     navigator_.setViewMode(mode == 1 ? Navigator::ViewMode::MODE_3D : Navigator::ViewMode::MODE_2D);
     // 省电模式（WHEN_DIRTY）下主动请求一帧，使切换即时生效（2D/3D 通路在 Renderer::onDrawFrame 内分发）
     if (renderCallback_) renderCallback_();
@@ -104,18 +190,22 @@ int GlobeEngine::viewportHeight() const {
 }
 
 void GlobeEngine::panByPixels(double dxPx, double dyPx) {
+    cancelCameraFlight(); // @Jin 用户接管地图时立即停止飞行动画。
     navigator_.panByPixels(dxPx, dyPx);
 }
 
 void GlobeEngine::zoomBy(double factor, double focusXpx, double focusYpx) {
+    cancelCameraFlight(); // @Jin 双指缩放不应再被旧 flyTo 插值拉回。
     navigator_.zoomBy(factor, focusXpx, focusYpx);
 }
 
 void GlobeEngine::rotateHeading(double deltaDeg) {
+    cancelCameraFlight(); // @Jin 手势旋转优先于飞行动画。
     navigator_.rotateHeading(deltaDeg);
 }
 
 void GlobeEngine::rotateTilt(double deltaDeg) {
+    cancelCameraFlight(); // @Jin 手势俯仰优先于飞行动画。
     navigator_.rotateTilt(deltaDeg);
 }
 
@@ -492,6 +582,12 @@ void GlobeEngine::updateOverlayPolygons(int index, const std::vector<double> &lo
         for (int k = 0; k < vc; ++k) {
             out.push_back(lonlat[(cursor + static_cast<size_t>(k)) * 2]);
             out.push_back(lonlat[(cursor + static_cast<size_t>(k)) * 2 + 1]);
+        }
+        // @Jin 多边形环按首尾重合表达闭合；宿主也可只传真实角点（如四边形传 4 点），
+        // @Jin 入口统一补回首点，避免 fill 自动闭合而 outline stroke 仍按开放线少一条边。
+        if (vc >= 3 && (out[0] != out[out.size() - 2] || out[1] != out[out.size() - 1])) {
+            out.push_back(out[0]);
+            out.push_back(out[1]);
         }
         cursor += static_cast<size_t>(vc);
         return true;

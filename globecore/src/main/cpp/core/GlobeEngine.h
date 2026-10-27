@@ -50,6 +50,9 @@ public:
     /// 设置相机（以 [Camera] 值对象整体写入，对应 参考实现 Camera：中心/高度 + heading/tilt/roll/fov/altitudeMode）
     void setCamera(const Camera &camera);
 
+    /// @Jin 在指定时长内平滑飞行到目标相机；durationMs<=0 时退化为即时 setCamera，旧版本调用行为保持不变。
+    void flyToCamera(const Camera &camera, double durationMs = 1600.0);
+
     /// 读回当前相机完整姿态（对应 参考实现 Camera），供宿主以 [Camera] 值对象读写视角
     Camera getCamera() const;
 
@@ -348,6 +351,21 @@ private:
     mutable std::mutex terrainEventMtx_;
     std::function<void(const std::string &)> terrainEventCallback_;
     std::function<void()> renderCallback_; // 「需重绘」回调（由 JNI 注入，指向 requestRender）
+
+    // @Jin flyTo 相机动画状态只在 GL 帧线程推进；UI/手势线程通过 mutex 写入起止相机并请求重绘。
+    struct CameraFlight {
+        bool active = false;
+        Camera start;
+        Camera target;
+        std::chrono::steady_clock::time_point startTs;
+        std::chrono::duration<double, std::milli> duration{0.0};
+    };
+    mutable std::mutex cameraFlightMtx_;
+    CameraFlight cameraFlight_;
+    /** @Jin 每帧开头推进 flyTo；返回 true 表示动画仍在进行，需要持续请求渲染。 */
+    bool updateCameraFlight();
+    /** @Jin 新的手势、setCamera 或新的 flyTo 都必须取消旧动画，避免插值状态抢写 Navigator。 */
+    void cancelCameraFlight();
 
     // @Jin 地形自动跟随：由 GL 帧循环观察相机任务签名并防抖，覆盖 ArkTS 无法感知的 native 手势。
     std::atomic<bool> terrainAutoFollow_{false};

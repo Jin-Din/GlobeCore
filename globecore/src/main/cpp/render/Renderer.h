@@ -125,6 +125,8 @@ private:
     /// 查询某经纬度处的地形高度（米，椭球面以上）。
     /// @Jin: 3D 渲染瓦片存在多级 LOD，查询按 DEM bbox 覆盖关系匹配，而不是要求渲染瓦片 key 与注入 key 相同。
     double sampleTerrainHeight(const GlobeTile &tile, double lon, double lat) const;
+    /// @Jin 按经纬度直接采样当前 GL 线程中的 DEM 缓存，供 3D 动态叠加矢量做逐顶点贴地烘焙。
+    double sampleTerrainHeightLonLat(double lon, double lat) const;
     /// @Jin 从当前 DEM 集合求全局保守高程，供四叉树把地形抬升纳入地平线/视锥剔除。
     double terrainCullMarginM() const;
     /// @Jin 在生成 3D 相机前同步目标地形高与安全壳，避免放大时眼点落入山脊。
@@ -166,6 +168,10 @@ private:
     /// 不随高度变）：平移/缩放零重建零重传，eye 经 uOffset=anchor−eye、贴地高度经 uVecAlt 在着色器补回。
     /// 仅新几何接管/上下文重建触发重传（resetVectorUpload 重置游标），巨层不再单帧冻结秒级。
     void uploadGlobeVecChunks(VectorLayer &vl);
+    /// @Jin 实验性地把动态叠加层按 DEM 重建 3D VBO；效果异常时可仅回到旧的 alt=0 烘焙路径。
+    void uploadGlobeOverlayDrapedChunks(VectorLayer &vl);
+    /// @Jin 只统计与叠加层经纬度包围盒相交的 DEM；无关地形到达不应触发该层重建。
+    uint64_t overlayDrapedTerrainSignature(const VectorLayer &vl) const;
 
     /// 绘制一个图层的 3D 球面瓦片：drain 上传 → Tessellator 取可见叶瓦片 → 请求本级+祖先链 →
     /// Pass A 占位（无图无祖先的瓦片画棋盘深色贴球面；overlay 跳过）→ Pass B 逐瓦片纹理网格

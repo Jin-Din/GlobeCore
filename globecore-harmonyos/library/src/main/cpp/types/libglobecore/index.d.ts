@@ -18,6 +18,10 @@ interface GlobeCore {
   // ── 相机 / 视图模式 / 手势 ──
   nativeSetCamera(handle: number, latitudeDeg: number, longitudeDeg: number, altitudeMeters: number,
     headingDeg: number, tiltDeg: number, rollDeg: number, fieldOfViewDeg: number, altitudeMode: number): void;
+  /// @Jin 平滑飞行到目标相机；动画在 C++ GL 帧循环推进，durationMs<=0 表示即时跳转。
+  nativeFlyToCamera(handle: number, latitudeDeg: number, longitudeDeg: number, altitudeMeters: number,
+    headingDeg: number, tiltDeg: number, rollDeg: number, fieldOfViewDeg: number,
+    altitudeMode: number, durationMs: number): void;
   /// [lat, lon, alt, heading, tilt, roll, fov, altMode]
   nativeGetCamera(handle: number): Float64Array | null;
   nativeSetViewMode(handle: number, mode: number): void;

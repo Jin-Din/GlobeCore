@@ -131,6 +131,20 @@ class NativeMapView @JvmOverloads constructor(
         }
     }
 
+    /** @Jin 平滑飞到目标相机；共性插值动画在 C++ SDK 内完成，宿主层不使用定时器逐帧 setCamera。 */
+    fun flyToCamera(camera: Camera, durationMs: Double = 1600.0) {
+        val h = nativeHandle
+        if (h != 0L) {
+            NativeLib.nativeFlyToCamera(
+                h,
+                camera.latitude, camera.longitude, camera.altitude,
+                camera.heading, camera.tilt, camera.roll,
+                camera.fieldOfView, camera.altitudeMode.ordinal, durationMs
+            )
+            requestRender()
+        }
+    }
+
     /**
      * 读回当前相机（[Camera]，含 heading/tilt/roll/fieldOfView/altitudeMode）；句柄已释放返回 null。
      * 供宿主 Activity 在 onPause 时把视角完整持久化。仅读 native 相机状态、不涉 GL，可主线程调用。

@@ -40,6 +40,13 @@ internal object NativeLib {
         headingDeg: Double, tiltDeg: Double, rollDeg: Double, fieldOfViewDeg: Double, altitudeMode: Int
     )
 
+    /** @Jin 由 C++ 帧循环在 durationMs 内平滑飞到目标相机；durationMs<=0 时 native 退化为即时跳转。 */
+    external fun nativeFlyToCamera(
+        handle: Long, latitudeDeg: Double, longitudeDeg: Double, altitudeMeters: Double,
+        headingDeg: Double, tiltDeg: Double, rollDeg: Double, fieldOfViewDeg: Double,
+        altitudeMode: Int, durationMs: Double
+    )
+
     /**
      * 读回相机完整姿态，返回 [latitude, longitude, altitude, heading, tilt, roll, fieldOfView, altitudeMode(ordinal)]
      * （长度 8）；句柄已释放返回 null。供 [NativeMapView.getCamera] 组装 [Camera]。

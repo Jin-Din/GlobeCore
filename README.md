@@ -589,6 +589,28 @@ console.info(view.terrainProviderStatus());
 - Harmony 门面：`NativeMapView.tileZoomLevel()`、`NativeMapView.setTileLodOffset()`、`NativeMapView.setTileLodAlignDisplay()`；NAPI 名称为 `nativeGetTileZoomLevel`、`nativeSetTileLodOffset`、`nativeSetTileLodAlignDisplay`。
 - 缓存与限流：`TileLoader` 仍严格执行“磁盘缓存有效图像 → 未命中才联网”；HTTP 非 2xx（含天地图 429）不会写入缓存。若缓存中有历史瓦片，即使 token 被限流也应先显示缓存；卸载应用会删除沙箱缓存，冷启动后只能联网。
 
+
+
+### @Jin C++ flyTo 相机飞行与动态叠加层 DEM 贴地实验
+
+> 实验状态：`setCamera()` 旧行为保持即时跳转；新增 `flyToCamera()` 由宿主显式调用。动态叠加层 DEM 贴地仅作用于 `isOverlay=true` 的内存矢量层，文件矢量层仍走旧路径，必要时可只回退 Renderer 中的 overlay 分支。
+
+- @Jin 相机能力下沉：C++ `GlobeEngine::flyToCamera(camera, durationMs)` 在 GL 帧循环中用 smoothstep 插值经纬度、高度、heading、tilt、roll 和 FOV；heading 走最短角方向，动画结束帧精确落到目标相机。手势平移、缩放、旋转、俯仰以及新的 `setCamera()` 会取消旧动画，避免飞行和手指操作互相抢相机。
+- @Jin 双平台 API：Harmony NAPI/ArkTS 新增 `nativeFlyToCamera` 与 `NativeMapView.flyToCamera()`；Android JNI/Kotlin 同步新增同名能力。Demo 的秦岭太白山、西岳华山、喜马拉雅·珠峰快捷定位已改为 1.8s 平滑飞行。
+- @Jin LOD Demo 入口收敛：Demo 只保留“标准”和“-1”两档；C++ SDK 的 `-2/-3/同级` API 保留，供后续专项实验直接调用。
+- @Jin 动态矢量贴地根因：旧 3D overlay VBO 按海拔 0 球面一次性烘焙，再通过 `uVecAlt` 对所有顶点统一抬高，只能避免 z-fighting，不能让线、面随 DEM 山脊/沟谷起伏，因此斜视时会被山体遮盖或裁剪。
+- @Jin 实验修复：Renderer 新增按经纬度采样 DEM 的 `sampleTerrainHeightLonLat()`；动态 overlay 的 fill/line/outline/point/icon 在 3D 上传时逐顶点采样真实高程，并加 1.5m 微小表面偏移。线沿线加密，面三角形按最长边递归细分到约 90m（最多 5 层），减少大三角形内部穿坡。
+- @Jin DEM 到达后自动重建：`VectorLayer` 记录 3D overlay VBO 使用的 `terrainCacheRevision`；DEM 新增或淘汰后，下一帧删除旧 globe VBO 并按新高程重建，解决“第一次上传时地形未到，之后线面一直停留在海拔 0”的问题。
+- @Jin 当前边界：本轮贴地实验只改动态叠加层，文件矢量和拾取几何尚未全部改为 DEM 贴合；超大面内部细分仍偏保守，后续若业务叠加大数据量，需要再做空间索引和视相关预算。
+- @Jin 真机排查到叠加层“只见点、线面不显示”的根因（2026-10-27，Harmony `5KLBB25911200313`）：该设备 NAPI 的 `napi_get_typedarray_info()` 返回的 `length` 是**字节数而非元素个数**（Float64Array 6 个 double 返回 48）。旧 `napi_util.h::NapiGetFloat64Array/NapiGetInt32Array` 直接把它当元素数，导致 3 个点被读成 24 个、坐标尾部补 0；线/面顶点数被放大 8 倍且后半坐标为 0，墨卡托转换异常后几何被丢弃，图标 Int32 像素也会越界读 4 倍。
+- @Jin 修复：`NapiGetFloat64Array`/`NapiGetInt32Array` 用底层 ArrayBuffer 容量（`napi_get_arraybuffer_info` 的字节数减 offset）反推元素数做归一——`length` 超过按元素计算的容量时判定为字节长度并除以元素字节数，兼容标准元素口径与 subarray；标准 NAPI（返回元素数）行为不变。修复后真机日志点层 `pts=3/1`、线 `hits=44/44`、面 `hits=991/991`、图标 1 点，全部命中 2542~3625m 真实高程。
+- @Jin 修复贴地层每帧无谓重建：旧 `overlayDrapedTerrainSignature()` 直接遍历 `terrainCache_`（`unordered_map`）做 FNV 哈希，瓦片到达/淘汰后桶遍历顺序变化，使同一批 DEM 每帧算出不同签名，叠加层被反复 reset+重建。改为先收集命中 DEM 的稳定 word、`std::sort` 后再哈希，签名对同一组 DEM 顺序无关且稳定；真机静止 4 秒重建次数由“每帧都重建”降为 0。
+- @Jin 图标锚点：3D overlay icon 顶点由“图片中心对地理点”改为“PNG 底边中心（针尖）对 DEM 采样点、图标向上展开”，`poi.png` 水滴针尖扎在地形点。当前为全局 overlay icon 行为，后续若需兼容中心锚点图标，应在 `VectorStyle` 增加 anchor 配置。
+- @Jin 修复 3D 贴地折线/描边整条不可见（2026-10-27）：draped 的 stroke 三角带在 `uploadGlobeOverlayDrapedChunks()` 里误存了**绝对 ECEF**（量级约 6.37e6 米），而顶点着色器还要再加 `uOffset = anchor − eye`，位置被双重叠加后整条被视锥剔除，现象是“线完全看不见/像陷到地下”。已改为与 fill/point 同口径存“相对图层锚点的 RTC 坐标”（AABB 仍用绝对 ECEF），修复后折线完整跨山脊显示。
+- @Jin 修复贴地面“破碎、一块显示一块被地形遮挡”：密采沟谷（已把细分由 90m/5 层加密到约 20m/7 层，面采样 991→3934、线 44→140）的叠加矢量与离散影像地形网格（8×8/24×24）并非同一曲面，fill 原本开 `GL_DEPTH_TEST` 会把顺谷片元按粗地形三角面剔除。实验性方案（可回退）：对 `isOverlay` 的 fill/stroke/point/icon 四个 pass 在逐层绘制时 `glDisable(GL_DEPTH_TEST)`，叠加层本身 `depthMask=FALSE` 走画家序，故稳定盖在地表且不破坏彼此顺序，pass 结束立即 `glEnable(GL_DEPTH_TEST)` 恢复；文件矢量仍保留原深度测试。
+- @Jin 修复 3D 开启地形后加载省级 GeoJSON 卡死/被杀（2026-10-27）：上一轮为太白山小区域把贴地细分固定为约 20m、递归 7 层，该策略对省级 MultiPolygon（真机约 8.1 万原始 fill 顶点、覆盖约 1081km 跨度）会递归放大到 18 万+输出、单轮 82 万次 DEM 采样并在 GL 线程长阻塞，3D 下卡死、进程被系统回收；2D 不走 draped 路径所以正常。
+- @Jin 大矢量贴地保护策略（实验性、可回退）：细分密度按叠加层 bbox 跨度自适应，目标边长 = clamp(跨度/224, 20m, 32km)；当原始 fill 顶点超过 2 万（线/描边角点超过 1.2 万）时视为“已足够密的大层”，直接对原始三角网/原始角点逐顶点采 DEM，不再计算边长、不再递归细分或插点；另设 fill 18 万顶点、stroke 12 万角点硬预算兜底。真机省级层输出降回 80,952 fill 顶点、DEM 采样 82.8 万→10.8 万，3D+地形下地图可正常拖动且进程稳定；太白山小样例仍走 20m/7 层细分，保持贴地精度。
+
 ### 演示工程 globecore-harmonyos
 
 DevEco Studio（5.0+，API 12 SDK）打开 `globecore-harmonyos/`，`ohpm install` 后直接 run `entry`：
@@ -646,6 +668,7 @@ cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build b
   ⑫ @Jin **P0-2 exp1f：交互 LOD 迟滞与低分辨率地形后备（实验性）**：3D 手势中使用最近非交互帧的稳定瓦片 LOD 做细化迟滞，放大时不追逐瞬态高清叶、缩小时允许父级粗图覆盖，避免自身高清纹理与祖先纹理短暂同时不可用时绘制深色占位；迟滞状态按图层 `maxLevel` 隔离，并在 surface 重建、纹理清空、图源切换和 release 时复位。地形网格预算不足时仍采样已有 DEM，只从 24×24 降为 8×8，不再生成零高程平面；新增 `placeholder/ancestor/leaf/fallbackMesh` 诊断。真机太白山地形开启双指放大/缩小及关闭地形仅影像三组缩放均记录 `placeholder=0`；冷启动全球首秒在根瓦到达前仍有占位，后续需通过低级别瓦预取/内置或底色过渡单独优化。详见“实验性交互 LOD 迟滞与低分辨率地形后备”。
   ⑬ @Jin **P0-2 exp1g：大倾角近景黑面修复（实验性）**：3D 可见叶改为按地形表面中心到相机的三维距离排序，保证屏幕下方最近区域优先获得高清叶；底图 z-2 粗祖先请求覆盖全部可见叶，预算外近景瓦片不再因“自身高清纹理和祖先纹理均缺失”而永久绘制深色占位；排序距离通过 scratch 数组每帧预计算，地形 VBO LRU 从 512 提到 1024，避免 700+ 可见叶时网格缓存反复淘汰重建。真机太白山正常近景大倾角视角下 `placeholder=0`、近景无黑面；相机穿入山体的过近机位另列地形安全高度任务。详见“实验性大倾角近景黑面修复”。
   ⑭ @Jin **P0-2 exp1h：地形安全剔除与相机安全高度（实验性）**：四叉树地平线/视锥/AABB/SSE 接收 DEM 安全高程，地形抬高后的近景山脊不再按海拔 0 被误剔除；Renderer 每帧向 Navigator 同步目标点地形高和全局安全高，3D 目标点落在 DEM 表面，倾斜时保持至少 150m 净空，near/far 改用实际斜距。真机太白山地形开启、55° 倾角、近景放大时 `182/182、failures=0、placeholder=0`，屏幕下缘连续无黑面。详见“实验性地形安全剔除与相机安全高度”。
+  ⑮ @Jin **3D 动态叠加层贴地 stroke 飞线修复**：`Renderer::uploadGlobeOverlayDrapedChunks()` 在线/面描边沿 DEM 加密时，曾以 `const DrapeVertex &prev = corners.back()` 持有上一角点，随后继续向同一 `std::vector` 插入约 20m 加密点；vector 扩容后该引用悬空，插值经纬度可能读到垃圾内存（真机日志出现异常大经度），再烘焙为 ECEF 后表现为青色线和黄色面描边从太白山样例区域辐射到屏幕边缘，容易被误判为 GeoJSON 解析错乱。现改为先复制上一角点值再插点；临时真机诊断同时确认修复后小范围面层 DEM 命中 `3992/3992`、线层 `159/159`，省级 GeoJSON 大层保护路径仍可加载和缩放；动态叠加面入口同时允许宿主只传真实角点（四边形传 4 点），内部自动补回首点让面描边闭合。构建核对 ID：`v0.1.3-20261027-drape-strokefix2`。
   > 维护约定：**每次改动定稿后同步更新本版本说明**（与代码提交同批），未发版工作累积在本条，发版时再改版本号与“当前发布”标记。
 - **0.1.4.0（当前发布）**：三项合入——
   ① **GeoPackage 工程读写**：新增 `bridge/geopackage_io.cpp`，OGR GPKG 驱动实现工程文件（七表：tracks / measures / photos / media_groups / survey_plots / project_meta / layer_refs）整体读写，Kotlin/ArkTS 侧以 JSON 跨桥传输；写入整文件 tmp+rename **原子替换**，五张要素表 **SetFID 落盘**使记录 id 持久化（重写不重编号），读侧缺列宽容回退、写侧整文件重建自动升级 schema；
