@@ -108,6 +108,12 @@ public:
     /// 设置细节控制因子（对齐 参考实现 TiledSurfaceImage.detailControl，默认 1.0）：越大瓦片越粗、越省流量/内存。
     void setDetailControl(double detailControl);
 
+    /// @Jin 设置相对标准屏幕误差的瓦片 LOD 偏移：负数使用更粗父瓦，正数仅用于实验更细子瓦。
+    void setTileLodBias(int bias);
+
+    /// @Jin 实验模式：强制目标瓦片 LOD 等于相机显示级别，用于对比“地图级别/瓦片级别一致”的观感。
+    void setTileLodAlignDisplay(bool align);
+
     double centerLon() const { return centerLon_; }
     double centerLat() const { return centerLat_; }
     double altitude() const { return altitude_; }
@@ -119,6 +125,9 @@ public:
     /// 矢量级别可见性门控专用——zoom() 含视口高/fov 偏移项、比显示级别高约 log2(vh/212)≈3~4 级，
     /// 若用 zoom() 门控则用户在界面按显示级别设的下限永不达标（看似不生效）。瓦片 LOD 仍用 zoom()。
     int displayLevel() const;
+
+    /// @Jin 已持有导航锁时返回显示级别，供 tileLevel() 的“地图级别=瓦片级别”实验模式复用。
+    int displayLevelUnlocked() const;
 
     int viewportWidth() const { return viewportWidth_; }
     int viewportHeight() const { return viewportHeight_; }
@@ -209,6 +218,9 @@ private:
     // maxLevel 由各图层逐层传入 tileLevel(maxLevel)，不再存全局态。
     double densityFactor_ = 1.0;
     double detailControl_ = 1.0;
+    // @Jin 瓦片 LOD 实验偏移和“对齐显示级别”开关；默认 0/false，保持标准屏幕误差选择策略。
+    int tileLodBias_ = 0;
+    bool tileLodAlignDisplay_ = false;
     // @Jin 3D 相机把目标点抬到真实 DEM 表面；safety 是当前地形缓存中的保守最高点。
     double terrainTargetHeightM_ = 0.0;
     double terrainSafetyHeightM_ = 0.0;

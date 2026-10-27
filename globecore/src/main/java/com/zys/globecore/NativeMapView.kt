@@ -219,6 +219,12 @@ class NativeMapView @JvmOverloads constructor(
         if (h != 0L) NativeLib.nativeRefreshTerrainProvider(h)
     }
 
+    /** @Jin 开关相机静止后的 C++ 地形自动刷新；默认关闭，宿主需要时显式开启。 */
+    fun setTerrainProviderAutoFollow(enabled: Boolean) {
+        val h = nativeHandle
+        if (h != 0L) NativeLib.nativeSetTerrainProviderAutoFollow(h, enabled)
+    }
+
     /** @Jin 后台预取 layer.json；可在地形开关打开前调用，用于缩短首次启用等待。 */
     fun prefetchTerrainProviderMetadata() {
         val h = nativeHandle

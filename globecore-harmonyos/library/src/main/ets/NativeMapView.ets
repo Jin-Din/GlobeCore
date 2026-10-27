@@ -266,6 +266,13 @@ export struct NativeMapView {
     NativeLib.nativeRefreshTerrainProvider(this.nativeHandle);
   }
 
+  /** @Jin 开关 C++ 地形自动跟随。
+   * @Jin 开启后 native 手势或 setCamera 改变视野，静止约 700ms 会自动刷新当前中心周边 DEM。
+   * @Jin */
+  setTerrainProviderAutoFollow(enabled: boolean): void {
+    NativeLib.nativeSetTerrainProviderAutoFollow(this.nativeHandle, enabled);
+  }
+
   /** @Jin 后台预取 layer.json，不要求地形已开启。 */
   prefetchTerrainProviderMetadata(): void {
     NativeLib.nativePrefetchTerrainProviderMetadata(this.nativeHandle);
@@ -426,6 +433,23 @@ export struct NativeMapView {
   /** 当前相机显示级别（与矢量级别可见性同口径）；句柄无效返回 0 */
   cameraZoomLevel(): number {
     return NativeLib.nativeGetCameraZoomLevel(this.nativeHandle);
+  }
+
+  /** @Jin 当前相机在指定图源上限下的目标瓦片 LOD；用于诊断“界面级别”和“实际瓦片级别”的差异。 */
+  tileZoomLevel(maxLevel: number = 18): number {
+    return NativeLib.nativeGetTileZoomLevel(this.nativeHandle, maxLevel);
+  }
+
+  /** @Jin 实验性瓦片 LOD 偏移：负数更粗、0 恢复标准细节；调用后立即请求重绘。 */
+  setTileLodOffset(offset: number): void {
+    NativeLib.nativeSetTileLodOffset(this.nativeHandle, offset);
+    this.requestRender();
+  }
+
+  /** @Jin 开启后目标瓦片 LOD 直接等于相机显示级别，用于真机对比“同级”观感和请求量。 */
+  setTileLodAlignDisplay(align: boolean): void {
+    NativeLib.nativeSetTileLodAlignDisplay(this.nativeHandle, align);
+    this.requestRender();
   }
 
   /** 移除矢量图层（墓碑，GL 线程下一帧回收）：其它层 index 保持稳定，供样式变更就地换层 */

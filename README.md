@@ -502,6 +502,19 @@ console.info(view.terrainProviderStatus());
 - 状态 JSON：`engineZoom/requestedEngineTiles/requestedServiceTiles/deliveredTiles/diskHits/networkRequests/retries/cacheWrites/duplicateSkips/failures/firstTileMs/elapsedMs`，可直接用于 hilog 和页面诊断。
 - 真机数据（设备 `5KLBB25911200313`，太白山 tilt=55°）：热缓存 `182` 块全部磁盘命中、`networkRequests=0`、`firstTileMs=8ms`、`elapsedMs=101ms`；清数据冷缓存 `182` 个唯一 DEM、`182` 次网络、`firstTileMs=106ms`、`elapsedMs=3003ms`，去重 `84`、失败 `0`。
 
+### @Jin 地形 Provider 相机自动跟随（实验性，方案 B）
+
+> @Jin 实验状态：能力位于 GlobeCore C++ 层，默认 **关闭**，旧宿主不调用新 API 时保持原作者行为；当前 Harmony Demo 在地形 Provider 配置成功后显式开启。若真机体验不符合预期，宿主删除 `setTerrainProviderAutoFollow(true)` 即可回退到“手动刷新地形”模式。
+
+- @Jin 根因：native 手势直接修改 `Navigator` 并请求渲染，原先不会通知 `CesiumTerrainProvider`；ArkTS 层只能覆盖按钮 `setCamera()`，无法可靠感知 C++ 手势结束，所以平移/缩放到新区域后必须手动点“刷新地形”。
+- @Jin C++ API：`GlobeEngine::setTerrainProviderAutoFollow(bool)`。开启后，`drawFrame()` 在 GL 线程读取最新相机并计算地形任务签名；签名变化后等待约 **700ms** 防抖，再调用 `terrainProvider_->requestRefresh()`，连续手势只保留最后一次视野。
+- @Jin 当前签名：只包含 3D 模式、四舍五入后的引擎地形 z、以及中心经纬度对应的 Web Mercator 瓦片 `x/y`。这与当前 `buildTasks()` 的“中心瓦片 + 固定半径 3（7×7）”选块逻辑一致；纯 tilt/heading 改变不会触发刷新，因为固定半径选块当前不消费这些参数。
+- @Jin 平台 API：Harmony 为 `NativeMapView.setTerrainProviderAutoFollow(enabled)` / NAPI `nativeSetTerrainProviderAutoFollow`；Android 为同名 Kotlin API 和 JNI 方法。
+- @Jin 生命周期：新增 `terrainProviderMtx_` 保护 Provider 创建、销毁、开关、刷新、状态查询和帧循环访问；Provider worker 回调 `setTerrainTile()` 不反向获取该锁，避免下载线程与 GL 线程死锁。
+- @Jin 首批保护：打开地形或重新开启自动跟随后，首帧只建立签名基线，不重复打断 `setEnabled(true)` 已发起的首批 DEM 下载；2D 时暂停跟随，回到 3D 后强制记录新视野并允许一次刷新。
+- @Jin Harmony 真机 `5KLBB25911200313` 初验（2026-10-27，Demo 显式开启）：HAP 构建成功；太白山首批 `168/168`、网络 168、`elapsed=5597ms`；大幅平移后无需点按钮自动刷新，`24/24`、`elapsed=712ms`；连续按钮缩放自动刷新 z12→z13→z14；2D→3D 触发 `serviceTasks=0` 的空刷新且无网络；关闭再开启地形 `182/182` 全部磁盘命中、`elapsed=239ms`；Mars3D→210 切回后 `182/182` 全部磁盘命中、`elapsed=214ms`。
+- @Jin 已知边界：本能力只解决“视野变化后自动发起刷新”，没有把 7×7 固定窗口升级为真实视锥选块。若大倾角、极近景边缘仍缺 DEM，但 hilog 已出现新的 `refresh start`，后续应扩大半径或实现按 tilt/heading/FOV 的非对称视锥选块；签名也要同步纳入这些参数。
+
 其余 API（矢量/栅格/叠加层/拾取/定位标记/手势）与 Kotlin 侧逐一对应，参「API 概览与快速上手」；
 生命周期无需手动 onPause/onResume：native EGL 线程随 XComponent 加载/卸载自动 attach/detach。
 
@@ -563,6 +576,18 @@ console.info(view.terrainProviderStatus());
 - 根因二：连续放大后眼点可能进入或贴近附近山脊，此时影像仍已绘制（`placeholder=0`），但视野会被背光山体占满而呈整屏暗面。Renderer 每帧在生成 3D 相机前把目标点 DEM 高度和当前缓存安全高同步给 Navigator。
 - 相机安全高度：3D 目标点改为真实 DEM 表面，`altitude` 表示相对目标地形表面的高度；倾斜时若全局地形安全壳高于目标点，则按至少 150m 净空增加斜距，防止眼点穿入山脊。near/far 同步改用实际眼点—目标斜距，避免近距离地形被近裁剪面切掉。
 - 真机结果：冷启动确认构建 ID 后执行“秦岭太白山 → 加载地形 → tilt=55° → 放大 2 档”，地形 `182/182`、`failures=0`、`placeholder=0`，屏幕下缘近景连续；按钮重排后不遮挡观察区域。自动连续放大到地形 z15 时，服务端会出现一批 182 个越界/限流失败，属于后续 Provider 可用级别与请求治理任务，不影响本次正常近景机位结论。
+
+### @Jin 瓦片 LOD 诊断、运行时偏移与高分辨率密度修正
+
+> 实验状态：默认仍使用标准屏幕误差 LOD；运行时偏移和“瓦片级=地图级”只在宿主显式调用时生效，可随时恢复，不持久化。
+
+- 背景：真机 `MLR-AL10` 物理分辨率为 2560×1600，ArkUI 实测 `densityPixels=2.38`。Harmony Demo 此前固定传入 `density=1.0`，而 C++ 的瓦片细分判据按物理像素工作，导致高分辨率屏幕上标准 LOD 比预期多选约一级，注记文字视觉偏小。
+- 密度修正：宿主应把真实 DPR 传入 `NativeMapView.density`；Demo 现使用 `display.getDefaultDisplaySync().densityPixels`。同一全球视角下，固定 `density=1.0` 时目标瓦片为 z4，传入 2.38 后标准目标瓦片为 z3，与此前人工确认字体较正常的“LOD-1”观测一致。
+- 新增只读诊断：`GlobeEngine::currentTileLevel(maxLevel)` 返回当前图层目标瓦片 LOD；NAPI/ArkTS 门面提供 `tileZoomLevel(maxLevel)`，供宿主同屏显示“地图级别 / 瓦片级别”。3D 四叉树仍会按距离和 SSE 在目标 LOD 附近混入更粗叶。
+- 新增运行时实验：`GlobeEngine::setTileLodOffset(-3..2)` 在标准屏幕误差结果上做整数偏移；负数使用更粗父瓦，可减少请求量并增大注记视觉字号，0 恢复标准。
+- 新增同级实验：`GlobeEngine::setTileLodAlignDisplay(true)` 强制目标瓦片 LOD 等于仅由相机高度推导的 `displayLevel()`，用于测试“地图级=瓦片级”。该模式忽略视口高、FOV 与 DPR 的屏幕误差补偿，3D 全球大视口下会明显偏粗，仅建议作为对照，不建议直接作为默认策略。
+- Harmony 门面：`NativeMapView.tileZoomLevel()`、`NativeMapView.setTileLodOffset()`、`NativeMapView.setTileLodAlignDisplay()`；NAPI 名称为 `nativeGetTileZoomLevel`、`nativeSetTileLodOffset`、`nativeSetTileLodAlignDisplay`。
+- 缓存与限流：`TileLoader` 仍严格执行“磁盘缓存有效图像 → 未命中才联网”；HTTP 非 2xx（含天地图 429）不会写入缓存。若缓存中有历史瓦片，即使 token 被限流也应先显示缓存；卸载应用会删除沙箱缓存，冷启动后只能联网。
 
 ### 演示工程 globecore-harmonyos
 

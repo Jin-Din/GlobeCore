@@ -26,6 +26,7 @@ GlobeEngine::GlobeEngine() : renderer_(navigator_, layers_, vectorLayers_, raste
 
 GlobeEngine::~GlobeEngine() {
     // @Jin 先停 Provider 并等待下载线程退出，确保迟到回调不会再访问即将析构的 Navigator/Renderer。
+    std::lock_guard<std::mutex> terrainLock(terrainProviderMtx_);
     if (terrainProvider_) {
         terrainProvider_->setEnabled(false);
         terrainProvider_.reset();
@@ -43,6 +44,8 @@ void GlobeEngine::surfaceChanged(int width, int height) {
 }
 
 void GlobeEngine::drawFrame() {
+    // @Jin 地形自动跟随放在帧首检查：native 手势只更新 Navigator，也能在静止后由 GL 线程统一防抖刷新 DEM。
+    const bool terrainFollowWantsFrame = updateTerrainAutoFollow();
     // Renderer 返回「是否需再画一帧」（后台仍有瓦片在途/待上传）；省电模式下据此自请求下一帧，
     // 使异步到位的瓦片无需等待手势即可增量补齐；全部就绪后不再回调 → GL 线程停绘省电。
     // 全程持 layersMtx_：整帧对 layers_/vectorLayers_/rasterImageLayers_ 及其对齐缓存 layerTextures_
@@ -69,7 +72,7 @@ void GlobeEngine::drawFrame() {
             pickCv_.notify_one();
         }
     }
-    if (needRedraw && renderCallback_) renderCallback_();
+    if ((needRedraw || terrainFollowWantsFrame) && renderCallback_) renderCallback_();
 }
 
 void GlobeEngine::setCamera(const Camera &camera) {
@@ -300,6 +303,25 @@ void GlobeEngine::setVectorMinLevel(int index, int minLevel) {
 int GlobeEngine::currentZoomLevel() const {
     // 显示级别（与 app 界面同源口径）：用户按界面级别设定的 effectiveMinDisplayLevel 经此比较/门控
     return navigator_.displayLevel();
+}
+
+int GlobeEngine::currentTileLevel(int maxLevel) const {
+    // @Jin 只读返回渲染选择的目标瓦片 LOD；3D 四叉树仍可能按距离/SSE 在其附近混合更粗子树。
+    return navigator_.tileLevel(maxLevel);
+}
+
+void GlobeEngine::setTileLodOffset(int offset) {
+    // @Jin 实验开关直接给最终目标瓦片 LOD 加整数偏移；屏幕密度仍由 setDisplayDensity 按真实 DPR 参与基准计算。
+    navigator_.setTileLodBias(offset);
+    LOGI("GlobeEngine setTileLodOffset offset=%d", offset);
+    if (renderCallback_) renderCallback_();
+}
+
+void GlobeEngine::setTileLodAlignDisplay(bool align) {
+    // @Jin 同级实验只影响瓦片目标 LOD，不改变相机高度和界面地图级别。
+    navigator_.setTileLodAlignDisplay(align);
+    LOGI("GlobeEngine setTileLodAlignDisplay align=%d", align ? 1 : 0);
+    if (renderCallback_) renderCallback_();
 }
 
 void GlobeEngine::removeVectorLayer(int index) {
@@ -1018,6 +1040,7 @@ bool GlobeEngine::configureTerrainProvider(
     const std::vector<std::pair<std::string, std::string>> &headers) {
     if (baseUrl.empty() || cacheDir.empty()) return false;
 
+    std::lock_guard<std::mutex> terrainLock(terrainProviderMtx_);
     // @Jin 换源时先停旧 Provider 再清空 DEM，避免旧地址的迟到结果混入新地形。
     if (terrainProvider_) {
         terrainProvider_->setEnabled(false);
@@ -1067,8 +1090,14 @@ bool GlobeEngine::configureTerrainProvider(
 }
 
 bool GlobeEngine::setTerrainProviderEnabled(bool enabled) {
+    std::lock_guard<std::mutex> terrainLock(terrainProviderMtx_);
     if (!terrainProvider_) return false;
     terrainProvider_->setEnabled(enabled);
+    // @Jin 开启时 Provider 已立即刷新当前视口；下一帧只记录签名，不重复中断首刷。
+    terrainFollowLastSignature_.store(UINT64_MAX);
+    terrainFollowReset_.store(false);
+    terrainFollowSuppressInit_.store(enabled);
+    terrainFollowPendingSinceNs_.store(0);
     if (!enabled) {
         // @Jin Provider 关闭后清空 Renderer 的 DEM 缓存；重新开启时由新视口重新注入。
         clearTerrain();
@@ -1077,19 +1106,95 @@ bool GlobeEngine::setTerrainProviderEnabled(bool enabled) {
 }
 
 void GlobeEngine::refreshTerrainProvider() {
+    std::lock_guard<std::mutex> terrainLock(terrainProviderMtx_);
     if (terrainProvider_) terrainProvider_->requestRefresh();
 }
 
+void GlobeEngine::setTerrainProviderAutoFollow(bool enabled) {
+    terrainAutoFollow_.store(enabled);
+    // @Jin 开启自动跟随时等待下一帧记录当前签名；相机已经稳定时不额外打断正在下载的地形批次。
+    terrainFollowReset_.store(false);
+    terrainFollowSuppressInit_.store(true);
+    terrainFollowLastSignature_.store(UINT64_MAX);
+    terrainFollowPendingSinceNs_.store(0);
+    if (renderCallback_) renderCallback_();
+}
+
 void GlobeEngine::prefetchTerrainProviderMetadata() {
+    std::lock_guard<std::mutex> terrainLock(terrainProviderMtx_);
     if (terrainProvider_) terrainProvider_->prefetchMetadata();
 }
 
 std::string GlobeEngine::terrainProviderStatsJson() const {
+    std::lock_guard<std::mutex> terrainLock(terrainProviderMtx_);
     return terrainProvider_ ? terrainProvider_->statsJson() : std::string("{}");
+}
+
+bool GlobeEngine::updateTerrainAutoFollow() {
+    if (!terrainAutoFollow_.load()) return false;
+
+    TerrainViewportSnapshot viewport;
+    {
+        // @Jin 仅在取 Provider 指针和计算签名时短持生命周期锁，不阻塞换源/开关太久。
+        std::lock_guard<std::mutex> terrainLock(terrainProviderMtx_);
+        if (!terrainProvider_ || !terrainProvider_->enabled()) return false;
+
+        const Camera camera = navigator_.camera();
+        viewport.valid = navigator_.viewportHeight() > 0;
+        viewport.viewMode = viewMode();
+        viewport.viewportHeight = navigator_.viewportHeight();
+        viewport.latitude = camera.latitude;
+        viewport.longitude = camera.longitude;
+        viewport.altitude = camera.altitude;
+        viewport.tilt = camera.tilt;
+        viewport.displayZoom = static_cast<double>(currentZoomLevel());
+
+        if (!viewport.valid || viewport.viewMode != 1) {
+            // @Jin 2D 不消费 DEM；回到 3D 后重新记录签名，保证视口切换会触发一次地形刷新。
+            terrainFollowReset_.store(true);
+            terrainFollowSuppressInit_.store(false);
+            terrainFollowLastSignature_.store(UINT64_MAX);
+            terrainFollowPendingSinceNs_.store(0);
+            return false;
+        }
+
+        const uint64_t signature = terrainProvider_->viewportTaskSignature(viewport);
+        const auto now = std::chrono::steady_clock::now();
+        uint64_t lastSignature = terrainFollowLastSignature_.load();
+        const bool forceRefresh = terrainFollowReset_.exchange(false);
+        const bool initialize = lastSignature == UINT64_MAX;
+        if (initialize) {
+            terrainFollowLastSignature_.store(signature);
+            if (terrainFollowSuppressInit_.exchange(false) && !forceRefresh) {
+                // @Jin 打开地形/打开自动跟随后的首刷已由 setEnabled 或宿主显式触发，这里只建立基线。
+                return false;
+            }
+            if (!forceRefresh) return false;
+        }
+        if (forceRefresh || initialize || signature != lastSignature) {
+            terrainFollowLastSignature_.store(signature);
+            terrainFollowPendingSinceNs_.store(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count());
+            return true; // @Jin 防抖窗口内持续请求续帧，防止手势结束后 RENDERMODE_WHEN_DIRTY 提前停绘。
+        }
+
+        const long long pendingNs = terrainFollowPendingSinceNs_.load();
+        if (pendingNs == 0) return false;
+        const auto pendingAt =
+            std::chrono::steady_clock::time_point(std::chrono::nanoseconds(pendingNs));
+        constexpr auto kTerrainFollowDebounce = std::chrono::milliseconds(700);
+        if (now < pendingAt + kTerrainFollowDebounce) return true;
+
+        terrainFollowPendingSinceNs_.store(0);
+        terrainProvider_->requestRefresh();
+    }
+    return false;
 }
 
 void GlobeEngine::setTerrainProviderEventCallback(std::function<void(const std::string &)> callback) {
     std::function<void(const std::string &)> installed;
+    // @Jin 统一生命周期锁→事件锁顺序，避免帧循环/换源与回调替换并发访问 Provider。
+    std::lock_guard<std::mutex> terrainLock(terrainProviderMtx_);
     {
         std::lock_guard<std::mutex> lock(terrainEventMtx_);
         terrainEventCallback_ = callback;

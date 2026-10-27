@@ -282,6 +282,9 @@ internal object NativeLib {
     /** @Jin 按当前相机视口请求一次 C++ 地形刷新；连续请求由 native 自动合并。 */
     external fun nativeRefreshTerrainProvider(handle: Long)
 
+
+    /** @Jin 开关相机静止后的 C++ 地形自动刷新；默认关闭。 */
+    external fun nativeSetTerrainProviderAutoFollow(handle: Long, enabled: Boolean)
     /** @Jin 后台预取 layer.json 到 C++ 内存与磁盘缓存，不要求地形已开启。 */
     external fun nativePrefetchTerrainProviderMetadata(handle: Long)
 

@@ -1,6 +1,8 @@
 #ifndef GLOBECORE_CORE_GlobeEngine_H
 #define GLOBECORE_CORE_GlobeEngine_H
 
+#include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <functional>
 #include <memory>
@@ -160,6 +162,15 @@ public:
     /// 供宿主在发出屏幕范围重载前判定级别是否达标，级别不足跳过无谓加载。可任意线程调用。
     int currentZoomLevel() const;
 
+    /// @Jin 当前相机在指定图层上限下的目标瓦片 LOD，用于 Demo 同屏显示“地图级别/瓦片级别”。
+    int currentTileLevel(int maxLevel) const;
+
+    /// @Jin 实验性瓦片 LOD 偏移：-1 表示优先使用粗一级父瓦，0 恢复标准细节，便于运行时对比和回退。
+    void setTileLodOffset(int offset);
+
+    /// @Jin 开关“瓦片 LOD=相机显示级别”的实验模式，便于对比同级时的字号与请求量。
+    void setTileLodAlignDisplay(bool align);
+
     /// 移除一个矢量图层（墓碑：置 dead + visible=false，不 erase 以保持其它矢量层 index 稳定）。
     /// 其 VBO/图标纹理/CPU 几何由 Renderer 在下一帧于 GL 线程回收。文件矢量层与叠加层均适用；
     /// pickVector/drawVectorLayers 因 visible=false 自动跳过。用于样式变更时就地换层（避免整界面 recreate）。
@@ -301,6 +312,12 @@ public:
     /** @Jin 按当前相机视口请求一次 C++ 地形刷新（请求自动合并）。 */
     void refreshTerrainProvider();
 
+    /** @Jin 开关地形 Provider 的相机自动跟随。
+     * @Jin 默认关闭以保持原作者行为；宿主开启后，native 手势或 setCamera 改变视野并静止约 700ms，
+     * @Jin C++ 会自动按最新中心瓦片刷新 DEM，无需平台层重复做手势防抖。
+     * @Jin */
+    void setTerrainProviderAutoFollow(bool enabled);
+
     /** @Jin 后台预取 layer.json，不要求地形已开启。 */
     void prefetchTerrainProviderMetadata();
 
@@ -325,11 +342,21 @@ private:
     std::vector<std::unique_ptr<RasterImageLayer>> rasterImageLayers_;
     Renderer renderer_;     // 引用 navigator_、layers_、vectorLayers_、rasterImageLayers_，须在其后声明以保证构造顺序
     // @Jin 地形 Provider 在 renderer_ 之后声明：析构时先停下载线程，再释放 Renderer。
+    mutable std::mutex terrainProviderMtx_;
     std::unique_ptr<CesiumTerrainProvider> terrainProvider_;
     // @Jin 统一事件回调跨 Provider 重建保留；configure 时重新安装到新实例。
     mutable std::mutex terrainEventMtx_;
     std::function<void(const std::string &)> terrainEventCallback_;
     std::function<void()> renderCallback_; // 「需重绘」回调（由 JNI 注入，指向 requestRender）
+
+    // @Jin 地形自动跟随：由 GL 帧循环观察相机任务签名并防抖，覆盖 ArkTS 无法感知的 native 手势。
+    std::atomic<bool> terrainAutoFollow_{false};
+    std::atomic<bool> terrainFollowReset_{true};
+    std::atomic<bool> terrainFollowSuppressInit_{false};
+    std::atomic<uint64_t> terrainFollowLastSignature_{0};
+    std::atomic<long long> terrainFollowPendingSinceNs_{0};
+    /** @Jin 在渲染帧中检查防抖窗口；返回 true 表示即使影像瓦片已空闲也需要续帧等待地形刷新。 */
+    bool updateTerrainAutoFollow();
 
     // 图层容器互斥锁：保护 layers_/vectorLayers_/rasterImageLayers_ 的结构变化（push_back 会重分配
     // 内部数组，GL 线程正遍历同一数组时即读到已释放内存）。根因取证见 MobileMap-android/doc/

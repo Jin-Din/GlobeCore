@@ -63,6 +63,19 @@ void Navigator::setDetailControl(double detailControl) {
     detailControl_ = detailControl > 0.0 ? detailControl : 1.0;
 }
 
+void Navigator::setTileLodBias(int bias) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    // @Jin 允许从标准级别降到 z-3 做字号/请求量对比；正数保留少量实验空间但不作为默认策略。
+    tileLodBias_ = std::max(-3, std::min(2, bias));
+    tileLodAlignDisplay_ = false;
+}
+
+void Navigator::setTileLodAlignDisplay(bool align) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    // @Jin 同级模式是独立策略；关闭时沿用当前 bias，开启时不受 bias 影响。
+    tileLodAlignDisplay_ = align;
+}
+
 void Navigator::setViewMode(ViewMode mode) {
     std::lock_guard<std::mutex> lk(mtx_);
     mode_ = mode;
@@ -348,15 +361,19 @@ double Navigator::zoom() const {
     return zoomUnlocked();
 }
 
-int Navigator::displayLevel() const {
-    std::lock_guard<std::mutex> lk(mtx_);
-    // 与 app MercatorZoom.altitudeToLevel 逐字同源：level = floor(log2(赤道周长 / 相机高度))，钳 0..20。
-    // 仅依赖高度（不含视口高/fov 项），与用户界面看到并设定的级别一致，供矢量级别可见性门控。
+int Navigator::displayLevelUnlocked() const {
+    // @Jin 与 app MercatorZoom.altitudeToLevel 逐字同源：level = floor(log2(赤道周长 / 相机高度))，钳 0..20。
     if (altitude_ <= 0.0) return 0;
     double level = std::log2(CIRCUMFERENCE / altitude_);
     if (level < 0.0) level = 0.0;
     if (level > static_cast<double>(DISPLAY_MAX_LEVEL)) level = static_cast<double>(DISPLAY_MAX_LEVEL);
     return static_cast<int>(level);
+}
+
+int Navigator::displayLevel() const {
+    std::lock_guard<std::mutex> lk(mtx_);
+    // @Jin 公开接口加锁；瓦片 LOD 对齐实验在已持锁路径调用 displayLevelUnlocked()。
+    return displayLevelUnlocked();
 }
 
 double Navigator::zoomUnlocked() const {
@@ -478,6 +495,13 @@ int Navigator::tileLevel(int maxLevel) const {
     int level = (threshold > 0.0)
                     ? static_cast<int>(std::ceil(z - std::log2(threshold)))
                     : static_cast<int>(std::ceil(z));
+    if (tileLodAlignDisplay_) {
+        // @Jin 实验模式直接采用界面显示级别，用于验证“瓦片级别=地图级别”时注记字号和请求量。
+        level = displayLevelUnlocked();
+    } else {
+        // @Jin 普通实验档位在标准屏幕误差级别上整体偏移，负数为更粗父瓦。
+        level += tileLodBias_;
+    }
     if (level < MIN_LEVEL) level = MIN_LEVEL;
     // 末级兜底：不超过调用方传入的图源 maxLevel（逐层钳制）；zoom 继续增大时本值恒为 maxLevel，由投影拉伸末级瓦片纹理。
     int maxLv = maxLevel;

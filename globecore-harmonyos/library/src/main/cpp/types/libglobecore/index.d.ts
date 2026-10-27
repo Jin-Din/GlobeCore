@@ -61,6 +61,12 @@ interface GlobeCore {
   nativeSetVectorLayerVisible(handle: number, index: number, visible: boolean): void;
   nativeSetVectorMinLevel(handle: number, index: number, minLevel: number): void;
   nativeGetCameraZoomLevel(handle: number): number;
+  /// @Jin 当前相机在指定图层上限下的目标瓦片 LOD（3D 四叉树仍可能按距离混入更粗瓦片）。
+  nativeGetTileZoomLevel(handle: number, maxLevel: number): number;
+  /// @Jin 实验性瓦片 LOD 偏移：负数更粗，0 恢复标准细节。
+  nativeSetTileLodOffset(handle: number, offset: number): void;
+  /// @Jin 实验模式：目标瓦片 LOD 与相机地图显示级别保持一致。
+  nativeSetTileLodAlignDisplay(handle: number, align: boolean): void;
   nativeRemoveVectorLayer(handle: number, index: number): void;
 
   // ── 动态叠加层 ──
@@ -138,6 +144,8 @@ interface GlobeCore {
     maxZoom: number, concurrency: number, tileRadius: number, headersJson: string): boolean;
   nativeSetTerrainProviderEnabled(handle: number, enabled: boolean): boolean;
   nativeRefreshTerrainProvider(handle: number): void;
+  /// @Jin 开关相机静止后的 C++ 地形自动刷新；默认关闭以保持旧行为。
+  nativeSetTerrainProviderAutoFollow(handle: number, enabled: boolean): void;
   nativePrefetchTerrainProviderMetadata(handle: number): void;
   nativeTerrainProviderStatus(handle: number): string;
   /// @Jin 统一地形事件回调；payload 为含 event 与 stats 的单行 JSON，null 反注册。

@@ -97,6 +97,11 @@ public:
     /** @Jin 请求一次最新视口刷新；连续请求自动合并，只保留最后一次。 */
     void requestRefresh();
 
+    /** @Jin 计算当前视口实际会选出的中心引擎瓦片签名。
+     * @Jin 签名只包含 viewMode、引擎 z 和中心 x/y；当前固定半径选块不消费 tilt/heading，避免无谓中断 DEM 下载。
+     * @Jin */
+    uint64_t viewportTaskSignature(const TerrainViewportSnapshot &viewport) const;
+
     /** @Jin 空闲时预取 layer.json，供用户首次打开地形时直接复用内存/磁盘元数据。 */
     void prefetchMetadata();
 

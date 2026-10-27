@@ -815,6 +815,41 @@ napi_value NativeGetCameraZoomLevel(napi_env env, napi_callback_info info) {
     return gcohos::NapiMakeInt32(env, toGlobeEngine(handle)->currentZoomLevel());
 }
 
+napi_value NativeGetTileZoomLevel(napi_env env, napi_callback_info info) {
+    napi_value args[2];
+    gcohos::NapiGetArgs(env, info, 2, args);
+    int64_t handle = 0;
+    int32_t maxLevel = 18;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return gcohos::NapiMakeInt32(env, 0);
+    gcohos::NapiGetInt32(env, args[1], maxLevel);
+    // @Jin 返回当前图层目标瓦片 LOD，供 Demo 区分界面显示级别与实际纹理细分级别。
+    return gcohos::NapiMakeInt32(env, toGlobeEngine(handle)->currentTileLevel(maxLevel));
+}
+
+napi_value NativeSetTileLodOffset(napi_env env, napi_callback_info info) {
+    napi_value args[2];
+    gcohos::NapiGetArgs(env, info, 2, args);
+    int64_t handle = 0;
+    int32_t offset = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return nullptr;
+    gcohos::NapiGetInt32(env, args[1], offset);
+    // @Jin 运行时实验档位：负数更粗、0 恢复；不持久化，重启应用自动回到标准 LOD。
+    toGlobeEngine(handle)->setTileLodOffset(offset);
+    return nullptr;
+}
+
+napi_value NativeSetTileLodAlignDisplay(napi_env env, napi_callback_info info) {
+    napi_value args[2];
+    gcohos::NapiGetArgs(env, info, 2, args);
+    int64_t handle = 0;
+    bool align = false;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return nullptr;
+    gcohos::NapiGetBool(env, args[1], align);
+    // @Jin 同级实验开关：瓦片目标 LOD 直接取相机显示级别，便于真机对比字号和请求数量。
+    toGlobeEngine(handle)->setTileLodAlignDisplay(align);
+    return nullptr;
+}
+
 napi_value NativeRemoveVectorLayer(napi_env env, napi_callback_info info) {
     napi_value args[2];
     gcohos::NapiGetArgs(env, info, 2, args);
@@ -1165,6 +1200,18 @@ napi_value NativeRefreshTerrainProvider(napi_env env, napi_callback_info info) {
     return nullptr;
 }
 
+/// @Jin 开关 C++ 帧循环中的地形自动跟随；默认关闭，宿主开启后无需在手势结束时手动刷新。
+napi_value NativeSetTerrainProviderAutoFollow(napi_env env, napi_callback_info info) {
+    napi_value args[2];
+    gcohos::NapiGetArgs(env, info, 2, args);
+    int64_t handle = 0;
+    bool enabled = false;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return nullptr;
+    gcohos::NapiGetBool(env, args[1], enabled);
+    toGlobeEngine(handle)->setTerrainProviderAutoFollow(enabled);
+    return nullptr;
+}
+
 /// @Jin 后台预取 layer.json。
 napi_value NativePrefetchTerrainProviderMetadata(napi_env env, napi_callback_info info) {
     napi_value args[1];
@@ -1248,6 +1295,10 @@ napi_value RegisterGlobeEngine(napi_env env, napi_value exports) {
         {"nativeSetVectorLayerVisible", nullptr, NativeSetVectorLayerVisible, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeSetVectorMinLevel", nullptr, NativeSetVectorMinLevel, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeGetCameraZoomLevel", nullptr, NativeGetCameraZoomLevel, nullptr, nullptr, nullptr, napi_default, nullptr},
+        // @Jin 瓦片 LOD 诊断与运行时粗一级实验开关，默认偏移 0，不影响既有调用方。
+        {"nativeGetTileZoomLevel", nullptr, NativeGetTileZoomLevel, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"nativeSetTileLodOffset", nullptr, NativeSetTileLodOffset, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"nativeSetTileLodAlignDisplay", nullptr, NativeSetTileLodAlignDisplay, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeRemoveVectorLayer", nullptr, NativeRemoveVectorLayer, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeAddOverlayLayer", nullptr, NativeAddOverlayLayer, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeUpdateOverlayPoints", nullptr, NativeUpdateOverlayPoints, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -1273,6 +1324,7 @@ napi_value RegisterGlobeEngine(napi_env env, napi_value exports) {
         {"nativeConfigureTerrainProvider", nullptr, NativeConfigureTerrainProvider, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeSetTerrainProviderEnabled", nullptr, NativeSetTerrainProviderEnabled, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeRefreshTerrainProvider", nullptr, NativeRefreshTerrainProvider, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"nativeSetTerrainProviderAutoFollow", nullptr, NativeSetTerrainProviderAutoFollow, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativePrefetchTerrainProviderMetadata", nullptr, NativePrefetchTerrainProviderMetadata, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeTerrainProviderStatus", nullptr, NativeTerrainProviderStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeSetTerrainProviderEventCallback", nullptr, NativeSetTerrainProviderEventCallback, nullptr, nullptr, nullptr, napi_default, nullptr},

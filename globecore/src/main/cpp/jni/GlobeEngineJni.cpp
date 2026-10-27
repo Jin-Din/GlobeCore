@@ -800,6 +800,14 @@ Java_com_zys_globecore_NativeLib_nativeRefreshTerrainProvider(
     toGlobeEngine(handle)->refreshTerrainProvider();
 }
 
+// @Jin 开关相机静止后的地形自动刷新；默认关闭，由 Android 宿主显式启用。
+JNIEXPORT void JNICALL
+Java_com_zys_globecore_NativeLib_nativeSetTerrainProviderAutoFollow(
+    JNIEnv * /*env*/, jobject /*thiz*/, jlong handle, jboolean enabled) {
+    if (handle == 0) return;
+    toGlobeEngine(handle)->setTerrainProviderAutoFollow(enabled == JNI_TRUE);
+}
+
 // @Jin 后台预取 layer.json，不要求地形 Provider 已开启。
 JNIEXPORT void JNICALL
 Java_com_zys_globecore_NativeLib_nativePrefetchTerrainProviderMetadata(

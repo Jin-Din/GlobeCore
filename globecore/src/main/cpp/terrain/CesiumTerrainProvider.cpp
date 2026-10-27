@@ -162,6 +162,35 @@ void CesiumTerrainProvider::requestRefresh() {
     waitCv_.notify_all();
 }
 
+uint64_t CesiumTerrainProvider::viewportTaskSignature(const TerrainViewportSnapshot &viewport) const {
+    if (!viewport.valid) return 0;
+    CesiumTerrainMeta meta;
+    {
+        // @Jin 只在拷贝元数据时持锁；签名计算不得阻塞 layer.json 解析与 Provider 重建。
+        std::lock_guard<std::mutex> lock(metaMtx_);
+        meta = meta_;
+    }
+    int engineZoom = static_cast<int>(std::llround(viewport.displayZoom));
+    const int maxZoom = meta.ok ? meta.maxZoom : options_.maxZoom;
+    engineZoom = std::max(0, std::min(maxZoom, engineZoom));
+
+    int centerX = 0;
+    int centerY = 0;
+    lonLatToWebMercatorTile(engineZoom, viewport.longitude, viewport.latitude, centerX, centerY);
+
+    // @Jin FNV-1a 只哈希当前 buildTasks 真正消费的 viewMode/中心瓦片，tilt 暂不影响固定半径选块。
+    uint64_t hash = 1469598103934665603ull;
+    auto mixValue = [&hash](uint64_t value) {
+        hash ^= value;
+        hash *= 1099511628211ull;
+    };
+    mixValue(static_cast<uint64_t>(viewport.viewMode + 1));
+    mixValue(static_cast<uint64_t>(engineZoom + 1));
+    mixValue(static_cast<uint64_t>(centerX + 1));
+    mixValue(static_cast<uint64_t>(centerY + 1));
+    return hash;
+}
+
 void CesiumTerrainProvider::prefetchMetadata() {
     if (stopping_.load()) return;
     metadataPrefetchPending_.store(true);

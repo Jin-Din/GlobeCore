@@ -304,6 +304,28 @@ export class NativeLib {
     return gc.nativeGetCameraZoomLevel(handle);
   }
 
+  // @Jin 查询目标瓦片 LOD，用于 Demo 同时展示相机显示级别和实际纹理细分级别。
+  static nativeGetTileZoomLevel(handle: number, maxLevel: number): number {
+    if (handle === 0) {
+      return 0;
+    }
+    return gc.nativeGetTileZoomLevel(handle, maxLevel);
+  }
+
+  // @Jin 设置实验性瓦片 LOD 偏移：负数更粗，0 恢复；应用重启后自动保持标准默认值。
+  static nativeSetTileLodOffset(handle: number, offset: number): void {
+    if (handle !== 0) {
+      gc.nativeSetTileLodOffset(handle, offset);
+    }
+  }
+
+  // @Jin 开启/关闭“瓦片 LOD=地图显示级别”的实验模式。
+  static nativeSetTileLodAlignDisplay(handle: number, align: boolean): void {
+    if (handle !== 0) {
+      gc.nativeSetTileLodAlignDisplay(handle, align);
+    }
+  }
+
   static nativeRemoveVectorLayer(handle: number, index: number): void {
     if (handle !== 0) {
       gc.nativeRemoveVectorLayer(handle, index);
@@ -585,6 +607,13 @@ export class NativeLib {
   static nativeRefreshTerrainProvider(handle: number): void {
     if (handle !== 0) {
       gc.nativeRefreshTerrainProvider(handle);
+    }
+  }
+
+  /** @Jin 开关 C++ 地形自动跟随；默认关闭，由宿主按产品体验显式启用。 */
+  static nativeSetTerrainProviderAutoFollow(handle: number, enabled: boolean): void {
+    if (handle !== 0) {
+      gc.nativeSetTerrainProviderAutoFollow(handle, enabled);
     }
   }
 
