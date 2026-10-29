@@ -11,6 +11,7 @@
 #include "util/Log.h"
 #include "vector/GdalBootstrap.h"
 #include "vector/VectorReader.h"
+#include "vector/VectorSourceResolver.h" // @Jin 在线 GeoJSON 日志脱敏与 URL 识别。
 
 namespace globecore {
 namespace {
@@ -72,6 +73,7 @@ void GlobeEngine::drawFrame() {
     // 全程持 layersMtx_：整帧对 layers_/vectorLayers_/rasterImageLayers_ 及其对齐缓存 layerTextures_
     // 做下标遍历，须与 UI 线程 add* 的 push_back（可能重分配内部数组）互斥（见 GlobeEngine.h 注释）。
     // renderCallback_（requestRender）非阻塞，锁内调用安全；不嵌套取锁，无死锁路径。
+    renderer_.setCameraFlightActive(cameraFlightWantsFrame); // @Jin flyTo 动画帧使用与手势相同的保守 GL 预算。
     std::lock_guard<std::mutex> lock(layersMtx_);
     bool needRedraw = renderer_.onDrawFrame();
     // 处理 2D GPU 拾取请求：UI 线程（pickVector）设 pending→触发本帧→renderPickPass2D→写结果→notify
@@ -336,9 +338,14 @@ std::string GlobeEngine::rasterImageError(int index) const {
 int GlobeEngine::addVectorLayer(const std::string &path, const VectorStyle &style,
                                 std::vector<uint8_t> iconRgba, int iconW, int iconH,
                                 bool hasExtent, double minLon, double minLat,
-                                double maxLon, double maxLat, int maxFeatures) {
+                                double maxLon, double maxLat, int maxFeatures,
+                                const std::string &vectorCacheDir) {
     // 矢量层与瓦片层同口径：以 unique_ptr 持有保证地址稳定，加入后不删除只经可见性开关显隐。
-    auto layer = std::make_unique<VectorLayer>(path, style, hasExtent, minLon, minLat, maxLon, maxLat, maxFeatures);
+    // @Jin 同一入口同时支持本地路径和实验性 http/https GeoJSON URL；远程源会先落应用私有缓存。
+    auto layer = std::make_unique<VectorLayer>(path, style, hasExtent, minLon, minLat, maxLon, maxLat,
+                                               maxFeatures, vectorCacheDir);
+    // @Jin 只有实验性在线 GeoJSON 源先接入 DEM 贴地烘焙；本地 shp/kml/GeoJSON 保持旧路径，降低本轮回归面。
+    layer->remoteVectorSource = VectorSourceResolver::isHttpUrl(path);
     // 点要素图标（可选）：在加入前设定、之后只读，GL 线程懒上传纹理（避开 UI/GL 竞争）。
     if (!iconRgba.empty() && iconW > 0 && iconH > 0) {
         layer->iconRgba = std::move(iconRgba);
@@ -352,8 +359,10 @@ int GlobeEngine::addVectorLayer(const std::string &path, const VectorStyle &styl
         vectorLayers_.push_back(std::move(layer));
         index = static_cast<int>(vectorLayers_.size()) - 1;
     }
-    LOGI("GlobeEngine addVectorLayer index=%d hasExtent=%d extent=[%.6f,%.6f,%.6f,%.6f] path=%s",
-         index, hasExtent ? 1 : 0, minLon, minLat, maxLon, maxLat, path.c_str());
+    LOGI("GlobeEngine addVectorLayer index=%d hasExtent=%d extent=[%.6f,%.6f,%.6f,%.6f] source=%s remote=%d",
+         index, hasExtent ? 1 : 0, minLon, minLat, maxLon, maxLat,
+         VectorSourceResolver::redactUrlForLog(path).c_str(),
+         VectorSourceResolver::isHttpUrl(path) ? 1 : 0);
     // 新层异步加载中，主动请求一帧启动绘制（加载就绪后 drawVectorLayers 会持续请求重绘直到上传）。
     if (renderCallback_) renderCallback_();
     return index;

@@ -28,7 +28,8 @@ public:
     /// [maxFeatures] 为单次加载要素预算（≤0 取读取器硬上限，防密集数据 OOM）。
     VectorLoader(std::string path, VectorStyle style,
                  bool hasExtent = false, double minLon = 0.0, double minLat = 0.0,
-                 double maxLon = 0.0, double maxLat = 0.0, int maxFeatures = 0);
+                 double maxLon = 0.0, double maxLat = 0.0, int maxFeatures = 0,
+                 std::string vectorCacheDir = std::string());
 
     /// 内存数据源模式（动态叠加）：不读文件、不起后台线程；由宿主经 [setData] 推送 WGS84 几何，
     /// 在调用线程同步构建 [VectorGeometry]，再经与文件模式相同的状态机（Ready → drainReady）交接给
@@ -64,7 +65,8 @@ public:
     std::string error() const;
 
 private:
-    enum class State { Idle, Loading, Ready, Failed, Consumed };
+    // @Jin 在线 GeoJSON 首版拆出下载/读取/构建状态，便于加载提示和问题定位。
+    enum class State { Idle, Loading, Downloading, Reading, Building, Ready, Failed, Consumed };
 
     void run();
 
@@ -73,6 +75,12 @@ private:
     void ensureWorkerLocked();
 
     std::string path_;
+    // @Jin 以下四项描述在线 URL → 本地缓存文件的 Source 解析结果；本地文件路径保持零改动。
+    bool remoteSource_ = false;
+    std::string cachePath_;
+    std::string effectivePath_;
+    std::string sourceLogName_;
+    std::string vectorCacheDir_;
     VectorStyle style_;
     bool memMode_ = false;   // true=内存数据源（动态叠加，无文件/后台线程）；false=文件模式
 

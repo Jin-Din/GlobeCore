@@ -144,7 +144,9 @@ public:
     int addVectorLayer(const std::string &path, const VectorStyle &style,
                        std::vector<uint8_t> iconRgba = {}, int iconW = 0, int iconH = 0,
                        bool hasExtent = false, double minLon = 0.0, double minLat = 0.0,
-                       double maxLon = 0.0, double maxLat = 0.0, int maxFeatures = 0);
+                       double maxLon = 0.0, double maxLat = 0.0, int maxFeatures = 0,
+                       // @Jin P0 在线 GeoJSON 实验能力：Android 传应用私有缓存目录，本地文件默认空串。
+                       const std::string &vectorCacheDir = std::string());
 
     /// 按新屏幕范围重载指定矢量层（index 为 [addVectorLayer] 次序）。转发到 VectorLoader::reload，
     /// 后台按新范围重读建新几何，就绪后由 GL 线程同帧替换旧几何（Swap-on-ready，无空窗）。

@@ -483,6 +483,7 @@ Java_com_zys_globecore_NativeLib_nativeGetRasterImageError(JNIEnv *env, jobject 
 // 添加一个矢量图层（native 直接读文件：GDAL/OGR 读取 + 重投影 + earcut 三角剖分，异步加载）。
 // 颜色为 #AARRGGBB 整型，线宽为像素、点半径为 dp。labelField 非空时逐要素取该字段值为标注文本
 // （labelSize 为字号缩放、1.0=基准）。返回新图层索引（0 起）；句柄/路径无效返回 -1。
+// @Jin vectorCacheDir 为 Android 应用私有缓存目录；仅实验性在线 GeoJSON URL 使用，本地路径可传空串。
 JNIEXPORT jint JNICALL
 Java_com_zys_globecore_NativeLib_nativeAddVectorLayer(JNIEnv *env, jobject /*thiz*/, jlong handle,
                                                          jstring path,
@@ -495,7 +496,8 @@ Java_com_zys_globecore_NativeLib_nativeAddVectorLayer(JNIEnv *env, jobject /*thi
                                                          jstring featureStyleOverride,
                                                          jintArray iconArgb, jint iconW, jint iconH,
                                                          jboolean hasExtent, jdouble minLon, jdouble minLat,
-                                                         jdouble maxLon, jdouble maxLat, jint maxFeatures) {
+                                                         jdouble maxLon, jdouble maxLat, jint maxFeatures,
+                                                         jstring vectorCacheDir) {
     if (handle == 0 || path == nullptr) return -1;
     const char *pathUtf = env->GetStringUTFChars(path, nullptr);
     if (pathUtf == nullptr) return -1;
@@ -551,10 +553,14 @@ Java_com_zys_globecore_NativeLib_nativeAddVectorLayer(JNIEnv *env, jobject /*thi
         }
     }
 
+    // @Jin 在线 GeoJSON 需要宿主私有目录；不传目录时 native 自动拒绝远程源但保持本地文件能力。
+    const char *vectorCacheUtf = vectorCacheDir != nullptr ? env->GetStringUTFChars(vectorCacheDir, nullptr) : nullptr;
+    const std::string vectorCacheDirUtf = vectorCacheUtf != nullptr ? std::string(vectorCacheUtf) : std::string();
     const jint index = toGlobeEngine(handle)->addVectorLayer(std::string(pathUtf), style,
                                                              std::move(iconRgba), iconW, iconH,
                                                              hasExtent == JNI_TRUE, minLon, minLat,
-                                                             maxLon, maxLat, maxFeatures);
+                                                             maxLon, maxLat, maxFeatures, vectorCacheDirUtf);
+    if (vectorCacheUtf != nullptr) env->ReleaseStringUTFChars(vectorCacheDir, vectorCacheUtf);
     env->ReleaseStringUTFChars(path, pathUtf);
     return index;
 }

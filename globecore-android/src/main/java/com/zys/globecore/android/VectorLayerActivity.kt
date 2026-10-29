@@ -3,18 +3,15 @@ package com.zys.globecore.android
 import android.os.Bundle
 import com.zys.globecore.Camera
 import com.zys.globecore.FeatureGeometry
-import com.zys.globecore.NativeLayerInfo
 import com.zys.globecore.NativeMapView
 import com.zys.globecore.VectorStyle
-import java.io.File
 
 /**
  * 演示 03 · 矢量图层与拾取（对应 tutorials/03「矢量图层与拾取」）：
- *  - [NativeMapView.addVectorLayer]：OGR 可打开的任意格式（此处内置 GeoJSON），
- *    [VectorStyle] 承载面填充/描边/标注样式，异步读取 + 三角剖分，就绪自动重绘；
- *  - [NativeMapView.pickVector]：屏幕点命中 → [layerIndex, fid]；
- *  - [NativeMapView.featureGeometry] + 叠加层：选中要素高亮（noPick 退出拾取竞争）；
- *  - [NativeLayerInfo.getLayerExtent]：建层前探测文件四至，相机一键缩放。
+ *  - @Jin [NativeMapView.addVectorLayer]：直接传入在线省级 GeoJSON URL，native 下载缓存后复用 OGR 管线；
+ *  - @Jin [VectorStyle] 承载面填充/描边/标注样式，异步读取 + 三角剖分，就绪自动重绘；
+ *  - @Jin [NativeMapView.pickVector]：屏幕点命中 → [layerIndex, fid]；
+ *  - @Jin [NativeMapView.featureGeometry] + 叠加层：选中要素高亮（noPick 退出拾取竞争）。
  */
 class VectorLayerActivity : BaseMapActivity() {
 
@@ -22,21 +19,14 @@ class VectorLayerActivity : BaseMapActivity() {
 
     private var vectorIdx = -1
     private var highlightIdx = -1
-    private lateinit var samplePath: String
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // 把 assets 里的示例 GeoJSON 解到文件目录（OGR 按文件路径读取）
-        samplePath = File(filesDir, "sample.geojson").apply {
-            assets.open("sample.geojson").use { src ->
-                outputStream().use { out -> src.copyTo(out) }
-            }
-        }.absolutePath
-
-        // 在线高德影像底图；本演示默认 2D 平面
+        // @Jin 省级 GeoJSON 改为直接测试在线 Source；首次下载，后续由 native vector-cache 命中本地缓存。
+        // @Jin 在线高德影像底图；本演示默认 2D 平面，初始给全国视角便于观察省级边界。
         map.setViewMode(NativeMapView.ViewMode.TWO_D)
-        addBasemap(Camera(latitude = 39.91, longitude = 116.41, altitude = 25_000.0))
+        addBasemap(Camera(latitude = 35.2, longitude = 105.5, altitude = 9_000_000.0))
 
         addDemoAction(getString(R.string.action_add_vector)) { addVector() }
         addDemoAction("放大") { zoomIn() }
@@ -48,18 +38,10 @@ class VectorLayerActivity : BaseMapActivity() {
             toast("矢量层已加载（index=$vectorIdx）")
             return
         }
-        // 建层前探测元信息：四至驱动相机缩放到数据范围
-        NativeLayerInfo.getLayerExtent(samplePath)?.let { (minLon, minLat, maxLon, maxLat) ->
-            toast("图层四至: [$minLon, $minLat, $maxLon, $maxLat]")
-            map.setCamera(Camera(
-                latitude = (minLat + maxLat) / 2,
-                longitude = (minLon + maxLon) / 2,
-                altitude = 22_000.0,
-            ))
-        }
-        // labelField="name"：逐要素取 name 属性作文字标注（native 自动探测系统 CJK 字体）
+        // @Jin 不再由 demo 预先下载/拷贝文件，直接把 210 服务上的 province.json 交给 SDK 验证在线 GeoJSON P0。
+        // @Jin labelField="name"：逐要素取 name 属性作文字标注（native 自动探测系统 CJK 字体）
         vectorIdx = map.addVectorLayer(
-            samplePath,
+            PROVINCE_GEOJSON_URL,
             VectorStyle(
                 fillColor = 0x664A8FE3.toInt(),
                 outlineColor = 0xFFFFFFFF.toInt(),
@@ -67,7 +49,8 @@ class VectorLayerActivity : BaseMapActivity() {
                 labelOutline = true,
             ),
         )
-        toast("矢量层已加入 index=$vectorIdx（异步读取，就绪自动显示）")
+        map.setCamera(Camera(latitude = 35.2, longitude = 105.5, altitude = 9_000_000.0))
+        toast("省级在线 GeoJSON 已加入 index=$vectorIdx（首次下载，就绪自动显示）")
 
         // 单击拾取：命中要素画高亮叠加层（选中态口径），高亮层不参与拾取竞争
         map.setOnTapListener { x, y ->
@@ -129,5 +112,10 @@ class VectorLayerActivity : BaseMapActivity() {
     override fun onDestroy() {
         clearHighlight()
         super.onDestroy()
+    }
+    companion object {
+        // @Jin P0 真机验证地址：公开 HTTP 内网服务，SDK 下载到 filesDir/globecore/vector-cache 后交给 OGR。
+        private const val PROVINCE_GEOJSON_URL =
+            "http://210.74.129.84:8520/app-pub/web-data/geojson/district/province.json"
     }
 }

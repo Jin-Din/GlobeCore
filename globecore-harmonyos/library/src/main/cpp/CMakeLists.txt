@@ -33,6 +33,8 @@ message(STATUS "globecore-harmonyos: GLOBECORE_ENGINE_ROOT=${GLOBECORE_ENGINE_RO
 include_directories(${GLOBECORE_ENGINE_ROOT})
 # 第三方头（curl/gdal/proj/sqlite/zlib 等），双平台共用同一份
 include_directories(${GLOBECORE_ENGINE_ROOT}/include)
+# @Jin OHOS 专属 NAPI/桩实现头文件目录（LITE GeoJSON reader 与 napi_* 同层引用）。
+include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 
 # 目标 ABI 变量名差异：Android NDK 用 ANDROID_ABI，OHOS toolchain 用 OHOS_ARCH
 set(GLOBECORE_ABI ${OHOS_ARCH})
@@ -124,8 +126,11 @@ endif() # NOT GLOBECORE_LITE
 option(GLOBECORE_LITE "裁剪 GDAL/PROJ/KML 依赖链（仅在线瓦片+三维地形）" OFF)
 
 if(GLOBECORE_LITE)
-    message(STATUS "globecore-harmonyos: GLOBECORE_LITE=ON —— 禁用 GDAL/PROJ/KML，改用 lite_gdal_stubs")
-    set(GC_GDAL_SOURCES ohos/lite_gdal_stubs.cpp)
+    message(STATUS "globecore-harmonyos: GLOBECORE_LITE=ON —— 禁用 GDAL/PROJ/KML，改用 lite_gdal_stubs + 原生 GeoJSON reader")
+    # @Jin LITE 保留无 GDAL 依赖的 GeoJSON 能力，使 HarmonyOS NEXT SDK 可直接加载在线 GeoJSON URL。
+    set(GC_GDAL_SOURCES
+            ohos/lite_gdal_stubs.cpp
+            ohos/lite_geojson_reader.cpp)
 else()
     set(GC_GDAL_SOURCES
             # GDAL 引导 + OGR 矢量读取 + KML 样式
@@ -190,6 +195,9 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         ${GLOBECORE_ENGINE_ROOT}/layer/RasterImageLoader.cpp
         # 网络取瓦片（libcurl 封装）
         ${GLOBECORE_ENGINE_ROOT}/net/HttpClient.cpp
+        # @Jin P0 在线 GeoJSON Source 的 URL 解析与下载缓存；LITE 下由 ohos/lite_geojson_reader.cpp 解析缓存文件。
+        ${GLOBECORE_ENGINE_ROOT}/vector/VectorSourceResolver.cpp
+        ${GLOBECORE_ENGINE_ROOT}/vector/RemoteVectorCache.cpp
         # 几何构建（GdalBootstrap/VectorReader/KmlStyle 见 GC_GDAL_SOURCES，LITE 下由桩替代）
         ${GLOBECORE_ENGINE_ROOT}/vector/VectorBuilder.cpp
         # MVT/PBF 矢量瓦片解码器（手写 protobuf wire-format）

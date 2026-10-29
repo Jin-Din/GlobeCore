@@ -10,7 +10,7 @@
     <string name="demo_globe_title">02 · 2D / 3D 视图切换</string>
     <string name="demo_globe_desc">在线高德影像底图；平面与球体切换 + 放大/缩小；3D 可旋转/俯仰</string>
     <string name="demo_vector_title">03 · 矢量图层与拾取</string>
-    <string name="demo_vector_desc">默认 2D 高德影像底图；读取内置 GeoJSON，单击拾取高亮 + 放大/缩小</string>
+    <string name="demo_vector_desc">默认 2D 高德影像底图；加载在线省级 GeoJSON，单击拾取高亮 + 放大/缩小</string>
     <string name="demo_overlay_title">04 · 动态叠加层绘制</string>
     <string name="demo_overlay_desc">默认 2D 高德影像底图；单击加点实时绘制折线/多边形（测量）+ 放大/缩小</string>
     <string name="demo_marker_title">05 · 定位标记（蓝点）</string>
@@ -19,7 +19,7 @@
     <!-- 通用操作 -->
     <string name="action_2d">2D</string>
     <string name="action_3d">3D</string>
-    <string name="action_add_vector">加载矢量层</string>
+    <string name="action_add_vector">加载省级在线GeoJSON</string>
     <string name="action_toggle_line_polygon">切换：多边形</string>
     <string name="action_undo">撤销点</string>
     <string name="action_clear">清空</string>

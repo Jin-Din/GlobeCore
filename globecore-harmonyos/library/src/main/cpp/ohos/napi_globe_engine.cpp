@@ -718,8 +718,8 @@ napi_value NativeGetRasterImageError(napi_env env, napi_callback_info info) {
 // ── 矢量图层 ──
 
 napi_value NativeAddVectorLayer(napi_env env, napi_callback_info info) {
-    napi_value args[26];
-    gcohos::NapiGetArgs(env, info, 26, args);
+    napi_value args[27];
+    gcohos::NapiGetArgs(env, info, 27, args);
     int64_t handle = 0;
     if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return gcohos::NapiMakeInt32(env, -1);
     const std::string path = gcohos::NapiGetString(env, args[1]);
@@ -756,9 +756,11 @@ napi_value NativeAddVectorLayer(napi_env env, napi_callback_info info) {
     gcohos::NapiGetDouble(env, args[22], minLat);
     gcohos::NapiGetDouble(env, args[23], maxLon);
     gcohos::NapiGetDouble(env, args[24], maxLat);
-    // maxFeatures 为第 26 个参数（NativeLib 末位，缺省 0 = 引擎默认上限）
+    // @Jin maxFeatures 为第 26 个参数；vectorCacheDir 为第 27 个参数，供在线 GeoJSON 私有缓存使用。
     int32_t maxFeatures = 0;
     if (args[25] != nullptr) gcohos::NapiGetInt32(env, args[25], maxFeatures);
+    // @Jin HarmonyOS NEXT 宿主传入应用私有目录；http/https GeoJSON 由共享 C++ 下载器落盘到这里。
+    const std::string vectorCacheDir = gcohos::NapiGetString(env, args[26]);
 
     globecore::VectorStyle style;
     unpackArgb(fillColor, style.fillR, style.fillG, style.fillB, style.fillA);
@@ -783,7 +785,7 @@ napi_value NativeAddVectorLayer(napi_env env, napi_callback_info info) {
     std::vector<uint8_t> iconRgba = iconArgbToRgba(iconArgb, iconW, iconH);
     const int index = toGlobeEngine(handle)->addVectorLayer(
             path, style, std::move(iconRgba), iconW, iconH,
-            hasExtent, minLon, minLat, maxLon, maxLat, maxFeatures);
+            hasExtent, minLon, minLat, maxLon, maxLat, maxFeatures, vectorCacheDir);
     return gcohos::NapiMakeInt32(env, index);
 }
 

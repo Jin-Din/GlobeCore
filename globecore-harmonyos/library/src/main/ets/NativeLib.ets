@@ -265,7 +265,8 @@ export class NativeLib {
     featureStyleOverride: string,
     iconArgb: number[] | undefined | null, iconW: number, iconH: number,
     hasExtent: boolean, minLon: number, minLat: number, maxLon: number, maxLat: number,
-    maxFeatures: number): number {
+    // @Jin 第 27 个 NAPI 参数：HarmonyOS NEXT 宿主应用私有矢量缓存目录，在线 GeoJSON 下载后由 native 读取。
+    maxFeatures: number, vectorCacheDir: string): number {
     if (handle === 0) {
       return -1;
     }
@@ -278,7 +279,7 @@ export class NativeLib {
       labelOutline, toInt32(labelOutlineColor),
       featureStyleOverride,
       toInt32Array(iconArgb), iconW, iconH,
-      hasExtent, minLon, minLat, maxLon, maxLat, maxFeatures);
+      hasExtent, minLon, minLat, maxLon, maxLat, maxFeatures, vectorCacheDir);
   }
 
   static nativeUpdateVectorExtent(handle: number, index: number, hasExtent: boolean,

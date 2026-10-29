@@ -58,7 +58,9 @@ interface GlobeCore {
     featureStyleOverride: string,
     iconArgb: Int32Array | undefined | null, iconW: number, iconH: number,
     hasExtent: boolean, minLon: number, minLat: number, maxLon: number, maxLat: number,
-    maxFeatures: number): number;
+    maxFeatures: number,
+    /** @Jin 应用私有缓存目录；实验性 http/https GeoJSON URL 下载到其 url/ 子目录。 */
+    vectorCacheDir: string): number;
   nativeUpdateVectorExtent(handle: number, index: number, hasExtent: boolean,
     minLon: number, minLat: number, maxLon: number, maxLat: number, maxFeatures: number): void;
   nativeHasVectorLoading(handle: number): boolean;

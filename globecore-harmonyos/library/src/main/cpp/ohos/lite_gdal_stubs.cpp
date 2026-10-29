@@ -20,12 +20,32 @@
 #include "raster/RasterRenderer.h"
 #include "vector/GdalBootstrap.h"
 #include "vector/VectorReader.h"
+#include "ohos/lite_geojson_reader.h" // @Jin LITE 下无 GDAL 的 GeoJSON 最小读取通路。
 
+#include <algorithm>
+#include <cctype>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 namespace globecore {
+namespace {
+
+// @Jin LITE 只把 JSON/GeoJSON 文件接管到自带 reader；shp/kml/tif 等仍明确提示需要非 LITE/GDAL 构建。
+bool hasGeoJsonExtension(const std::string &path) {
+    auto endsWith = [&](const std::string &suffix) {
+        if (path.size() < suffix.size()) return false;
+        for (size_t i = 0; i < suffix.size(); ++i) {
+            const char actual = static_cast<char>(
+                std::tolower(static_cast<unsigned char>(path[path.size() - suffix.size() + i])));
+            if (actual != suffix[i]) return false;
+        }
+        return true;
+    };
+    return endsWith(".geojson") || endsWith(".json");
+}
+
+} // @Jin anonymous namespace
 
 // ── RasterRenderer：本地 GeoTIFF/img 整幅或分瓦片重投影渲染（依赖 GDAL warp）──
 
@@ -78,12 +98,14 @@ VectorReadResult readVectorFile(const std::string &path, const std::string &labe
                                 double minLon, double minLat, double maxLon, double maxLat,
                                 int maxFeatures,
                                 const std::unordered_map<long long, std::string> *labelFieldOverrides) {
-    (void)path; (void)labelField; (void)hasExtent;
-    (void)minLon; (void)minLat; (void)maxLon; (void)maxLat;
-    (void)maxFeatures; (void)labelFieldOverrides;
+    // @Jin 远程 URL 已由共享 VectorLoader 下载为 .geojson 私有缓存；LITE 在这里直接解析缓存，不链接 OGR。
+    if (hasGeoJsonExtension(path)) {
+        return readLiteGeoJsonFile(path, labelField, hasExtent, minLon, minLat, maxLon, maxLat,
+                                   maxFeatures, labelFieldOverrides);
+    }
     VectorReadResult r;
     r.ok = false;
-    r.error = "当前为 LITE 构建（未链接 GDAL/OGR），不支持本地矢量文件直读";
+    r.error = "当前为 LITE 构建（未链接 GDAL/OGR），仅支持 GeoJSON 矢量文件";
     return r;
 }
 

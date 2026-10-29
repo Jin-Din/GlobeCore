@@ -661,6 +661,12 @@ VectorGeometry buildGeometry(const VectorReadResult &r, const VectorStyle &s,
         }
     }
     MercatorProjection::lonLatToWorld(cLon, cLat, g.originWx, g.originWy);
+    // @Jin 保留读取层的真实经纬度 bbox，供 3D 贴地烘焙快速判断 DEM 覆盖，避免每帧遍历渲染顶点。
+    g.hasGeoBounds = r.hasBBox;
+    g.geoLonMin = r.minLon;
+    g.geoLatMin = r.minLat;
+    g.geoLonMax = r.maxLon;
+    g.geoLatMax = r.maxLat;
 
     const FeatureBaker baker(g.originWx, g.originWy, s, r.hasElevation);
 

@@ -22,6 +22,9 @@ constexpr auto kFailCooldown = std::chrono::seconds(30);
 /// 会堆积上万块下载字节（每块 ~10-20KB）撑爆 native 堆（实测 Scudo exhausted 256M 崩溃）。超水位时丢弃
 /// 本次交付——联网字节已 writeTile 落盘，后续重请求走读盘秒得，仅牺牲一批陈旧字节的即时性，杜绝 OOM。
 constexpr size_t kMaxReadyTiles = 1024;
+/// @Jin drape20 实验参数：跨级别 flyTo 后旧视口最多保留最近 64 块已解码 RGBA，避免稳定后继续向 GPU 上传上千块不可见旧瓦。
+constexpr size_t kMaxStaleReadyTiles = 64;
+constexpr uint64_t kMaxStaleDecodeGenerationAge = 2; // @Jin worker 解码前最多容忍落后 2 代；更老结果只保留磁盘缓存，不再占用 RGBA 内存和 GL 上传。
 /// 请求队列上限：3D 连续手势下视角每帧一换（一帧可见集可达数百块），过期请求会在队列里
 /// 大量堆积；超限时从队首丢弃最旧的（属于已滑出的旧视角，下帧起不再需要），为当前视角让路。
 constexpr size_t kMaxQueue = 1200;
@@ -193,6 +196,28 @@ void TileLoader::drainReady(std::vector<ReadyTile> &out, int maxCount, size_t ma
         currentGeneration = viewGeneration_;
     }
     std::lock_guard<std::mutex> lk(readyMtx_);
+    // @Jin drape20：当前视口结果全部优先；旧视口仅保留最近一小段，防止全球 flyTo 到近景后上千块旧 RGBA 被逐帧上传。
+    size_t staleReadyCount = 0;
+    for (const auto &tile : ready_) {
+        if (tile.generation != currentGeneration) ++staleReadyCount;
+    }
+    if (staleReadyCount > kMaxStaleReadyTiles) {
+        size_t droppedStale = 0;
+        const size_t needDrop = staleReadyCount - kMaxStaleReadyTiles;
+        for (auto it = ready_.begin(); it != ready_.end() && droppedStale < needDrop;) {
+            if (it->generation == currentGeneration) {
+                ++it;
+                continue;
+            }
+            readyKeys_.erase(key(it->z, it->x, it->y));
+            it = ready_.erase(it);
+            ++droppedStale;
+        }
+        if (droppedStale > 0) {
+            LOGI("TileLoader @Jin drop stale ready tiles=%zu remaining=%zu currentGen=%llu",
+                 droppedStale, ready_.size(), static_cast<unsigned long long>(currentGeneration));
+        }
+    }
     // @Jin 两遍扫描：先交付当前视口结果，再用剩余预算接收最近旧视口结果；旧结果仍可进入纹理缓存，
     // @Jin 不再像旧实现那样在相邻手势帧之间直接丢弃，从而消除“加载中越操作越不显示”的抖动。
     const auto takePass = [&](bool currentPass) {
@@ -440,6 +465,21 @@ void TileLoader::workerLoop() {
                 stale = true;
             } else {
                 req.generation = inFlight->second;
+            }
+        }
+        if (haveBytes && !stale) {
+            {
+                std::lock_guard<std::mutex> lk(mtx_);
+                uint64_t latestGeneration = viewGeneration_;
+                auto inFlight = inflight_.find(key(req.z, req.x, req.y));
+                if (inFlight == inflight_.end() || inFlight->second != latestGeneration) {
+                    stale = true;
+                } else if (latestGeneration > inFlight->second + kMaxStaleDecodeGenerationAge) {
+                    // @Jin 连续 flyTo/手势后，旧视口瓦片即使已读盘也不再解码；磁盘缓存保留，下一次真正可见时会低代价重读。
+                    stale = true;
+                } else {
+                    req.generation = inFlight->second;
+                }
             }
         }
         if (haveBytes && !stale) {

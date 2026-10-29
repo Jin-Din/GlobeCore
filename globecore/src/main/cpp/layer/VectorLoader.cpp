@@ -1,9 +1,12 @@
 #include "layer/VectorLoader.h"
 
 #include <chrono>
+#include <filesystem>
 #include <utility>
 
 #include "util/Log.h"
+#include "vector/RemoteVectorCache.h"
+#include "vector/VectorSourceResolver.h"
 #include "vector/VectorBuilder.h"
 #include "vector/VectorReader.h"
 
@@ -11,10 +14,20 @@ namespace globecore {
 
 VectorLoader::VectorLoader(std::string path, VectorStyle style,
                            bool hasExtent, double minLon, double minLat,
-                           double maxLon, double maxLat, int maxFeatures)
-    : path_(std::move(path)), style_(style),
+                           double maxLon, double maxLat, int maxFeatures,
+                           std::string vectorCacheDir)
+    : style_(style),
+      vectorCacheDir_(std::move(vectorCacheDir)),
       hasExtent_(hasExtent), minLon_(minLon), minLat_(minLat), maxLon_(maxLon), maxLat_(maxLat),
-      maxFeatures_(maxFeatures) {}
+      maxFeatures_(maxFeatures) {
+    // @Jin 在后台线程启动前完成 URL 识别；http/https 走下载缓存，本地路径沿用旧 GDALOpenEx 行为。
+    ResolvedVectorSource resolved = VectorSourceResolver::resolve(path, vectorCacheDir_);
+    remoteSource_ = resolved.remote;
+    path_ = std::move(resolved.originalSource);
+    cachePath_ = resolved.cachePath;
+    effectivePath_ = remoteSource_ ? std::string() : path_;
+    sourceLogName_ = resolved.safeLogName;
+}
 
 VectorLoader::VectorLoader(VectorStyle style)
     : style_(std::move(style)), memMode_(true) {}
@@ -42,7 +55,7 @@ void VectorLoader::reload(bool hasExtent, double minLon, double minLat,
     // [诊断] 记录本次重载请求的 extent 与 worker 状态：workerRunning_=true 表示当前仍在读上一轮，
     // 本次仅置 rerunRequested_ 复用（排队到本轮完成后再来一轮），false 表示新起线程立即读。
     LOGI("[VecReload] VectorLoader reload 请求: %s hasExtent=%d extent=[%.6f,%.6f,%.6f,%.6f] workerRunning=%d",
-         path_.c_str(), hasExtent ? 1 : 0, minLon, minLat, maxLon, maxLat, workerRunning_ ? 1 : 0);
+         sourceLogName_.c_str(), hasExtent ? 1 : 0, minLon, minLat, maxLon, maxLat, workerRunning_ ? 1 : 0);
     ensureWorkerLocked();
 }
 
@@ -80,7 +93,9 @@ bool VectorLoader::drainReady(VectorGeometry &out) {
 
 bool VectorLoader::hasPendingOrReady() {
     std::lock_guard<std::mutex> lk(mtx_);
-    return state_ == State::Loading || state_ == State::Ready;
+    // @Jin 下载、GDAL 读取、几何构建任一阶段未完成都要驱动按需渲染。
+    return state_ == State::Loading || state_ == State::Downloading ||
+           state_ == State::Reading || state_ == State::Building || state_ == State::Ready;
 }
 
 std::string VectorLoader::error() const {
@@ -98,15 +113,54 @@ void VectorLoader::run() {
             cap = maxFeatures_;
             rerunRequested_ = false;
             stale_.store(false); // 本轮开始清抢占标志（上一轮 reload 触发的置真随旧结果一并作废）
-            state_ = State::Loading;
+            state_ = remoteSource_ ? State::Downloading : State::Reading;
         }
         const auto t0 = std::chrono::steady_clock::now();
+
+        std::string readPath = path_;
+        if (remoteSource_) {
+            if (cachePath_.empty() || vectorCacheDir_.empty()) {
+                std::lock_guard<std::mutex> lk(mtx_);
+                error_ = "在线 GeoJSON 缓存目录未配置";
+                state_ = State::Failed;
+                workerRunning_ = false;
+                return;
+            }
+            if (effectivePath_.empty() || !std::filesystem::exists(effectivePath_)) {
+                RemoteVectorFetchOptions fetchOptions;
+                fetchOptions.cacheDir = vectorCacheDir_;
+                // @Jin P0 只支持公开 URL；headers/ETag/refresh 等列入后续阶段。
+                const RemoteVectorFetchResult fetched = RemoteVectorCache::prepareGeoJson(
+                    path_, cachePath_, fetchOptions, abort_);
+                if (abort_.load()) {
+                    std::lock_guard<std::mutex> lk(mtx_);
+                    workerRunning_ = false;
+                    return;
+                }
+                if (!fetched.ok) {
+                    std::lock_guard<std::mutex> lk(mtx_);
+                    error_ = fetched.error;
+                    state_ = State::Failed;
+                    workerRunning_ = false;
+                    LOGW("[RemoteGeoJson] 加载失败 source=%s error=%s", sourceLogName_.c_str(), error_.c_str());
+                    return;
+                }
+                effectivePath_ = fetched.localPath;
+            }
+            // @Jin extent 变化只让 GDAL 重读本地缓存，不取消/重启 URL 下载，不产生重复网络请求。
+            if (stale_.load()) continue;
+            readPath = effectivePath_;
+        }
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            state_ = State::Reading;
+        }
         // 逐要素标注覆盖：从 style_.featureOverrides 提出 fid→标注字段名（含空串=显式关闭），下传读取器按 fid 取文本。
         // 无覆盖（空）传 nullptr → 读取器仅按整层 labelField（零回归）。
         std::unordered_map<long long, std::string> labelOv;
         for (const auto &kv : style_.featureOverrides)
             if (kv.second.hasLabel) labelOv[kv.first] = kv.second.labelField;
-        VectorReadResult r = readVectorFile(path_, style_.labelField, hasExtent, a, b, c, d, cap,
+        VectorReadResult r = readVectorFile(readPath, style_.labelField, hasExtent, a, b, c, d, cap,
                                             labelOv.empty() ? nullptr : &labelOv);
         const auto t1 = std::chrono::steady_clock::now();
         if (abort_.load()) {
@@ -119,14 +173,18 @@ void VectorLoader::run() {
             error_ = r.error.empty() ? "矢量读取失败" : r.error;
             state_ = State::Failed;
             workerRunning_ = false;
-            LOGW("VectorLoader 读取失败: %s (%s)", path_.c_str(), error_.c_str());
+            LOGW("VectorLoader 读取失败: %s (%s)", sourceLogName_.c_str(), error_.c_str());
             return;
         }
         // [VecReload] 抢占检查点①：读完到建几何前，若已收到更新的屏幕范围，直接丢弃本轮过期结果，不进入 build。
         if (stale_.load()) {
             LOGI("[VecReload] 抢占中断(读后): %s read=%lldms 已过期，按最新范围重跑",
-                 path_.c_str(), std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
+                 sourceLogName_.c_str(), std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count());
             continue;
+        }
+        {
+            std::lock_guard<std::mutex> lk(mtx_);
+            state_ = State::Building;
         }
         VectorGeometry g = buildGeometry(r, style_, &stale_);
         const auto t2 = std::chrono::steady_clock::now();
@@ -134,7 +192,7 @@ void VectorLoader::run() {
         // 丢弃不发布（旧几何由渲染层继续显示，无空窗），立即按最新范围重跑——这是“移到新位置秒级跟上”的关键。
         if (stale_.load()) {
             LOGI("[VecReload] 抢占中断(建后): %s build=%lldms 过期结果丢弃，按最新范围重跑",
-                 path_.c_str(), std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count());
+                 sourceLogName_.c_str(), std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count());
             continue;
         }
         // 在 move 入 geom_ 前捕获顶点量（geom_ 移交后可能被 GL 线程 drainReady 并发取走，锁外不可再读）
@@ -159,7 +217,7 @@ void VectorLoader::run() {
         // [诊断] 新位置显示慢定位：read=GDAL 打开+空间过滤扫描+重投影；build=earcut 三角剖分+顶点烘焙（已不简化，逐要素并行）。
         // features/顶点量偏大时 build 与后续 GL 上传会是主要耗时。rerun=1 表示本轮未上传即又收到新范围重读。
         LOGI("[VecReload] VectorLoader 就绪: %s extent=%d features=%zu read=%lldms build=%lldms total=%lldms fillVert=%zu lineVert=%zu rerun=%d",
-             path_.c_str(), hasExtent ? 1 : 0, r.features.size(),
+             sourceLogName_.c_str(), hasExtent ? 1 : 0, r.features.size(),
              std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count(),
              std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1).count(),
              std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t0).count(),

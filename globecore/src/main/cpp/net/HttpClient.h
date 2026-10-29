@@ -47,11 +47,15 @@ public:
      * @param timeoutMs 整体超时（毫秒）
      * @param abortFlag 可选中断标志：传输中一旦置 true 则立即中断返回 false（用于关机时快速 join 工作线程）
      * @param headers   可选 HTTP 请求头；@Jin C++ TerrainProvider 用它承载宿主注入的 Referer/User-Agent。
-     * @return 成功返回 true；网络/超时/中断/非 2xx 返回 false（outBytes 被清空）
+     * @param maxBytes  @Jin 可选响应体上限；>0 时下载超限立即中断，防止在线 GeoJSON 错误响应耗尽内存。
+     * @param sizeLimitExceeded @Jin 可选输出：响应体超过 maxBytes 时置 true，供上层生成明确错误。
+     * @return @Jin 成功返回 true；网络/超时/中断/非 2xx 返回 false（普通失败清空 outBytes，超限保留中断前字节）
      */
     static bool get(const std::string &url, std::vector<uint8_t> &outBytes, long timeoutMs = 15000,
                     const std::atomic<bool> *abortFlag = nullptr,
-                    const std::vector<std::pair<std::string, std::string>> &headers = {});
+                    const std::vector<std::pair<std::string, std::string>> &headers = {},
+                    size_t maxBytes = 0, long *responseCode = nullptr,
+                    bool *sizeLimitExceeded = nullptr);
 
     /// 设置 CA 证书包路径（cacert.pem），用于 HTTPS 证书校验；空串表示用默认行为
     static void setCaBundle(const std::string &caInfoPath);

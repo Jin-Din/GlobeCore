@@ -102,6 +102,9 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         vector/GdalBootstrap.cpp
         # native OGR 矢量读取器（阶段三：直接读文件 + 重投影到 WGS84 + 摊平几何）
         vector/VectorReader.cpp
+        # @Jin P0 在线 GeoJSON Source：URL 解析与下载缓存，下载后仍走 VectorReader 本地文件管线。
+        vector/VectorSourceResolver.cpp
+        vector/RemoteVectorCache.cpp
         # KML 样式自建解析（Phase 3 逐要素配色）：GDAL/LIBKML 不返回颜色，定向扫描 <Style>/<StyleMap>/<Placemark> 补 name→颜色映射
         vector/KmlStyle.cpp
         # 矢量几何构建器（WGS84 几何 → RTC 顶点/earcut 三角化/miter 描边/拾取图元；逐要素并行分片）

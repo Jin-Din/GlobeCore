@@ -1,6 +1,7 @@
 package com.zys.globecore
 
 import android.content.Context
+import java.io.File
 import android.opengl.GLSurfaceView
 import android.util.AttributeSet
 import android.view.MotionEvent
@@ -404,9 +405,10 @@ class NativeMapView @JvmOverloads constructor(
     }
 
     /**
-     * 添加一个矢量图层（shp/kml/kmz/dwg/dxf 等 GDAL/OGR 可打开的格式），可多次调用叠加。
-     * native 侧直接读文件、重投影到 WGS84、earcut 三角剖分并异步上传 VBO；绘制在底图瓦片之上、
-     * 注记 overlay 之下（对齐主界面「注记置顶于矢量之上」）。样式由约定类 [VectorStyle] 承载
+     * @Jin 添加一个矢量图层（shp/kml/kmz/GeoJSON 等 GDAL/OGR 可打开格式；实验性支持在线 GeoJSON URL），可多次调用叠加。
+     * @Jin 实验性：path 也支持 http/https 在线公开 GeoJSON，native 会先下载到应用私有 vector-cache，再复用本地 GDAL/OGR 管线。
+     * @Jin native 侧直接读文件或在线 GeoJSON 缓存、重投影到 WGS84、earcut 三角剖分并异步上传 VBO；绘制在底图瓦片之上、
+     * @Jin 注记 overlay 之下（对齐主界面「注记置顶于矢量之上」）。样式由约定类 [VectorStyle] 承载
      * （面填充/描边/线/点/标注，颜色 #AARRGGBB、线宽像素、点半径 dp）；labelField 非空时逐要素取该字段值为标注。
      * [iconArgb] 非空时（配合 [iconW]/[iconH]）为点要素图标的 Android ARGB 像素（由宿主解码矢量 drawable 得到），
      * native 转 RGBA 上传纹理作中心锚点、屏幕固定尺寸 billboard；为空则点要素回退画屏幕固定圆。
@@ -424,6 +426,8 @@ class NativeMapView @JvmOverloads constructor(
         maxFeatures: Int = 0
     ): Int {
         val h = nativeHandle
+        // @Jin P0 在线 GeoJSON 统一落应用私有目录；同 URL 二次加载和 extent 重载只读缓存，不重复联网。
+        val vectorCacheDir = File(File(context.filesDir, "globecore"), "vector-cache").absolutePath
         val index = if (h != 0L) NativeLib.nativeAddVectorLayer(
             h, path, style.fillColor, style.outlineColor, style.outlineWidth,
             style.lineColor, style.lineWidth, style.pointColor, style.pointRadiusDp,
@@ -433,7 +437,8 @@ class NativeMapView @JvmOverloads constructor(
             iconArgb, iconW, iconH,
             extent != null,
             extent?.minLon ?: 0.0, extent?.minLat ?: 0.0,
-            extent?.maxLon ?: 0.0, extent?.maxLat ?: 0.0, maxFeatures
+            extent?.maxLon ?: 0.0, extent?.maxLat ?: 0.0, maxFeatures,
+            vectorCacheDir
         ) else -1
         requestRender()
         return index

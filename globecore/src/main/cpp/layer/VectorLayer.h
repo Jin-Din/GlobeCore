@@ -45,6 +45,7 @@ struct VectorLayer {
     /// 是否为动态叠加层（内存数据源，由宿主经 GlobeEngine::updateOverlay* 推送 WGS84 几何）；
     /// 区别于读文件的矢量层。叠加层与文件矢量层同列于 vectorLayers_，复用同一套绘制/拾取通路。
     bool isOverlay = false;
+    bool remoteVectorSource = false; // @Jin 在线 GeoJSON 源标记：3D 下实验性复用 DEM 贴地烘焙，本地文件层默认保持旧路径。
     /// 叠加层墓碑标志：removeOverlay 置 true（不 erase，以保持其它叠加层 index 稳定）并同时 visible=false。
     /// Renderer 在 GL 线程回收其 VBO/图标纹理/CPU 几何后跳过绘制；pickVector 因 visible=false 亦跳过。
     bool dead = false;
@@ -108,6 +109,8 @@ struct VectorLayer {
         GLsizei vertexCount = 0;
         // 世界 ECEF 绝对坐标 AABB（米，转换期累加）：供视锥平面盒测试（alt=0 贴球烘焙）
         double xmin = 0, ymin = 0, zmin = 0, xmax = 0, ymax = 0, zmax = 0;
+    // @Jin 标记该 chunk 是否为 DEM 贴地烘焙；省级大面只有覆盖内地形的 chunk 关闭地形深度测试。
+    bool terrainDraped = false;
     };
     std::vector<GlobeChunk> globeFillChunks;    // GL_TRIANGLES
     std::vector<GlobeChunk> globeOutlineChunks; // GL_TRIANGLE_STRIP（组内退化桥合批）
@@ -124,6 +127,17 @@ struct VectorLayer {
     bool globeUploadDone = false; // 两游标均到尾部：几何已全部上 GPU（此前逐帧续传+续绘）
     // @Jin 3D 动态叠加层上一次贴地烘焙使用的 DEM revision；DEM 到达或淘汰后据此重建 VBO。
     uint64_t globeDrapedTerrainSignature = 0;
+    // @Jin 在线省级 GeoJSON 等大图层不跟随每块 DEM 到达立即重建：签名连续稳定一小段时间后再烘焙，避免地形批量加载时反复卡顿。
+    uint64_t globeDrapedPendingSignature = 0;
+    bool globeDrapedSignaturePending = false;
+    std::chrono::steady_clock::time_point globeDrapedSignatureChangedAt{};
+    // @Jin 远程大面在相机仍运动时延迟重建 DEM 贴地 VBO，避免手势浏览过程中同步烘焙造成掉帧。
+    bool globeDrapeCameraMoveInitialized = false;
+    std::chrono::steady_clock::time_point globeLastCameraMoveAt{};
+    Vec3 globeLastDrapeCameraEye{0.0, 0.0, 0.0};
+    Vec3 globeLastDrapeCameraCenter{0.0, 0.0, 0.0};
+    bool globeDraped = false; // @Jin 当前 3D VBO 是否按 DEM 逐顶点烘焙；false 时走旧的椭球面/整层抬升路径。
+    bool globeRemoteLargeDrapeMode = false; // @Jin 远程大面当前 VBO 是否为低空 DEM draped 模式；用于跨越高空平面/低空贴地门限时触发重建。
     // 3D 顶点相对「图层固定锚点」烘焙（不相对 eye）：globeAnchor = 几何原点 ECEF（只随几何变），顶点
     // 纯几何 alt=0。每帧把 uOffset = globeAnchor − eye、uVecAlt = 贴地高度传进着色器（高度沿表面法向抬升）
     // → 平移与缩放时顶点都不变、零重建零重传（3D 平移/缩放卡顿根治）。
@@ -147,10 +161,12 @@ struct VectorLayer {
 
     VectorLayer(std::string path, VectorStyle style_,
                 bool hasExtent = false, double minLon = 0.0, double minLat = 0.0,
-                double maxLon = 0.0, double maxLat = 0.0, int maxFeatures = 0)
+                double maxLon = 0.0, double maxLat = 0.0, int maxFeatures = 0,
+                // @Jin 在线 GeoJSON 实验能力需要宿主私有缓存目录；本地矢量默认空串保持旧行为。
+                std::string vectorCacheDir = std::string())
         : sourcePath(std::move(path)), style(style_) {
         loader = std::make_unique<VectorLoader>(sourcePath, style, hasExtent, minLon, minLat,
-                                                maxLon, maxLat, maxFeatures);
+                                                maxLon, maxLat, maxFeatures, std::move(vectorCacheDir));
     }
 
     /// 动态叠加层构造（内存数据源）：建内存模式 loader（不读文件、不起后台线程），isOverlay=true。

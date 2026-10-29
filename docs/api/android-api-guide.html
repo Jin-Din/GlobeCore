@@ -1,0 +1,378 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>GlobeCore Android API 开发帮助文档</title>
+<!-- @Jin 本 HTML 是面向 Android 宿主的公开 API 帮助文档；API 新增、修改、废弃或删除时必须同步更新。 -->
+<style>
+:root{--bg:#f6f8fb;--panel:#fff;--ink:#172033;--muted:#5e6b7d;--brand:#1d5fd1;--brand2:#0f448f;--line:#d9e1ec;--code:#111827;--soft:#eef5ff;--warn:#fff7e6;--warnline:#f2c56b;--ok:#ecfdf3;--okline:#69c58d;}
+*{box-sizing:border-box} body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Microsoft YaHei",Arial,sans-serif}
+.layout{display:grid;grid-template-columns:280px minmax(0,1fr);min-height:100vh}.side{position:sticky;top:0;height:100vh;overflow:auto;background:#0d1b2f;color:#dbe7f7;padding:22px 18px;border-right:1px solid #091322}.side h1{font-size:19px;line-height:1.35;margin:0 0 6px;color:#fff}.side .ver{font-size:12px;color:#9db2cf;margin-bottom:20px}.side a{display:block;color:#c7d6ea;text-decoration:none;padding:6px 8px;border-radius:7px;font-size:13px}.side a:hover{background:#173358;color:#fff}.side .group{margin:14px 0 4px;color:#85a0c3;font-size:12px;letter-spacing:.08em}
+main{min-width:0;padding:28px 38px 80px}.hero{background:linear-gradient(135deg,#1559c7,#0b2f69);color:#fff;border-radius:18px;padding:30px 34px;margin-bottom:22px;box-shadow:0 12px 35px rgba(16,57,112,.18)}.hero h2{margin:0 0 8px;font-size:30px}.hero p{margin:4px 0;color:#dcebff}.meta{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px}.pill{display:inline-block;padding:3px 10px;border-radius:999px;background:rgba(255,255,255,.14);font-size:12px}
+section{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:24px 28px;margin:18px 0;box-shadow:0 2px 10px rgba(23,43,77,.04)}h2{font-size:24px;margin:0 0 12px;border-bottom:1px solid var(--line);padding-bottom:10px}h3{font-size:18px;margin:24px 0 10px;color:var(--brand2)}h4{font-size:15px;margin:18px 0 6px;color:#25364d}.lead{font-size:15px;color:#344256}.muted{color:var(--muted)} code,pre{font-family:ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace}code{background:#eef2f7;border:1px solid #dce3ec;border-radius:5px;padding:1px 5px;font-size:.92em}pre{background:var(--code);color:#e8eef8;padding:15px 17px;border-radius:10px;overflow:auto;border:1px solid #0b1220;line-height:1.55}pre code{background:none;border:0;padding:0;color:inherit}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px}.card{border:1px solid var(--line);border-radius:12px;padding:14px 16px;background:#fbfdff}.card b{color:var(--brand2)}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:10px}table{border-collapse:collapse;width:100%;background:#fff;min-width:720px}th,td{border-bottom:1px solid var(--line);padding:9px 11px;vertical-align:top;text-align:left}th{background:#f0f5fc;color:#25364d;font-weight:700}tr:last-child td{border-bottom:0}.tag{display:inline-block;border-radius:5px;padding:1px 7px;font-size:12px;font-weight:700}.req{background:#eaf3ff;color:#1559c7}.opt{background:#f3f4f6;color:#4b5563}.ret{background:#ecfdf3;color:#157347}.warnbox{background:var(--warn);border:1px solid var(--warnline);border-radius:10px;padding:12px 15px;margin:12px 0}.notebox{background:var(--soft);border:1px solid #b8d5fb;border-radius:10px;padding:12px 15px;margin:12px 0}.okbox{background:var(--ok);border:1px solid var(--okline);border-radius:10px;padding:12px 15px;margin:12px 0}.api{border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin:14px 0;background:#fff}.api .sig{margin:8px 0 10px}.api h4{margin-top:0}.small{font-size:12px}.toc-search{width:100%;padding:8px 10px;border-radius:8px;border:1px solid #284464;background:#09182b;color:#fff;margin-bottom:12px}.toc-search::placeholder{color:#7890ad}
+@media(max-width:900px){.layout{display:block}.side{position:static;height:auto}main{padding:18px 14px 60px}.hero{padding:22px}table{min-width:640px}}
+@media print{body{background:#fff}.side{display:none}.layout{display:block}main{padding:0}section,.hero{box-shadow:none;break-inside:avoid}}
+</style>
+</head>
+<body>
+<div class="layout">
+<aside class="side">
+<h1>GlobeCore Android API</h1><div class="ver">版本 0.1.4.0 · Kotlin / Java</div>
+<input class="toc-search" id="tocSearch" placeholder="筛选目录..." />
+<div id="toc"><div class="group">开始</div><a href="#overview">1. SDK 概览</a><a href="#install">2. 安装集成</a><a href="#quickstart">3. 快速开始</a><a href="#threading">4. 生命周期与线程</a><div class="group">数据类型</div><a href="#types-camera">Camera</a><a href="#types-position">Position</a><a href="#types-style">VectorStyle</a><a href="#types-extent">VectorExtent</a><a href="#types-geometry">FeatureGeometry</a><div class="group">地图 API</div><a href="#mapview-lifecycle">NativeMapView 构造/销毁</a><a href="#api-camera">相机与视图</a><a href="#api-gesture">手势回调</a><a href="#api-tiles">XYZ 瓦片图层</a><a href="#api-raster">本地栅格</a><a href="#api-terrain">三维地形 Provider</a><a href="#api-marker">定位标记</a><a href="#api-vector">文件 / 在线矢量</a><a href="#api-overlay">动态叠加层</a><a href="#api-pick">拾取与反算</a><div class="group">能力门面</div><a href="#srs">NativeSrs 坐标转换</a><a href="#vector-io">NativeVector 文件 IO</a><a href="#layer-info">NativeLayerInfo 元信息</a><div class="group">实战与维护</div><a href="#recipes">业务示例</a><a href="#events">地形事件字段</a><a href="#troubleshooting">排错指南</a><a href="#maintenance">维护约定</a></div>
+</aside>
+<main>
+<div class="hero"><h2>GlobeCore Android API 开发帮助文档</h2><p>面向 Android/Kotlin/Java 宿主开发人员：地图视图、XYZ 瓦片、本地栅格、三维地形、矢量、动态叠加层、拾取、坐标转换与 GDAL/OGR 文件能力。</p><div class="meta"><span class="pill">Maven：com.zys:globecore:0.1.4.0</span><span class="pill">minSdk 24</span><span class="pill">ABI：arm64-v8a / x86_64</span><span class="pill">OpenGL ES 2.0</span></div></div>
+
+<section id="overview"><h2>1. SDK 概览</h2><p class="lead">GlobeCore 是一套以 C++ 为核心的地图渲染引擎，Android 侧通过 Kotlin 门面类和 JNI 暴露能力。业务 App 通常只需要接触 <code>com.zys.globecore</code> 包下的公开类，不需要直接调用 <code>NativeLib</code>。</p>
+<div class="grid">
+<div class="card"><b>NativeMapView</b><br/>继承 <code>GLSurfaceView</code>，负责地图显示、相机、瓦片/地形/矢量图层、手势、拾取和屏幕反算。</div>
+<div class="card"><b>Camera / Position</b><br/>描述相机姿态与地理坐标，经纬度单位为度，高度单位为米，角度单位为度。</div>
+<div class="card"><b>VectorStyle / Extent</b><br/>描述矢量样式和空间过滤范围，颜色统一使用 Android <code>#AARRGGBB</code> 整数。</div>
+<div class="card"><b>TerrainProvider</b><br/>支持 quantized-mesh 服务、磁盘缓存、自动跟随视口、并发请求、重试和事件状态。</div>
+<div class="card"><b>NativeSrs</b><br/>初始化 PROJ 数据并执行任意 CRS 坐标转换。</div>
+<div class="card"><b>NativeVector / LayerInfo</b><br/>读取/查询/写回矢量属性，获取图层四至、SRS、字段名、GDAL 信息。</div>
+</div>
+<div class="notebox"><b>适用范围：</b>本文档覆盖 Android AAR 的公开 Kotlin API。Java 可通过 getter/setter、静态对象方法和回调互操作调用；示例以 Kotlin 为主。</div>
+</section>
+
+<section id="install"><h2>2. 安装集成</h2><h3>2.1 Maven 仓库（推荐）</h3><p>在 <code>settings.gradle.kts</code> 的 <code>dependencyResolutionManagement.repositories</code> 中加入 GitHub Pages Maven 仓：</p><pre><code>dependencyResolutionManagement {
+    repositories {
+        google()
+        mavenCentral()
+        maven { url = uri("https://z-gis.github.io/GlobeCore/maven") }
+    }
+}</code></pre><p>在 <code>app/build.gradle.kts</code> 中声明依赖：</p><pre><code>android {
+    defaultConfig {
+        minSdk = 24
+        ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
+    }
+}
+dependencies {
+    implementation("com.zys:globecore:0.1.4.0")
+}</code></pre>
+<h3>2.2 手动引入 AAR</h3><p>将 <code>globecore-0.1.4.0-release.aar</code> 放入 <code>app/libs/</code>，files 方式不会自动解析传递依赖，需要显式加入 AndroidX：</p><pre><code>dependencies {
+    implementation(files("libs/globecore-0.1.4.0-release.aar"))
+    implementation("androidx.core:core-ktx:1.10.1")
+}</code></pre>
+<h3>2.3 权限与初始化</h3><p>在线瓦片和地形需要网络权限；读取本地文件还需要宿主按 Android 版本处理存储权限或 SAF 授权。</p><pre><code>&lt;uses-permission android:name="android.permission.INTERNET" /&gt;</code></pre><p>应用启动后、首次坐标转换前初始化 PROJ 数据：</p><pre><code>class App : Application() {
+    override fun onCreate() {
+        super.onCreate()
+        NativeSrs.initProjData(this)
+    }
+}</code></pre><div class="warnbox"><b>注意：</b><code>initProjData</code> 会把 AAR assets 中的 <code>proj</code> 数据解压到 <code>context.filesDir/proj</code>。已存在文件默认跳过；升级内置 PROJ 数据后如遇异常，可清除应用数据或删除该目录。</div></section>
+
+<section id="quickstart"><h2>3. 快速开始</h2><p>以下示例创建一个 3D 地图，加载影像底图、透明注记层和三维地形，然后飞到中国上方。</p><pre><code>class MapActivity : Activity() {
+    private lateinit var map: NativeMapView
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        NativeSrs.initProjData(this)
+        map = NativeMapView(this)
+        setContentView(map)
+
+        val cache = filesDir.resolve("map-cache").absolutePath
+        // @Jin 示例代码：实际项目请替换为自己的图源地址、token 与缓存目录。
+        map.addTileLayer(
+            cacheDir = "$cache/img",
+            urlTemplate = "https://server.example.com/tiles/{z}/{x}/{y}.jpg",
+            maxLevel = 18,
+            overlay = false
+        )
+        map.addTileLayer(
+            cacheDir = "$cache/cia",
+            urlTemplate = "https://server.example.com/cia/{z}/{x}/{y}.png",
+            maxLevel = 18,
+            overlay = true
+        )
+        map.setViewMode(NativeMapView.ViewMode.THREE_D)
+        map.setCamera(Camera(35.0, 105.0, 12_000_000.0, 0.0, 0.0))
+    }
+
+    override fun onResume() { super.onResume(); map.onResume() }
+    override fun onPause() { super.onPause(); map.onPause() }
+    override fun onDestroy() { map.destroy(); super.onDestroy() }
+}</code></pre>
+<div class="notebox"><b>XYZ 顺序：</b>不同服务商的 URL 行列顺序不同。OSM/很多 XYZ 服务是 <code>{z}/{x}/{y}</code>；ArcGIS World Imagery 常见为 <code>{z}/{y}/{x}</code>。接入前务必核对服务文档。</div></section>
+
+<section id="threading"><h2>4. 生命周期与线程模型</h2><ul><li><code>NativeMapView</code> 继承 <code>GLSurfaceView</code>，内部创建 OpenGL ES 2.0 上下文和渲染线程。</li><li>默认渲染模式为 <code>RENDERMODE_WHEN_DIRTY</code>：静止时省电；手势、相机变化、瓦片异步到位会触发重绘。</li><li>瓦片下载、磁盘缓存、解码等在 native 后台线程执行；纹理上传切回 GL 线程。</li><li>矢量文件读取和三角剖分为异步流程，可通过 <code>hasVectorLoading()</code> 查询状态。</li><li>公开 Kotlin 方法通常可在主线程调用；内部会完成必要的 JNI/native 转发。业务不要在 native 对象销毁后继续调用。</li></ul><pre><code>override fun onResume() { map.onResume() }
+override fun onPause() { map.onPause() }
+override fun onDestroy() { map.destroy() }</code></pre></section>
+
+<section id="types-camera"><h2>5. Camera 相机对象</h2><pre><code>data class Camera(
+    val latitude: Double = 0.0,
+    val longitude: Double = 0.0,
+    val altitude: Double = 0.0,
+    val heading: Double = 0.0,
+    val tilt: Double = 0.0,
+    val roll: Double = 0.0,
+    val fieldOfView: Double = 45.0,
+    val altitudeMode: Camera.AltitudeMode = Camera.AltitudeMode.ABSOLUTE,
+)</code></pre><div class="table-wrap"><table><thead><tr><th>字段</th><th>类型</th><th>说明</th></tr></thead><tbody><tr><td>latitude / longitude</td><td>Double</td><td>相机位置经纬度，WGS84 十进制度。</td></tr><tr><td>altitude</td><td>Double</td><td>相机高度，单位米。2D 下该值参与 zoom 换算。</td></tr><tr><td>heading</td><td>Double</td><td>航向角，单位度；主要在 3D 下消费。</td></tr><tr><td>tilt</td><td>Double</td><td>俯仰角，单位度；native 通常钳制在可支持范围内。</td></tr><tr><td>roll</td><td>Double</td><td>翻滚角，建模保留字段。</td></tr><tr><td>fieldOfView</td><td>Double</td><td>垂直视场角，默认 45 度。</td></tr><tr><td>altitudeMode</td><td>Enum</td><td>ABSOLUTE、ABOVE_SEA_LEVEL、CLAMP_TO_GROUND、RELATIVE_TO_GROUND。枚举 ordinal 与 native 对齐，不要调整顺序。</td></tr></tbody></table></div></section>
+
+<section id="types-position"><h2>6. Position 地理点</h2><pre><code>data class Position(
+    val latitude: Double,
+    val longitude: Double,
+    val altitude: Double = 0.0,
+)</code></pre><p>用于定位标记、屏幕坐标反算等接口。经纬度为 WGS84 度，高度为米。</p></section>
+
+<section id="types-style"><h2>7. VectorStyle 矢量样式</h2><pre><code>VectorStyle(
+    fillColor = 0x664A8FE3.toInt(),
+    outlineColor = 0xFFFFFFFF.toInt(),
+    outlineWidth = 1.0f,
+    lineColor = 0xFFE56B33.toInt(),
+    lineWidth = 2.0f,
+    pointColor = 0xFFE56B33.toInt(),
+    pointRadiusDp = 5.0f,
+    fillExplicit = false,
+    lineExplicit = false,
+    labelField = "name",
+    labelColor = 0xFFFFFFFF.toInt(),
+    labelSize = 1.0f,
+    labelOutline = true,
+    labelOutlineColor = 0xFF000000.toInt(),
+    featureStyleOverride = ""
+)</code></pre><div class="table-wrap"><table><thead><tr><th>字段</th><th>说明</th></tr></thead><tbody><tr><td>fillColor</td><td>面填充色，Android ARGB Int。</td></tr><tr><td>outlineColor / outlineWidth</td><td>面边界颜色与屏幕像素线宽。</td></tr><tr><td>lineColor / lineWidth</td><td>线要素颜色与线宽。</td></tr><tr><td>pointColor / pointRadiusDp</td><td>点颜色与点半径，半径单位 dp。</td></tr><tr><td>fillExplicit / lineExplicit</td><td>是否以整层样式覆盖源文件（如 KML）逐要素颜色。</td></tr><tr><td>labelField / labelColor / labelSize</td><td>属性标注字段、文字颜色、字号缩放。</td></tr><tr><td>labelOutline / labelOutlineColor</td><td>文字描边开关与颜色。</td></tr><tr><td>featureStyleOverride</td><td>单要素颜色覆盖串，格式为 <code>fid,fillArgb,lineArgb;...</code>，<code>-</code> 表示该通道不覆盖。</td></tr></tbody></table></div></section>
+
+<section id="types-extent"><h2>8. VectorExtent 空间范围</h2><pre><code>data class VectorExtent(
+    val minLon: Double,
+    val minLat: Double,
+    val maxLon: Double,
+    val maxLat: Double,
+)</code></pre><p>用于文件矢量按当前视窗过滤加载。经纬度边界必须是 WGS84；传 <code>null</code> 表示加载整文件。</p></section>
+
+<section id="types-geometry"><h2>9. FeatureGeometry 要素几何</h2><pre><code>class FeatureGeometry(
+    val type: Int,          // 0=点，1=线，2=面
+    val lonlat: DoubleArray,// [lon,lat,lon,lat,...]
+    val ringCounts: IntArray,
+    val ringsPerFeature: IntArray,
+)</code></pre><p>通常由 <code>featureGeometry(layerIndex, fid)</code> 返回，可直接转换为动态 overlay 几何用于选中高亮。</p></section>
+
+<section id="api-map"><h2>10. NativeMapView API 参考</h2>
+<h3 id="mapview-lifecycle">10.1 构造与销毁</h3>
+<div class="api"><h4>NativeMapView</h4><pre class="sig"><code>@JvmOverloads constructor(context: Context, attrs: AttributeSet? = null)</code></pre><p>创建地图视图。XML 中使用时由系统调用双参构造；代码中可直接 <code>NativeMapView(context)</code>。</p></div>
+<div class="api"><h4>destroy</h4><pre class="sig"><code>fun destroy(): Unit</code></pre><p>释放 native C++ 引擎对象并取消手势惯性。GL 资源在视图 detach 时通过 GL 线程释放。重复调用安全。</p></div>
+
+<h3 id="api-camera">10.2 相机与视图模式</h3>
+<div class="api"><h4>setCamera</h4><pre><code>fun setCamera(camera: Camera): Unit</code></pre><p>立即设置相机姿态。适合复位、初始化和业务定位。</p></div>
+<div class="api"><h4>flyToCamera</h4><pre><code>fun flyToCamera(camera: Camera, durationMs: Double = 1600.0): Unit</code></pre><p>在指定毫秒内平滑飞行到目标相机。快捷定位建议使用此接口。</p></div>
+<div class="api"><h4>getCamera</h4><pre><code>fun getCamera(): Camera?</code></pre><p>获取当前相机；视口或 native 句柄不可用时返回 null。</p></div>
+<div class="api"><h4>setViewMode / getViewMode</h4><pre><code>fun setViewMode(mode: NativeMapView.ViewMode): Unit
+fun getViewMode(): NativeMapView.ViewMode
+enum class ViewMode { TWO_D, THREE_D }</code></pre><p>切换 2D 平面墨卡托正交视图或 3D 球体透视视图。</p></div>
+<div class="api"><h4>cameraZoomLevel</h4><pre><code>fun cameraZoomLevel(): Int</code></pre><p>返回当前相机对应的地图缩放级别，可用于调试 LOD 或界面显示。</p></div>
+
+<h3 id="api-gesture">10.3 手势与点击回调</h3>
+<div class="api"><h4>setOnTapListener</h4><pre><code>fun setOnTapListener(listener: ((x: Float, y: Float) -> Unit)?): Unit</code></pre><p>注册单击回调，坐标为视图像素。通常配合 <code>screenToGeo</code> 或 <code>pickVector</code> 使用。</p></div>
+<div class="api"><h4>setOnLongPressListener</h4><pre><code>fun setOnTapListener(listener: ((x: Float, y: Float) -> Unit)?): Unit
+fun setOnLongPressListener(listener: ((x: Float, y: Float) -> Unit)?): Unit</code></pre><p>注册长按回调。内置手势包括单指平移、惯性、双指缩放、3D 双指旋转和双指俯仰。</p></div>
+
+<h3 id="api-tiles">10.4 XYZ 瓦片图层</h3>
+<div class="api"><h4>addTileLayer</h4><pre><code>fun addTileLayer(
+    cacheDir: String,
+    urlTemplate: String,
+    maxLevel: Int,
+    overlay: Boolean = false
+): Unit</code></pre><div class="table-wrap"><table><tbody><tr><td><code>cacheDir</code></td><td>图层独立缓存目录。若路径以 <code>.mbtiles</code> 结尾，native 使用 MBTiles 单文件缓存；否则使用目录缓存。</td></tr><tr><td><code>urlTemplate</code></td><td>URL 模板，支持 <code>{z}</code>、<code>{x}</code>、<code>{y}</code>。传空字符串表示禁用联网，只读本地缓存。</td></tr><tr><td><code>maxLevel</code></td><td>服务支持的最大瓦片级别；超过后拉伸末级，避免无效 404。</td></tr><tr><td><code>overlay</code></td><td>true 表示透明叠加层（如注记），缺失瓦片保持透明；false 表示底图。</td></tr></tbody></table></div><div class="warnbox"><b>索引说明：</b>当前 Kotlin <code>addTileLayer</code> 方法返回 <code>Unit</code>，但 native 图层索引按添加顺序从 0 开始。业务应自行记录添加顺序；与 <code>addRasterLayer</code> 混用时，其 native layers 索引空间共享。</div></div>
+<div class="api"><h4>setLayerVisible</h4><pre><code>fun setLayerVisible(index: Int, visible: Boolean): Unit</code></pre><p>设置图层可见性。隐藏后不绘制、不取瓦片。索引越界时 native 忽略。</p></div>
+<div class="api"><h4>removeTileLayer</h4><pre><code>fun removeTileLayer(index: Int): Unit</code></pre><p>移除在线瓦片或 <code>addRasterLayer</code> 添加的图层。native 使用墓碑方式保留其他层 index 稳定，后台队列会清理，GL 纹理下一帧释放。</p></div>
+
+<h3 id="api-raster">10.5 本地栅格</h3>
+<div class="api"><h4>addRasterLayer</h4><pre><code>fun addRasterLayer(cacheDir: String, path: String): Int</code></pre><p>加载 GDAL 可打开的本地栅格（tif/img 等），native 重投影并按全球墨卡托即时切片，缓存可复用。成功返回图层索引，失败返回 -1。</p></div>
+<div class="api"><h4>rasterAddError</h4><pre><code>fun rasterAddError(): String?</code></pre><p>返回最近一次本地栅格添加失败原因。</p></div>
+<div class="api"><h4>addRasterImageLayer</h4><pre><code>fun addRasterImageLayer(cacheDir: String, path: String): Int</code></pre><p>整幅直读单张贴图并按 WGS84 四至贴面。UI 线程立即返回，超大图按 overviews 降采样；非空缓存目录启用 sidecar 磁盘缓存。</p></div>
+<div class="api"><h4>setRasterImageVisible / hasRasterLoading / rasterImageError</h4><pre><code>fun setRasterImageVisible(index: Int, visible: Boolean): Unit
+fun hasRasterLoading(): Boolean
+fun rasterImageError(index: Int): String?</code></pre><p>控制整幅栅格可见性、查询是否仍在加载、读取错误信息。</p></div>
+
+<h3 id="api-terrain">10.6 三维地形 Provider</h3>
+<div class="api"><h4>configureTerrainProvider</h4><pre><code>fun configureTerrainProvider(
+    baseUrl: String,
+    cacheDir: String,
+    maxZoom: Int = 15,
+    concurrency: Int = 4,
+    tileRadius: Int = 3,
+    headers: Map&lt;String, String&gt; = emptyMap()
+): Boolean</code></pre><p>配置 quantized-mesh v1.0 地形服务。<code>baseUrl</code> 应为服务根地址，native 会拉取 <code>layer.json</code>，解析模板并请求 terrain 瓦片。返回 false 表示句柄无效或配置失败。</p><div class="table-wrap"><table><tbody><tr><td>maxZoom</td><td>本地允许使用的最大地形级别，防止请求过量或超过服务能力。</td></tr><tr><td>concurrency</td><td>地形下载并发数，弱网建议 2-4。</td></tr><tr><td>tileRadius</td><td>围绕当前视口预取半径，越大覆盖越好但请求更多。</td></tr><tr><td>headers</td><td>HTTP 请求头，如 token、Referer 等。</td></tr></tbody></table></div></div>
+<div class="api"><h4>setTerrainProviderEnabled</h4><pre><code>fun setTerrainProviderEnabled(enabled: Boolean): Boolean</code></pre><p>开启/关闭地形。关闭时 native 清空 DEM 注入缓存，重新开启后按当前视口恢复。</p></div>
+<div class="api"><h4>refreshTerrainProvider / setTerrainProviderAutoFollow / prefetchTerrainProviderMetadata</h4><pre><code>fun refreshTerrainProvider(): Unit
+fun setTerrainProviderAutoFollow(enabled: Boolean): Unit
+fun prefetchTerrainProviderMetadata(): Unit</code></pre><p><code>refresh</code> 手动刷新当前视口地形；<code>autoFollow</code> 控制相机变化后是否自动跟随加载；<code>prefetch</code> 可提前加载元数据。</p></div>
+<div class="api"><h4>terrainProviderStatus / setOnTerrainProviderEventListener</h4><pre><code>fun terrainProviderStatus(): String
+fun setOnTerrainProviderEventListener(listener: ((String) -> Unit)?): Unit</code></pre><p>状态和事件回调均为 JSON 字符串。Kotlin 监听器由 <code>onTerrainProviderEvent</code> 投递到视图主线程；业务一般不直接调用 <code>onTerrainProviderEvent</code>。</p></div>
+
+<h3 id="api-marker">10.7 定位标记</h3><div class="api"><pre><code>fun setLocationMarker(position: Position, visible: Boolean, headingDeg: Double = -1.0): Unit
+fun setLocationMarkerIcon(iconArgb: IntArray, iconW: Int, iconH: Int): Unit</code></pre><p>显示或隐藏定位点，可设置 heading。自定义图标传入摊平 ARGB 像素数组及宽高。</p></div>
+
+<h3 id="api-vector">10.8 文件矢量图层</h3><div class="api"><h4>addVectorLayer</h4><pre><code>fun addVectorLayer(
+    path: String,
+    style: VectorStyle,
+    iconArgb: IntArray? = null,
+    iconW: Int = 0,
+    iconH: Int = 0,
+    extent: VectorExtent? = null,
+    maxFeatures: Int = 0
+): Int</code></pre><p>加载 GDAL/OGR 可打开的 shp、kml、kmz、geojson、gpkg 等文件。成功返回图层索引，失败返回 -1。<code>extent=null</code> 表示全量加载；<code>maxFeatures=0</code> 使用 native 保护上限。</p></div><div class="api"><h4>@Jin 实验性在线 GeoJSON URL</h4><p>当前 <code>path</code> 参数除本地文件外，也可直接传入公开 <code>http://</code> 或 <code>https://</code> GeoJSON 地址。该能力为 P0 实验特性：native 先下载到应用私有缓存，再交给 GDAL/OGR 解析，不依赖 GDAL <code>/vsicurl/</code>。</p><pre><code>val provinceUrl = "http://210.74.129.84:8520/app-pub/web-data/geojson/district/province.json"
+val index = map.addVectorLayer(
+    path = provinceUrl,
+    style = VectorStyle(labelField = "name"),
+    extent = null,
+    maxFeatures = 0
+)</code></pre><div class="table-wrap"><table><tbody><tr><td>缓存目录</td><td><code>context.filesDir/globecore/vector-cache/url/&lt;hash&gt;.geojson</code></td></tr><tr><td>重复请求</td><td>同一 URL 首次成功后只读缓存；<code>updateVectorExtent()</code> 不会重复下载。</td></tr><tr><td>响应限制</td><td>P0 默认超时 20 秒、最大 80MB；空响应、HTML 错误页、缺少 <code>type</code> 的非 GeoJSON 会失败。</td></tr><tr><td>鉴权能力</td><td>P0 仅支持公开 URL；headers、token、ETag、强制刷新、进度回调列入后续版本。</td></tr><tr><td>回退</td><td>将 native 常量 <code>RemoteVectorCache::kExperimentalRemoteGeoJsonSource</code> 改为 <code>false</code>。</td></tr></tbody></table></div></div>
+<div class="api"><h4>updateVectorExtent</h4><pre><code>fun updateVectorExtent(index: Int, extent: VectorExtent?, maxFeatures: Int = 0): Unit</code></pre><p>相机移动后按新的 WGS84 范围重新加载矢量。传 null 恢复整文件。</p></div><div class="api"><h4>状态、字体、可见性与移除</h4><pre><code>fun hasVectorLoading(): Boolean
+fun setFontPath(path: String): Unit
+fun setVectorLayerVisible(index: Int, visible: Boolean): Unit
+fun setVectorMinLevel(index: Int, minLevel: Int): Unit
+fun removeVectorLayer(index: Int): Unit</code></pre><p>查询加载状态、设置标注字体文件、控制显隐、设置最小显示级别和删除图层。</p></div>
+
+<h3 id="api-overlay">10.9 动态叠加层</h3><p>动态 overlay 适合业务轨迹、测量、临时点、点击高亮等数据。更新接口为覆盖式更新：每次传入该图层当前应显示的完整数据。</p><div class="api"><h4>addOverlayLayer / removeOverlayLayer / clearOverlayLayers</h4><pre><code>fun addOverlayLayer(
+    style: VectorStyle,
+    iconArgb: IntArray? = null,
+    iconW: Int = 0,
+    iconH: Int = 0
+): Int
+fun removeOverlayLayer(index: Int): Unit
+fun clearOverlayLayers(): Unit</code></pre><p>创建动态图层并返回索引。3D 地形开启后，线面几何会进行 DEM 贴地烘焙。</p></div><div class="api"><h4>updateOverlayPoints</h4><pre><code>fun updateOverlayPoints(
+    index: Int,
+    lonlat: DoubleArray,
+    fids: LongArray? = null,
+    labels: Array&lt;String&gt;? = null
+): Unit</code></pre><p><code>lonlat</code> 摊平为 <code>[lon,lat,lon,lat,...]</code>。fids/labels 可选，数量需与点数一致。</p></div><div class="api"><h4>updateOverlayLines</h4><pre><code>fun updateOverlayLines(
+    index: Int,
+    lonlat: DoubleArray,
+    vertexCounts: IntArray,
+    fids: LongArray? = null,
+    labels: Array&lt;String&gt;? = null
+): Unit</code></pre><p>更新一条或多条线。<code>vertexCounts</code> 描述每条线的顶点数，所有顶点数之和必须等于坐标对数。</p></div><div class="api"><h4>updateOverlayPolygons</h4><pre><code>fun updateOverlayPolygons(
+    index: Int,
+    lonlat: DoubleArray,
+    ringVertexCounts: IntArray,
+    ringsPerFeature: IntArray,
+    fids: LongArray? = null,
+    labels: Array&lt;String&gt;? = null
+): Unit</code></pre><p>更新一个或多个面。环可以只传真实角点，native 会在需要时自动补首点闭合；已闭合环不会重复补。</p></div><div class="api"><h4>setOverlayNoPick</h4><pre><code>fun setOverlayNoPick(index: Int, noPick: Boolean): Unit</code></pre><p>设置业务叠加层是否参与拾取。测量线、临时辅助面等不希望挡住底图层拾取时可设为 true。</p></div>
+
+<h3 id="api-pick">10.10 拾取、反算与要素几何</h3><div class="api"><pre><code>fun pickVector(sxPx: Float, syPx: Float): LongArray?
+fun screenToGeo(sxPx: Float, syPx: Float): Position?
+fun featureGeometry(layerIndex: Int, fid: Long): FeatureGeometry?
+fun featureRenderColor(layerIndex: Int, fid: Long): IntArray?</code></pre><p><code>pickVector</code> 命中时返回 <code>longArrayOf(layerIndex, fid)</code>，未命中返回 null。拾取优先动态 overlay，再文件矢量；同阶段后加入图层优先，并尊重 noPick。<code>featureRenderColor</code> 返回 <code>[fillArgb, lineArgb]</code>。</p></div>
+</section>
+
+<section id="srs"><h2>11. NativeSrs 坐标转换</h2><pre><code>object NativeSrs {
+    fun initProjData(context: Context): Unit
+    external fun initProjDataPath(projDataPath: String?): Unit
+    external fun convert(x: Double, y: Double, srcCrs: String, tgtCrs: String): DoubleArray?
+    external fun getProjVersion(): Int
+}</code></pre><div class="table-wrap"><table><tbody><tr><td>initProjData</td><td>解压 AAR 内置 PROJ 数据到 <code>filesDir/proj</code> 并设置搜索路径。</td></tr><tr><td>convert</td><td>执行坐标转换，成功返回 <code>[x,y]</code>，失败返回 null。CRS 可传 EPSG 或 PROJ 字符串。</td></tr><tr><td>getProjVersion</td><td>返回 PROJ 主版本号。</td></tr></tbody></table></div><pre><code>val xy = NativeSrs.convert(116.4, 39.9, "EPSG:4326", "EPSG:3857")
+if (xy == null) { /* 转换失败兜底 */ } else { val mercatorX = xy[0] }</code></pre></section>
+
+<section id="vector-io"><h2>12. NativeVector 矢量文件 IO</h2><pre><code>object NativeVector {
+    external fun readVectorFeatures(
+        path: String,
+        minLon: Double, minLat: Double, maxLon: Double, maxLat: Double,
+        includeAllFields: Boolean,
+        labelField: String?,
+        simplifyGeometry: Boolean,
+        simplifyTolerance: Double
+    ): String?
+    external fun getFeatureAttributes(path: String, featureId: Long): String?
+    external fun queryVectorFeatures(path: String, sql: String): String?
+    external fun countVectorFeatures(path: String): Int
+    external fun updateFeatureAttributes(
+        path: String, featureId: Long, keys: Array&lt;String&gt;, values: Array&lt;String&gt;
+    ): Boolean
+}</code></pre><ul><li>范围任一传 <code>NaN</code> 表示不做空间过滤。</li><li><code>includeAllFields=false</code> 时仅保留 <code>labelField</code> 字段，减少大数据量内存。</li><li>返回 JSON 字符串；SQL 错误通常以 JSON 中的 <code>error</code> 字段表达。</li><li><code>countVectorFeatures</code> 打开失败返回 -1。</li><li>属性写回依赖驱动和文件权限，只读驱动返回 false。</li></ul></section>
+
+<section id="layer-info"><h2>13. NativeLayerInfo 图层元信息</h2><pre><code>object NativeLayerInfo {
+    external fun getLayerExtent(path: String): DoubleArray?
+    external fun getLayerSrs(path: String): String?
+    external fun getVectorFieldNames(path: String): Array&lt;String&gt;?
+    external fun getGdalVersion(): String?
+    external fun getVectorDrivers(): String?
+}</code></pre><p><code>getLayerExtent</code> 返回顺序为 <code>[minLon, minLat, maxLon, maxLat]</code>，非 WGS84 数据会尝试重投影；失败返回 null。</p></section>
+
+<section id="events"><h2>14. 地形事件与状态 JSON</h2><p>地形事件示例：</p><pre><code>map.setOnTerrainProviderEventListener { json ->
+    Log.i("Terrain", json)
+    // 可用 org.json.JSONObject 解析
+}
+map.configureTerrainProvider(baseUrl, cacheDir.absolutePath)
+map.setTerrainProviderEnabled(true)</code></pre><div class="table-wrap"><table><thead><tr><th>事件</th><th>触发时机</th></tr></thead><tbody><tr><td>metadata_started</td><td>开始加载 layer.json。</td></tr><tr><td>metadata_ready</td><td>元数据就绪，额外字段 source=disk/network。</td></tr><tr><td>refresh_started</td><td>开始刷新当前视口，含 engineZoom、engineTiles、queued。</td></tr><tr><td>first_tile</td><td>本轮首块地形注入完成，可用于首块耗时统计。</td></tr><tr><td>progress</td><td>加载进度，含 delivered、total、failures。</td></tr><tr><td>refresh_completed</td><td>本轮完成，含 delivered、total、failures。</td></tr><tr><td>enabled / disabled</td><td>地形开关变化。</td></tr><tr><td>error</td><td>错误，stage 表示阶段，如 metadata、metadata_parse。</td></tr></tbody></table></div><h3>stats 常用字段</h3><div class="table-wrap"><table><tbody><tr><td>enabled / metadataLoaded / maxZoom</td><td>开关、元数据状态、最大级别。</td></tr><tr><td>engineZoom / requestedEngineTiles / requestedServiceTiles</td><td>引擎地形级别、请求的引擎块数、换算后的服务瓦片数。</td></tr><tr><td>deliveredTiles / failures / retries</td><td>已注入块数、失败数、重试数。</td></tr><tr><td>diskHits / networkRequests / cacheWrites</td><td>地形磁盘命中、网络请求、缓存写入次数。</td></tr><tr><td>metadataDiskHits / metadataNetworkRequests</td><td>layer.json 缓存和网络请求次数。</td></tr><tr><td>availableSkips / duplicateSkips</td><td>已有数据跳过、重复任务跳过次数。</td></tr><tr><td>firstTileMs / elapsedMs</td><td>首块耗时和本轮总耗时。</td></tr></tbody></table></div></section>
+
+<section id="recipes"><h2>15. 常见业务示例</h2><h3>15.1 影像、注记、地形与 flyTo</h3><pre><code>val taibai = Camera(
+    latitude = 33.95,
+    longitude = 107.75,
+    altitude = 12_000.0,
+    heading = 0.0,
+    tilt = 55.0
+)
+map.setViewMode(NativeMapView.ViewMode.THREE_D)
+map.configureTerrainProvider("https://example.com/terrain", filesDir.resolve("terrain-cache").absolutePath)
+map.setTerrainProviderEnabled(true)
+map.flyToCamera(taibai, 2200.0)</code></pre><h3>15.2 点击地图加点</h3><pre><code>var overlayId = -1
+overlayId = map.addOverlayLayer(VectorStyle(pointRadiusDp = 7f))
+map.setOnTapListener { x, y ->
+    val p = map.screenToGeo(x, y) ?: return@setOnTapListener
+    map.updateOverlayPoints(overlayId, doubleArrayOf(p.longitude, p.latitude))
+}</code></pre><h3>15.3 点选文件矢量并高亮</h3><pre><code>map.setOnTapListener { x, y ->
+    val hit = map.pickVector(x, y) ?: return@setOnTapListener
+    val layer = hit[0].toInt()
+    val fid = hit[1]
+    val geom = map.featureGeometry(layer, fid) ?: return@setOnTapListener
+    val highlight = map.addOverlayLayer(VectorStyle(fillColor = 0x55FFCC00.toInt(), lineColor = 0xFFFF8800.toInt()))
+    when (geom.type) {
+        0 -> map.updateOverlayPoints(highlight, geom.lonlat)
+        1 -> map.updateOverlayLines(highlight, geom.lonlat, geom.ringCounts)
+        2 -> map.updateOverlayPolygons(highlight, geom.lonlat, geom.ringCounts, geom.ringsPerFeature)
+    }
+}</code></pre><h3>15.4 动态线和多边形</h3><pre><code>val lineLayer = map.addOverlayLayer(VectorStyle(lineColor = 0xFFFF0000.toInt(), lineWidth = 3f))
+map.updateOverlayLines(
+    lineLayer,
+    doubleArrayOf(107.70,33.90, 107.80,33.95, 107.90,33.90),
+    intArrayOf(3)
+)
+
+val polygonLayer = map.addOverlayLayer(VectorStyle(fillColor = 0x554A8FE3.toInt()))
+map.updateOverlayPolygons(
+    polygonLayer,
+    doubleArrayOf(107.70,33.85, 107.90,33.85, 107.90,34.05, 107.70,34.05),
+    intArrayOf(4),
+    intArrayOf(1)
+)</code></pre><h3>15.5 Bitmap 转 ARGB 图标</h3><pre><code>fun Bitmap.toArgb(): Triple&lt;IntArray, Int, Int&gt; {
+    val pixels = IntArray(width * height)
+    getPixels(pixels, 0, width, 0, 0, width, height)
+    return Triple(pixels, width, height)
+}
+val (argb, w, h) = bitmap.toArgb()
+val layer = map.addOverlayLayer(VectorStyle(), argb, w, h)</code></pre><h3>15.6 按范围加载本地或在线 GeoJSON</h3><pre><code>val idx = map.addVectorLayer(
+    path = "/sdcard/Download/province.geojson",
+    style = VectorStyle(labelField = "name"),
+    extent = VectorExtent(105.0, 31.0, 111.0, 39.5),
+    maxFeatures = 5000
+)
+// 相机静止后按新视口更新
+map.updateVectorExtent(idx, VectorExtent(100.0, 28.0, 115.0, 42.0), 5000)
+
+// @Jin 在线 URL 的 extent 重载只读已下载缓存，不会重新请求 province.json。
+val onlineIdx = map.addVectorLayer(
+    "http://210.74.129.84:8520/app-pub/web-data/geojson/district/province.json",
+    VectorStyle()
+)</code></pre></section>
+
+<section id="troubleshooting"><h2>16. 排错指南</h2><div class="table-wrap"><table><thead><tr><th>现象</th><th>可能原因</th><th>处理建议</th></tr></thead><tbody><tr><td>UnsatisfiedLinkError: libglobecore.so</td><td>宿主 ABI 不匹配或 APK 未包含 .so。</td><td>确认 abiFilters 包含 arm64-v8a；模拟器使用 x86_64。</td></tr><tr><td>坐标转换返回 null</td><td>PROJ 数据未初始化或 CRS 字符串非法。</td><td>Application/onCreate 调 NativeSrs.initProjData；检查 EPSG 编号。</td></tr><tr><td>在线瓦片不出图</td><td>无网络权限、URL 模板错误、token 过期、x/y 顺序反了。</td><td>检查 INTERNET、{z}/{x}/{y} 顺序、服务响应格式和缓存目录。</td></tr><tr><td>注记层黑底或不透明</td><td>把 PNG 注记当作底图 overlay=false。</td><td>注记层 addTileLayer 时 overlay=true。</td></tr><tr><td>在线 GeoJSON 提示下载失败</td><td>网络不可达、HTTP 非 2xx、超时或服务证书/连接异常。</td><td>检查 INTERNET 权限、URL、服务状态和 logcat 中脱敏后的 <code>[RemoteGeoJson]</code> 日志。</td></tr><tr><td>http 明文地址在真机失败</td><td>Android 9+ 默认限制 cleartext HTTP。</td><td>仅在内网调试时配置 networkSecurityConfig 或 usesCleartextTraffic；生产优先使用 HTTPS。</td></tr><tr><td>在线 GeoJSON 提示不是 GeoJSON</td><td>服务返回登录页/HTML、空内容或非 GeoJSON JSON。</td><td>用浏览器直接访问 URL；P0 只做轻量嗅探，最终仍由 OGR 解析。</td></tr><tr><td>在线 GeoJSON 超过大小限制</td><td>响应超过 P0 默认 80MB。</td><td>服务端切片/分省裁剪，或后续在 options 中开放 maxNetworkBytes。</td></tr><tr><td>地形没有起伏</td><td>仍在 2D、地形未开启、layer.json 失败、服务不兼容。</td><td>切 THREE_D，检查 terrainProviderStatus 与 error 事件。</td></tr><tr><td>大 GeoJSON 卡顿</td><td>一次加载顶点过多、三角剖分和上传压力大。</td><td>使用 extent/maxFeatures、简化几何、分视口加载、减少复杂洞环。</td></tr><tr><td>拾取不到 overlay</td><td>图层被设置 noPick 或被后加入图层优先命中。</td><td>检查 setOverlayNoPick 和图层添加顺序。</td></tr><tr><td>升级 AAR 后 PROJ 异常</td><td>filesDir/proj 中旧数据残留。</td><td>清除应用数据或删除 proj 解压目录后重启。</td></tr></tbody></table></div></section>
+
+<section id="maintenance"><h2>17. 文档维护约定</h2><!-- @Jin 用户追加的维护要求：Android API 文档属于定稿交付物，公开 API 变更必须同次更新。 -->
+<div class="notebox"><p><b>@Jin 维护规则：</b>以后新增、修改、废弃或删除 Android 公开 API，必须在同一次定稿改动中同步更新 <code>docs/api/android-api-guide.html</code>。至少核对函数签名、参数含义、返回值、线程/生命周期约束、示例代码、排错说明和版本 README 记录。</p><p><b>@Jin：</b>实验性 API 必须在文档中明确标注“实验性/可回退”，不得让宿主误认为是稳定接口。在线 GeoJSON P0 即按此规则标注回退常量、缓存路径和暂不支持的 headers/token 能力。</p></div>
+<p class="muted small">文档生成日期：2026-10-27。若源码 KDoc 与本文不一致，以当前源码为准，同时视为文档欠账，应立即修订。</p></section>
+</main></div>
+<script>
+// @Jin 纯本地目录筛选，不依赖外部资源，便于离线浏览 API 文档。
+document.getElementById('tocSearch').addEventListener('input', function () {
+  const q = this.value.trim().toLowerCase();
+  document.querySelectorAll('#toc a').forEach(a => {
+    a.style.display = a.textContent.toLowerCase().includes(q) ? '' : 'none';
+  });
+});
+</script>
+</body></html>

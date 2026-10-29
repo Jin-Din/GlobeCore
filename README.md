@@ -14,6 +14,23 @@ OpenGL ES 2.0 绘制全部在 native 完成，并内联编译了 GDAL/OGR、PROJ
 
 当前版本 **0.1.4.0**：GeoPackage 工程读写（`geopackage_io`，七表结构 + JSON 桥接 + 原子写 + SetFID 记录 id 持久化）、着色器精度修复（顶点阶段归一化法向/视线方向，修复真机 3D 光照无过渡问题）、瓦片缓存 MBTiles 单文件后端（含 `added_at` 入库时间列）。tag 后追加（未重新打版）：鸿蒙 HAR 构建补齐引擎源清单（修复 so 链接缺符号）、photos 表新增 `photo_data` BLOB（主照片随工程文件入库）。
 
+### @Jin 实验性在线 GeoJSON Source（P0）
+
+- @Jin `NativeMapView.addVectorLayer(path, ...)` 的 `path` 在 Android 与 HarmonyOS NEXT HAR 两端除本地文件外，实验性支持公开 `http://` / `https://` GeoJSON URL。native 不依赖 GDAL `/vsicurl/`，而是在后台通过现有 `HttpClient` 下载、做基础 JSON/HTML/空响应/80MB 上限校验，并原子写入应用私有目录 `filesDir/globecore/vector-cache/url/<hash>.geojson`，随后复用现有 `buildGeometry → Renderer VBO/拾取/贴地` 管线。
+- @Jin HarmonyOS NEXT 当前为 `GLOBECORE_LITE=ON`，没有链接 GDAL/OGR；LITE 包新增 `ohos/lite_geojson_reader.cpp`，在缓存下载完成后用无 GDAL 依赖的原生 GeoJSON reader 支持常见 Point/MultiPoint、LineString/MultiLineString、Polygon/MultiPolygon、GeometryCollection、Feature/FeatureCollection。shp/kml/tif 等格式仍需非 LITE/GDAL 构建。
+- @Jin 同一 URL 首次成功下载后，后续重新打开图层或调用 `updateVectorExtent()` 只读取本地缓存，不因视口范围变化重复下载；析构/销毁图层会通过 abort 中断下载。
+- @Jin 回退方式：将 `globecore/src/main/cpp/vector/RemoteVectorCache.h` 中 `RemoteVectorCache::kExperimentalRemoteGeoJsonSource` 改为 `false`，即恢复为纯本地路径语义；本次 Kotlin 公开方法签名保持不变。
+- @Jin P0 暂不支持自定义 headers、token、ETag/Last-Modified、强制刷新、下载进度和 stale cache 网络失败兜底，这些能力保留在 `docs/design/online-geojson-vector-proposal.md` 的 P1/P2/P3。
+- @Jin 内网 `http://` 地址在 Android 9+ 真机上还需宿主按调试策略允许 cleartext HTTP；正式环境建议使用 HTTPS。
+- @Jin Android demo 的 `03 · 矢量图层与拾取` 与 HarmonyOS NEXT Demo 的“省级GeoJSON”按钮均直接加载 `http://210.74.129.84:8520/app-pub/web-data/geojson/district/province.json`，不再由 App 预下载、JSON.parse 或转动态 overlay；Android demo Manifest 仅为该内网 HTTP 调试地址开启 cleartext HTTP。
+- @Jin 鸿蒙真机 P0 记录（2026-10-28，设备 `5KLBB25911200313`）：首次点击省级在线图层时 native 下载 `province.json` 669,489 bytes，日志依次出现 `[RemoteGeoJson] downloaded`、`[LiteGeoJson] 读取完成 features=4`、`[VecReload] VectorLoader 就绪`，画面显示河南/湖北/四川/陕西四省黄色边界；force-stop 后重启并再次加载，同 URL 命中 `[RemoteGeoJson] cache hit ... elapsed=0ms`，读取与构建总耗时约 268ms，未再出现 ArkTS `province geojson downloaded/overlay` 兜底日志。
+- @Jin 鸿蒙真机同时在 3D 地形开启状态下缩放到四省范围，黄色省级边界仍作为普通 native VectorLayer 叠加显示；在线源读取的是下载后的本地缓存文件，因此 LITE GeoJSON reader 对“远程 URL 落缓存后的本地 .geojson”路径已完成真机验证。本地 rawfile `sample.geojson` 入口仍走同一 `readLiteGeoJsonFile()` 路由，桌面冒烟已通过，后续可再做一次人工 UI 回归。
+
+### @Jin Android API 帮助文档
+
+- @Jin 新增 `docs/api/android-api-guide.html`，面向 Android/Kotlin/Java 宿主开发人员，分类整理 `NativeMapView`、`Camera`、`Position`、`VectorStyle`、`VectorExtent`、`FeatureGeometry`、`NativeSrs`、`NativeVector`、`NativeLayerInfo` 等公开 API，补充参数/返回值、生命周期、XYZ 瓦片、三维地形 Provider、动态 overlay、拾取反算、坐标转换、GDAL/OGR 文件 IO 与可复制示例。
+- @Jin 维护约定：以后新增、修改、废弃或删除 Android 公开 API，必须在同一次定稿改动中同步更新该 HTML 文档；实验性 API 必须明确标注“实验性/可回退”。
+
 ## 它是干什么的
 
 一句话：**给手机 App 和桌面应用一个能显示 2D 地图 / 3D 地球、能直接读 shp·tif·kml、能离线用的地图渲染内核**。
@@ -31,7 +48,7 @@ SDK**。
 | 本地影像 | tif/img 等 GDAL 可打开格式，双通路：`addRasterLayer` native 重投影后按全球墨卡托即时切片并回写缓存复用（级别由栅格分辨率自动推算）；`addRasterImageLayer` 整幅直读单张贴图按 WGS84 四至贴面（UI 线程零 GDAL 立即返回，超 GL 纹理/内存帽沿 overviews 降采样，全幅 sidecar 磁盘缓存二次打开秒级就绪） | `addRasterLayer` / `addRasterImageLayer` |
 | 三维地形 | quantized-mesh v1.0 双通路：底层保留 `setTerrainTile/clearTerrain` 注入接口；共享 C++ `CesiumTerrainProvider` 已由 native 直接读取相机视口、中心优先生成 DEM 任务，并完成 `layer.json` 解析、EPSG:4326/TMS 与墨卡托 bbox 求交、磁盘缓存、并发下载、重试、去重和流式注入；Harmony NAPI/HAR 与 Android JNI/Kotlin 均暴露同名门面。宿主只注入 `baseUrl/cacheDir/maxZoom/concurrency/tileRadius/headers`，不绑定服务地址或 token；native 按真实 bbox 全局共享覆盖多块 DEM，索引按 high-watermark 解码，DEM 逐帧削峰、地形瓦片静态 VBO（LRU），仅 3D 球体生效；Android/Harmony/Qt 统一生命周期事件（元数据、开始、首块、进度、完成、错误、开关）由平台桥接转投宿主线程 | `configureTerrainProvider` / `setTerrainProviderEnabled` / `refreshTerrainProvider` / `terrainProviderStatus` / `setOnTerrainProviderEventListener` / Qt `terrainProviderEvent` |
 | 瓦片调度 | 后台线程池取瓦片（先盘后网、原子写盘、失败冷却退避），GL 线程仅异步上传并按帧限额；P0-2 exp1f 后视口代际（view-generation）只推进代际、不再立即清空队列/ready，同 key 排队或在途任务可原地升级，已解码待上传瓦片用 ready key 去重；所有瓦片层共享每帧 4 张 / 1MiB 上传预算，当前视口优先、最近旧视口随后补齐；在线图源先投 z-2/z-1 祖先粗瓦，再以屏幕中心优先替换叶子，3D 叶瓦片请求限制为交互 96 块、空闲 192 块；交互期增加 LOD 迟滞，优先保持祖先粗图连续覆盖，大倾角近景按相机三维距离排队并保证全部可见叶至少具备 z-2 粗祖先覆盖，显著压低无效请求量与“先黑块再出图/近景黑面”的观感；3D 地理四叉树帧间缓存同时校验眼点、离地高度尺度、地形安全高程与相机 forward/up，倾斜、旋转、缩放后立即重建可见叶集；exp1h 起地平线/视锥/AABB/SSE 使用 DEM 安全壳，3D 相机目标点落在真实地形表面并按附近山脊保留最小净空，避免复用旧视锥或眼点穿入山体造成黑区 | `addTileLayer` |
-| 矢量 | shp/kml/kmz/dwg/dxf 等 OGR 可打开格式**直读文件**→ 重投影 WGS84 → earcut 三角剖分；面填充/描边/线/点/图标 billboard/文字标注（字形图集，可复用系统 CJK 字体，零 APK 增量） | `addVectorLayer` / `VectorStyle` / `setFontPath` |
+| 矢量 | Android 非 LITE 支持 shp/kml/kmz/dwg/dxf 等 OGR 格式直读；HarmonyOS NEXT LITE 无 GDAL 依赖，P0 内置常见 GeoJSON 文件/在线 URL 读取。统一重投影到 WGS84 GeoJSON 口径后进入 earcut 三角剖分、面填充/描边/线/点/图标 billboard/文字标注（字形图集，可复用系统 CJK 字体） | `addVectorLayer` / `VectorStyle` / `setFontPath` / `vectorCacheDir` |
 | 大数据矢量 | 按屏幕范围增量重载（Swap-on-ready，重载期无空窗）、单次要素预算、加载中状态轮询、按级别隐藏、样式变更就地换层不闪图 | `updateVectorExtent` / `hasVectorLoading` / `setVectorMinLevel` / `setVectorLayerVisible` / `removeVectorLayer` |
 | 拾取与属性 | 单击命中 `[layerIndex, fid]`；回取要素 WGS84 几何用于选中高亮；屏幕点→经纬度（采集/测量加点）；范围过滤 + 字段白名单 + 几何简化读取、按 FID 全字段回取、属性 SQL 查询、要素计数、按 FID 写回源文件 | `pickVector` / `featureGeometry` / `screenToGeo` / `NativeVector` |
 | 业务叠加层 | 运行时内存几何层（点/线/面覆盖式推送）：测量、轨迹、拍照标识、样地等业务图形；瞬态高亮层可退出拾取竞争 | `addOverlayLayer` / `updateOverlay*` / `setOverlayNoPick` |
@@ -469,6 +486,8 @@ struct MapPage {
   build() {
     NativeMapView({
       density: 1.0,
+      // @Jin 实验性在线 GeoJSON 需要宿主传入应用私有缓存目录；本地文件矢量可留空。
+      vectorCacheDir: `${getContext(this).filesDir}/globecore/vector-cache`,
       onReady: (v: NativeMapView): void => {
         this.initMap(v);
       },
@@ -477,6 +496,30 @@ struct MapPage {
   }
 }
 ```
+
+### @Jin 实验性在线 GeoJSON（HarmonyOS NEXT）
+
+LITE HAR 中 `addVectorLayer` 的 `path` 可直接传入公开 GeoJSON URL；组件必须显式注入宿主私有缓存目录，HAR 不假设业务 App 的沙箱路径：
+
+```typescript
+const provinceUrl = 'http://210.74.129.84:8520/app-pub/web-data/geojson/district/province.json';
+
+NativeMapView({
+  density: 2.38,
+  vectorCacheDir: `${this.context.filesDir}/globecore/vector-cache`,
+  onReady: (view: NativeMapView): void => {
+    const style = new VectorStyle(0x44F2C94C, 0xFFFFD54F, 2.0);
+    const index = view.addVectorLayer(provinceUrl, style);
+  },
+})
+```
+
+- 首次加载：native `HttpClient` 下载到 `<vectorCacheDir>/url/geojson-<hash>.geojson`，LITE GeoJSON reader 解析后进入普通矢量 VBO 管线。
+- 二次加载/视口重载：同一 URL 只读本地缓存，不重复网络下载。
+- 日志关键字：`[RemoteGeoJson] downloaded/cache hit`、`[LiteGeoJson] 读取完成`、`[VecReload] VectorLoader 就绪`。
+- P0 边界：仅公开 URL、GeoJSON WGS84、80MB/20s 默认限制；暂不支持 headers/token、ETag/304、强制刷新、下载进度、stale cache 网络失败兜底。
+- LITE 边界：只内置常见 GeoJSON 读取；shp/kml/kmz/dwg/dxf/tif 等仍需非 LITE 的 OHOS GDAL/PROJ 全套依赖。
+- 回退：将 `RemoteVectorCache::kExperimentalRemoteGeoJsonSource` 改为 `false` 可关闭 URL 下载；宿主不传 `vectorCacheDir` 时远程 URL 会返回“缓存目录未配置”，本地文件行为不受影响。
 
 ### 三维地形 C++ Provider（P2-1 阶段 C）
 
@@ -669,6 +712,8 @@ cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build b
   ⑬ @Jin **P0-2 exp1g：大倾角近景黑面修复（实验性）**：3D 可见叶改为按地形表面中心到相机的三维距离排序，保证屏幕下方最近区域优先获得高清叶；底图 z-2 粗祖先请求覆盖全部可见叶，预算外近景瓦片不再因“自身高清纹理和祖先纹理均缺失”而永久绘制深色占位；排序距离通过 scratch 数组每帧预计算，地形 VBO LRU 从 512 提到 1024，避免 700+ 可见叶时网格缓存反复淘汰重建。真机太白山正常近景大倾角视角下 `placeholder=0`、近景无黑面；相机穿入山体的过近机位另列地形安全高度任务。详见“实验性大倾角近景黑面修复”。
   ⑭ @Jin **P0-2 exp1h：地形安全剔除与相机安全高度（实验性）**：四叉树地平线/视锥/AABB/SSE 接收 DEM 安全高程，地形抬高后的近景山脊不再按海拔 0 被误剔除；Renderer 每帧向 Navigator 同步目标点地形高和全局安全高，3D 目标点落在 DEM 表面，倾斜时保持至少 150m 净空，near/far 改用实际斜距。真机太白山地形开启、55° 倾角、近景放大时 `182/182、failures=0、placeholder=0`，屏幕下缘连续无黑面。详见“实验性地形安全剔除与相机安全高度”。
   ⑮ @Jin **3D 动态叠加层贴地 stroke 飞线修复**：`Renderer::uploadGlobeOverlayDrapedChunks()` 在线/面描边沿 DEM 加密时，曾以 `const DrapeVertex &prev = corners.back()` 持有上一角点，随后继续向同一 `std::vector` 插入约 20m 加密点；vector 扩容后该引用悬空，插值经纬度可能读到垃圾内存（真机日志出现异常大经度），再烘焙为 ECEF 后表现为青色线和黄色面描边从太白山样例区域辐射到屏幕边缘，容易被误判为 GeoJSON 解析错乱。现改为先复制上一角点值再插点；临时真机诊断同时确认修复后小范围面层 DEM 命中 `3992/3992`、线层 `159/159`，省级 GeoJSON 大层保护路径仍可加载和缩放；动态叠加面入口同时允许宿主只传真实角点（四边形传 4 点），内部自动补回首点让面描边闭合。构建核对 ID：`v0.1.3-20261027-drape-strokefix2`。
+  ⑯ @Jin **HarmonyOS NEXT 在线 GeoJSON P0 真机验收**：`feature/geojson-url-data` 分支在鸿蒙 HAR LITE 构建中打通 `ArkTS addVectorLayer(httpUrl) → NAPI vectorCacheDir → C++ RemoteVectorCache 原子下载缓存 → lite_geojson_reader → VectorBuilder/VBO/拾取/贴地`。真机首次下载 669,489 bytes、解析 4 个 MultiPolygon 要素；重启后二次加载 `cache hit elapsed=0ms`、read/build 共约 268ms，且不再走 ArkTS 下载或 overlay 兜底。3D 地形开启后四省边界仍可显示；能力由 `RemoteVectorCache::kExperimentalRemoteGeoJsonSource` 守卫，可一键回退。
+  ⑰ @Jin **在线 GeoJSON 岛洞解析、远程大面贴地与动态 overlay 边界修正（实验性，构建核对 `v0.1.3-20261029-remote-vector-drape35`）**：在 P0 URL Source 基础上继续修复 HarmonyOS NEXT LITE GeoJSON 对 Polygon/MultiPolygon 岛洞环的解析与三角剖分回归，陕西省级 `province.json` 真机解析为 4 个 MultiPolygon 要素，其中陕西外环 2434 点、3 个洞、洞点 51 个，未再出现洞间多余连线或几何错乱；远程 GeoJSON 与内存 overlay 的 3D VBO 路径拆分，在线大面使用独立 `uploadGlobeRemoteDrapedChunks()` 实验通路，按当前 DEM 覆盖细分、逐 chunk 标记 `terrainDraped`，运动/flyTo 中延迟重烘焙，停顿后再生成贴地 VBO，避免浏览过程中为整省大面同步采高造成卡顿。内存 overlay 的面填充在 DEM 烘焙后按 `isOverlay` 整层关闭对地形的深度测试，修复太白山小面被粗地形三角面局部遮挡造成的“破碎”；面外边界新增实验性 conformal outline ribbon：不再用屏幕空间横向扩边的 stroke shader，而是将中心线沿 DEM 加密、左右边分别偏移并重新采高，生成随坡面起伏的 `GL_TRIANGLES` 地表窄三角带（10km 测试面真机日志 `outline=0、conformalOutlineRanges=1、ribbonVerts=4476、ribbonHalfM=27.3`）。该边界方案以固定世界宽度换取旋转时不“飘”，尚未做到恒定像素宽度，后续可继续优化；开关和代码均集中在 `Renderer.cpp`，可整体回退到旧 stroke。透明填充样式（fill alpha=0）已由 Demo 验证 2D/3D 仅显示省界，但当前仍会构建 fill 几何，后续需在 `fillAlpha<=0` 时跳过 earcut/fill VBO/远程贴地烘焙。
   > 维护约定：**每次改动定稿后同步更新本版本说明**（与代码提交同批），未发版工作累积在本条，发版时再改版本号与“当前发布”标记。
 - **0.1.4.0（当前发布）**：三项合入——
   ① **GeoPackage 工程读写**：新增 `bridge/geopackage_io.cpp`，OGR GPKG 驱动实现工程文件（七表：tracks / measures / photos / media_groups / survey_plots / project_meta / layer_refs）整体读写，Kotlin/ArkTS 侧以 JSON 跨桥传输；写入整文件 tmp+rename **原子替换**，五张要素表 **SetFID 落盘**使记录 id 持久化（重写不重编号），读侧缺列宽容回退、写侧整文件重建自动升级 schema；

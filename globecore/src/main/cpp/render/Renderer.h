@@ -58,12 +58,18 @@ public:
     /// GL 上下文创建：编译着色器、创建 VBO
     void onSurfaceCreated();
 
+    /// @Jin 2D/3D 切换后在 GL 线程回收另一模式的矢量 VBO，防止平面/球面顶点布局混用。
+    void handleVectorViewModeChanged();
+
     /// 视口尺寸变化：更新 glViewport
     void onSurfaceChanged(int width, int height);
 
     /// 绘制一帧：清屏 + 按相机逐层绘制可见瓦片（纹理 / 占位）。
     /// 返回是否需再画一帧（= 任一层后台仍有瓦片在途/待上传），供 RENDERMODE_WHEN_DIRTY 省电模式下自请求重绘。
     bool onDrawFrame();
+
+    /// @Jin 标记本帧是否处于 flyToCamera 动画；动画期沿用手势期的低上传/低重建预算，避免程序化飞行造成卡顿尖峰。
+    void setCameraFlightActive(bool active);
 
     /// 释放全部 GL 资源（须在 GL 线程调用）
     void release();
@@ -114,12 +120,19 @@ public:
     void setSunDirection(const Vec3 &dir);
 
 private:
+    /// @Jin flyTo 动画结束后保留短暂低预算窗口，跨代际旧瓦片和 DEM 网格不会在动画最后一帧集中冲击 GL。
+    bool cameraFlightBudgetActive() const;
     /// 日光方向（ECEF 归一向量，指向太阳）。renderGlobeLayer3D 每帧传给 uSunDir uniform。
     Vec3 sunDir_{1.0, 0.0, 0.3};
 
     /// 日光是否跟随相机（默认 true）：onDrawFrame3D 每帧把日下点放在视野中心偏屏幕上方 30°，
     /// 保证「看到的地方就是照到的地方」。外部调用 setSunDirection 后置 false，改用固定太阳方向。
     bool sunFollowCamera_ = true;
+
+    bool cameraFlightActive_ = false; // @Jin 当前帧是否正在执行 C++ flyToCamera 动画。
+    std::chrono::steady_clock::time_point lastCameraFlightTs_; // @Jin 最近一次 flyTo 活动时刻，用于动画收尾缓冲。
+    bool vectorViewModeInitialized_ = false; // @Jin 记录矢量 GPU 资源已经适配的视图模式，首次帧只初始化不清理。
+    Navigator::ViewMode vectorViewMode_ = Navigator::ViewMode::MODE_2D; // @Jin 上一帧 2D/3D 模式，用于检测切换并重建矢量 VBO。
 
 private:
     /// 查询某经纬度处的地形高度（米，椭球面以上）。
@@ -170,8 +183,11 @@ private:
     void uploadGlobeVecChunks(VectorLayer &vl);
     /// @Jin 实验性地把动态叠加层按 DEM 重建 3D VBO；效果异常时可仅回到旧的 alt=0 烘焙路径。
     void uploadGlobeOverlayDrapedChunks(VectorLayer &vl);
+    void uploadGlobeRemoteDrapedChunks(VectorLayer &vl); // @Jin drape29：在线 GeoJSON 专用实验性 DEM 贴地烘焙。
     /// @Jin 只统计与叠加层经纬度包围盒相交的 DEM；无关地形到达不应触发该层重建。
     uint64_t overlayDrapedTerrainSignature(const VectorLayer &vl) const;
+    /// @Jin 判断当前是否至少有一块 DEM 与叠加层相交；无地形覆盖时先走旧的平面 VBO 快速路径。
+    bool overlayHasTerrainCoverage(const VectorLayer &vl) const;
 
     /// 绘制一个图层的 3D 球面瓦片：drain 上传 → Tessellator 取可见叶瓦片 → 请求本级+祖先链 →
     /// Pass A 占位（无图无祖先的瓦片画棋盘深色贴球面；overlay 跳过）→ Pass B 逐瓦片纹理网格

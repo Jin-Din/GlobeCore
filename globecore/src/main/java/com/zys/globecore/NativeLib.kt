@@ -156,7 +156,9 @@ internal object NativeLib {
         labelOutline: Boolean, labelOutlineColor: Int,
         featureStyleOverride: String,
         iconArgb: IntArray?, iconW: Int, iconH: Int,
-        hasExtent: Boolean, minLon: Double, minLat: Double, maxLon: Double, maxLat: Double, maxFeatures: Int
+        hasExtent: Boolean, minLon: Double, minLat: Double, maxLon: Double, maxLat: Double, maxFeatures: Int,
+        // @Jin 在线 GeoJSON 实验能力使用宿主私有缓存目录；空串表示仅支持本地文件旧行为。
+        vectorCacheDir: String
     ): Int
 
     /**

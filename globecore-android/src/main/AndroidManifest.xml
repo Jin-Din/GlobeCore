@@ -5,7 +5,9 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!-- @Jin 在线省级 GeoJSON 验证地址是内网 HTTP；仅 demo 放开明文流量，SDK 正式环境仍建议 HTTPS。 -->
     <application
+        android:usesCleartextTraffic="true"
         android:allowBackup="true"
         android:icon="@drawable/ic_launcher"
         android:label="@string/app_name"

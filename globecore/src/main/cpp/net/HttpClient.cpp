@@ -5,6 +5,8 @@
 #include <curl/curl.h>
 
 #include <atomic>
+#include <algorithm>
+#include <cstddef>
 #include <mutex>
 
 namespace globecore {
@@ -25,11 +27,22 @@ std::atomic<uint64_t> g_newConnections{0};
 std::atomic<uint64_t> g_http2Responses{0};
 std::atomic<uint64_t> g_http1Responses{0};
 
-// libcurl 写回调：把响应字节追加到 std::vector<uint8_t>
+// @Jin libcurl 写回调上下文：除了收集字节，也在传输阶段强制响应大小上限。
+struct WriteSink {
+    std::vector<uint8_t> *out = nullptr;
+    size_t maxBytes = 0;
+    bool exceeded = false;
+};
+
 size_t writeCallback(char *ptr, size_t size, size_t nmemb, void *userdata) {
-    auto *out = static_cast<std::vector<uint8_t> *>(userdata);
+    auto *sink = static_cast<WriteSink *>(userdata);
     const size_t bytes = size * nmemb;
-    out->insert(out->end(), ptr, ptr + bytes);
+    if (sink == nullptr || sink->out == nullptr) return 0;
+    if (sink->maxBytes > 0 && sink->out->size() + bytes > sink->maxBytes) {
+        sink->exceeded = true;
+        return 0; // @Jin 返回 0 触发 CURLE_WRITE_ERROR，及时停止超大响应。
+    }
+    sink->out->insert(sink->out->end(), ptr, ptr + bytes);
     return bytes;
 }
 
@@ -57,6 +70,14 @@ struct ThreadCurl {
 inline CURL *threadHandle() {
     static thread_local ThreadCurl tc;
     return tc.h;
+}
+
+// @Jin 日志只保留 URL 路径并将 query 替换为 ***，避免在线 GeoJSON token 经 logcat 泄露。
+std::string redactUrlForLog(const std::string &url) {
+    const size_t query = url.find('?');
+    if (query == std::string::npos) return url;
+    std::string out = url.substr(0, query);
+    return out + "?***";
 }
 
 } // namespace
@@ -101,7 +122,8 @@ HttpClient::StatsSnapshot HttpClient::stats() {
 
 bool HttpClient::get(const std::string &url, std::vector<uint8_t> &outBytes, long timeoutMs,
                      const std::atomic<bool> *abortFlag,
-                     const std::vector<std::pair<std::string, std::string>> &headers) {
+                     const std::vector<std::pair<std::string, std::string>> &headers,
+                     size_t maxBytes, long *responseCode, bool *sizeLimitExceeded) {
     if (!globalInit()) return false;
 
     CURL *curl = threadHandle();
@@ -113,9 +135,11 @@ bool HttpClient::get(const std::string &url, std::vector<uint8_t> &outBytes, lon
 
     g_requests.fetch_add(1); // @Jin 统计真实进入 libcurl 的请求数。
     outBytes.clear();
+    if (sizeLimitExceeded != nullptr) *sizeLimitExceeded = false; // @Jin 每次请求先复位超限输出。
+    WriteSink sink{&outBytes, maxBytes, false}; // @Jin 在线 GeoJSON 可通过 maxBytes 限制响应体。
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
-    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &outBytes);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &sink);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, timeoutMs);
     curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);       // 多线程环境下必须，避免 alarm 信号
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L); // 跟随 3xx
@@ -172,7 +196,7 @@ bool HttpClient::get(const std::string &url, std::vector<uint8_t> &outBytes, lon
 
     // 证书校验失败（部分设备系统证书目录不可用/不完整）时降级为不校验重试一次，保证瓦片可取
     if (rc == CURLE_PEER_FAILED_VERIFICATION || rc == CURLE_SSL_CACERT_BADFILE) {
-        LOGW("curl TLS 校验失败(%s)，降级不校验重试 url=%s", curl_easy_strerror(rc), url.c_str());
+        LOGW("curl TLS 校验失败(%s)，降级不校验重试 url=%s", curl_easy_strerror(rc), redactUrlForLog(url).c_str());
         outBytes.clear();
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
         curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
@@ -181,6 +205,8 @@ bool HttpClient::get(const std::string &url, std::vector<uint8_t> &outBytes, lon
 
     long httpCode = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &httpCode);
+    if (responseCode != nullptr) *responseCode = httpCode; // @Jin 在线 GeoJSON 用它生成 HTTP 状态错误。
+    if (sizeLimitExceeded != nullptr) *sizeLimitExceeded = sink.exceeded; // @Jin 区分超大响应与普通网络失败。
     // @Jin 记录连接复用和协议版本，真机日志可直接确认请求慢是否仍出在重复 TCP/TLS 握手。
     long newConnections = 0;
     long httpVersion = 0;
@@ -211,13 +237,14 @@ bool HttpClient::get(const std::string &url, std::vector<uint8_t> &outBytes, lon
             outBytes.clear();
             return false;
         }
-        LOGW("curl GET 失败 url=%s err=%s", url.c_str(), curl_easy_strerror(rc));
-        outBytes.clear();
+        LOGW("curl GET 失败 url=%s err=%s", redactUrlForLog(url).c_str(), curl_easy_strerror(rc));
+        // @Jin 超限要保留已接收长度给上层生成明确中文错误；普通网络失败仍清空。
+        if (!sink.exceeded) outBytes.clear();
         return false;
     }
     if (httpCode < 200 || httpCode >= 300) {
         g_failures.fetch_add(1);
-        LOGW("curl GET 非 2xx（HTTP %ld）url=%s", httpCode, url.c_str());
+        LOGW("curl GET 非 2xx（HTTP %ld）url=%s", httpCode, redactUrlForLog(url).c_str());
         outBytes.clear();
         return false;
     }

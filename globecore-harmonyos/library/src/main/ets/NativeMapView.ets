@@ -88,6 +88,8 @@ export struct NativeMapView {
   density: number = 1.0;
   /** XComponent 实例唯一 id（官方约束 id 必须唯一）：避免多实例共存时按 id 反查组件冲突 */
   private xcId: string = `globeCoreMap_${g_xcIdSeq++}`;
+  /** @Jin 宿主应用私有缓存目录；实验性在线 GeoJSON URL 会下载到 vector-cache/url 后交给 native 解析。 */
+  vectorCacheDir: string = '';
 
   /** 引用挂载回调：aboutToAppear 时把组件引用交给宿主（struct 不可 new，宿主经此驱动 API） */
   onReady: ((view: NativeMapView) => void) | undefined = undefined;
@@ -381,6 +383,7 @@ export struct NativeMapView {
    * earcut 剖分并异步上传 VBO；绘制在底图之上、注记 overlay 之下。样式由 [VectorStyle] 承载；
    * iconArgb 非空时（w/h 配套）为 ARGB 像素图标 billboard，为空点要素回退固定圆。
    * extent 非空时按该范围只加载屏内要素；maxFeatures≤0 取 native 硬上限。返回图层 index，失败 -1。
+   * @Jin path 实验性支持 http/https GeoJSON URL；宿主需通过组件 vectorCacheDir 传入应用私有目录。
    */
   addVectorLayer(path: string, style: VectorStyle,
     iconArgb: number[] | undefined = undefined, iconW: number = 0, iconH: number = 0,
@@ -398,7 +401,7 @@ export struct NativeMapView {
       extent !== undefined && extent !== null ? extent.minLat : 0.0,
       extent !== undefined && extent !== null ? extent.maxLon : 0.0,
       extent !== undefined && extent !== null ? extent.maxLat : 0.0,
-      maxFeatures);
+      maxFeatures, this.vectorCacheDir);
     this.requestRender();
     return index;
   }

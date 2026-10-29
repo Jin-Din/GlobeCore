@@ -150,6 +150,11 @@ struct VectorGeometry {
     double originWx = 0.0;
     double originWy = 0.0;
 
+    // @Jin 读取结果的 WGS84 经纬度包围盒：3D 矢量贴地时每帧只与 DEM 缓存做交集，
+    // @Jin 避免为省级在线 GeoJSON 每帧重新扫描 8 万+渲染顶点而造成浏览卡顿。
+    bool hasGeoBounds = false;
+    double geoLonMin = 0.0, geoLatMin = 0.0, geoLonMax = 0.0, geoLatMax = 0.0;
+
     // 面填充三角形（GL_TRIANGLES），[x,y,r,g,b,a]
     std::vector<float> fillVerts;
 
