@@ -28,7 +28,7 @@ namespace globecore {
 // 每次准备重建 HAR 前，把 GLOBECORE_BUILD_ID 改成一个全新的唯一串（例如末尾序号 +1，或带上你自定义的标记）。
 // 装机日志出现该串 = 跑的确实是你这次改过、并重新构建 + 重新链接的 HAR；
 // 未出现 / 仍是旧串 = app 还在用旧 HAR（引擎源码根本没进设备）。改完务必：重建 HAR → app Sync/ohpm 重新链接 → 卸载重装。
-#define GLOBECORE_BUILD_ID "v0.1.3-20261029-local-line-drape36e" // @Jin 构建核对：本地纯线在 z3~z5 等高空视角也不被粗地形深度遮挡，低空仍切换为真实 DEM 采高线。
+#define GLOBECORE_BUILD_ID "v0.1.3-20261029-local-quick-summit-label04" // @Jin 构建核对：快捷定位 POI 与文字拆层、显式加载 Harmony 中文字体，并放大山顶文字。
 
 // 祖先链请求深度帽：叶子只向上请求 4 级。更深的祖先拉伸 >16× 已无兜底价值，而链条请求数是
 // 数量倍增器；尤其无金字塔栅格源，低级别粗瓦源窗口≈整幅（单块秒级～十几秒），砍深度直接减掉
@@ -5732,15 +5732,30 @@ void Renderer::drawVectorLabels3D(const Navigator::Camera3D &cam, const Matrix4 
             if (sPx <= 0.0f) continue;
             const VectorLayer::LabelLayout *lay = ensureLabelLayout(vl, idx);
             if (lay == nullptr) continue;
-            // 锚点（相对图层原点世界坐标）→ ECEF（贴球面 alt=0）
+            // @Jin quick-summit：overlay 的动态标注在 3D 地形开启时按同点 DEM 采高，并额外上抬避免文字压进山体。
+            double labelAltitude = 0.0;
+            if (vl.isOverlay && !terrainCache_.empty()) {
+                double labelLon = 0.0;
+                double labelLat = 0.0;
+                MercatorProjection::worldToLonLat(ox + static_cast<double>(li.x),
+                                                  oy + static_cast<double>(li.y),
+                                                  labelLon, labelLat);
+                labelLat = MercatorProjection::clampLatitude(labelLat);
+                labelAltitude = sampleTerrainHeightLonLat(labelLon, labelLat) + 120.0; // @Jin 文字略高于峰顶，POI 图标针尖仍精确落在地表。
+            }
+            // @Jin 锚点（相对图层原点世界坐标）→ ECEF；overlay 标注使用 DEM 高程，普通文件矢量仍贴球面以保持旧行为。
             const Vec3 p = worldXYToCartesian(ox + static_cast<double>(li.x),
-                                              oy + static_cast<double>(li.y), 0.0);
+                                              oy + static_cast<double>(li.y), labelAltitude);
             // CPU 地平线剔除：背面半球（表面法向背向相机）的字不画，免纯屏幕叠加穿地球。
             // 球近似：法向≈normalize(p)，可见当且仅当 dot(p, eye−p)>0（两侧长度均正，比符号即可）。
             const Vec3 toEye{cam.eye.x - p.x, cam.eye.y - p.y, cam.eye.z - p.z};
             if (p.x * toEye.x + p.y * toEye.y + p.z * toEye.z <= 0.0) continue;
             float axp, ayp;
             if (!projectEcef3D(cam, viewProjRtc, p, axp, ayp)) continue; // 相机背后/近平面外
+            if (vl.isOverlay) {
+                // @Jin quick-summit：文字显示在 POI 图标上方，避免长中文标题压住峰顶图标；约 14dp 偏移随屏幕密度缩放。
+                ayp -= 14.0f * density;
+            }
             if (li.outline) {
                 for (const auto &d : kDir)
                     emitLabelQuads(*lay, axp + d[0] * o, ayp + d[1] * o, sPx, vCenterPx,

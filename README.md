@@ -26,6 +26,14 @@ OpenGL ES 2.0 绘制全部在 native 完成，并内联编译了 GDAL/OGR、PROJ
 - @Jin 鸿蒙真机 P0 记录（2026-10-28，设备 `5KLBB25911200313`）：首次点击省级在线图层时 native 下载 `province.json` 669,489 bytes，日志依次出现 `[RemoteGeoJson] downloaded`、`[LiteGeoJson] 读取完成 features=4`、`[VecReload] VectorLoader 就绪`，画面显示河南/湖北/四川/陕西四省黄色边界；force-stop 后重启并再次加载，同 URL 命中 `[RemoteGeoJson] cache hit ... elapsed=0ms`，读取与构建总耗时约 268ms，未再出现 ArkTS `province geojson downloaded/overlay` 兜底日志。
 - @Jin 鸿蒙真机同时在 3D 地形开启状态下缩放到四省范围，黄色省级边界仍作为普通 native VectorLayer 叠加显示；在线源读取的是下载后的本地缓存文件，因此 LITE GeoJSON reader 对“远程 URL 落缓存后的本地 .geojson”路径已完成真机验证。本地 rawfile `sample.geojson` 入口仍走同一 `readLiteGeoJsonFile()` 路由，桌面冒烟已通过，后续可再做一次人工 UI 回归。
 
+### @Jin SDK 能力查询与快捷定位峰顶标注
+
+- @Jin 新增 `docs/sdk-capability-queries.md`，专门记录“SDK 是否支持某能力”的查询结论、代码依据、边界与建议 API；2026-10-29 已记录“地形夸张 / 垂直缩放”当前仅有 C++ 内部固定系数 `1.0`，尚未向 Harmony/Android/Qt 公开配置接口。后续每次回答类似能力查询后都要追加到该文档。
+- @Jin HarmonyOS NEXT Demo 的快捷定位将“相机观察中心”和“真实山顶点”分离：太白山拔仙台、华山南峰、珠峰各自携带独立峰顶经纬度；初始全球视角不显示标注，只有点击快捷定位飞行时才显示当前目的地的 `poi.png` 山顶图标和文字，避免全球视角堆标签。
+- @Jin 点击快捷定位时自动切到 3D 并开启地形；峰顶符号复用 Demo `rawfile/poi.png`，通过现有 overlay billboard + DEM draped 通路贴地；3D 文字锚点仅对 overlay 标注按同点 DEM 采高并上抬，普通文件矢量标注继续保持海拔 0 的旧行为，控制回归范围。快捷定位展开 UI 改为按钮右侧横向排列，减少纵向遮挡。
+- @Jin Demo 初始化时显式调用 `setFontPath('/system/fonts/HarmonyOS_Sans_SC.ttf')` 加载鸿蒙简体中文字体；峰顶文字在屏幕空间上移到 POI 图标上方并放大到约 28dp，白字黑描边；2026-10-29 已在 HarmonyOS 平板人工确认太白山、华山、珠峰三个 POI 文字均可见；如真机仍觉不够醒目，可优先调整 Demo `VectorStyle` 的 `labelSize` 与 `Renderer.cpp` 中 quick-summit 的屏幕偏移/DEM 上方 120m 抬升。
+- @Jin 本次构建核对 ID：`v0.1.3-20261029-local-quick-summit-label04`，真机日志已确认该 ID 生效；回退时移除 Demo 峰顶 POI overlay 调用和横向展开 UI，并恢复 `drawVectorLabels3D()` 中 overlay label 的固定 `alt=0` 锚点即可。
+
 ### @Jin Android API 帮助文档
 
 - @Jin 新增 `docs/api/android-api-guide.html`，面向 Android/Kotlin/Java 宿主开发人员，分类整理 `NativeMapView`、`Camera`、`Position`、`VectorStyle`、`VectorExtent`、`FeatureGeometry`、`NativeSrs`、`NativeVector`、`NativeLayerInfo` 等公开 API，补充参数/返回值、生命周期、XYZ 瓦片、三维地形 Provider、动态 overlay、拾取反算、坐标转换、GDAL/OGR 文件 IO 与可复制示例。
