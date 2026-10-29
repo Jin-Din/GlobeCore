@@ -303,6 +303,8 @@ private:
     /// GL 上下文重建：把全部矢量层的 chunk 列表/iconVbo 作废清零、glReady 置 false（保留 CPU 几何），
     /// 使下一帧据 geom 重新流式上传（延续 onSurfaceCreated 的瓦片纹理/VBO 重建口径）。
     void resetVectorGl();
+    /// @Jin drape36：判断是否为实验性“本地文件纯线层”；仅该类图层复用 DEM drape，面/点/overlay 不受影响。
+    bool isExperimentalLocalDrapedLineLayer(const VectorLayer &vl) const;
 
     /// 释放全部矢量层的 GL VBO（须在 GL 线程调用）。
     void releaseVectorGl();

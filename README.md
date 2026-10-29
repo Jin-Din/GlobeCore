@@ -654,6 +654,20 @@ console.info(view.terrainProviderStatus());
 - @Jin 修复 3D 开启地形后加载省级 GeoJSON 卡死/被杀（2026-10-27）：上一轮为太白山小区域把贴地细分固定为约 20m、递归 7 层，该策略对省级 MultiPolygon（真机约 8.1 万原始 fill 顶点、覆盖约 1081km 跨度）会递归放大到 18 万+输出、单轮 82 万次 DEM 采样并在 GL 线程长阻塞，3D 下卡死、进程被系统回收；2D 不走 draped 路径所以正常。
 - @Jin 大矢量贴地保护策略（实验性、可回退）：细分密度按叠加层 bbox 跨度自适应，目标边长 = clamp(跨度/224, 20m, 32km)；当原始 fill 顶点超过 2 万（线/描边角点超过 1.2 万）时视为“已足够密的大层”，直接对原始三角网/原始角点逐顶点采 DEM，不再计算边长、不再递归细分或插点；另设 fill 18 万顶点、stroke 12 万角点硬预算兜底。真机省级层输出降回 80,952 fill 顶点、DEM 采样 82.8 万→10.8 万，3D+地形下地图可正常拖动且进程稳定；太白山小样例仍走 20m/7 层细分，保持贴地精度。
 
+### @Jin 本地纯线 DEM 贴地与高等级视角地形遮挡修复（drape36e）
+
+> @Jin 实验状态：对应构建核对 ID `v0.1.3-20261029-local-line-drape36e`。本轮只接管 HarmonyOS NEXT Demo 中由陕西 Polygon/MultiPolygon 外环和洞环转换得到的**本地文件纯 `MultiLineString` 层**，不改变在线大面、内存 overlay、点、图标和面填充的既有路径；实验开关为 `Renderer::isExperimentalLocalDrapedLineLayer()` 内的 `kExperimentalLocalVectorLineTerrainDrape`，置 `false` 可整体回退。
+
+- @Jin 问题背景：陕西面转线在 3D 地形开启后，地形瓦片加载过程中会反复埋住平面线 VBO；低高度时还会出现线条陷入沟谷、没有跟随 DEM 起伏的问题。
+- @Jin 低空真实贴地：本地纯线复用大图层 `uploadGlobeRemoteDrapedChunks()` 的 DEM 通路，等待精细 DEM 覆盖后沿线加密、逐点采高，按每个 MultiLineString ring 独立生成 chunk，并在地形修订后通过稳定签名防抖重建；flyTo 和手势操作期间延迟重建，避免为全省线同步采高造成卡顿。
+- @Jin 地形加载过渡期可见性：最终 DEM 线 chunk 与过渡平面线 chunk 均逐 chunk 标记 `terrainDraped`，`drawStripChunks()` 内按 chunk 切换 `GL_DEPTH_TEST`，避免一批粗地形到达时省界线短暂掉到地形下面。
+- @Jin 高等级视角策略：z3~z6 等高空视角不为全省线条执行全量 DEM 烘焙，只要 `terrainCache_` 已存在就临时关闭该纯线层对地形的深度测试；低空仍恢复真实 DEM 采高，无地形时 `terrainCache_` 为空并保持普通深度路径。
+- @Jin 真机记录（2026-10-29，设备 `5KLBB25911200313`）：自动场景直接设置相机高度，HUD 实测 z3 为 3000km / `地图 z3 / 瓦片 z6`、z4 为 1700km / `地图 z4 / 瓦片 z7`、z5 为 850km / `地图 z5 / 瓦片 z8`，三档品红陕西省界均连续可见；地形全部本地缓存命中（z3 为 `80/80`、`network=0`、`failures=0`）。用户人工复核确认 z4/z5/z6 已无遮挡问题。
+- @Jin 回归：`shaanxi-line-3d-off` 无地形纯线正常，`taibai-samples` 的 overlay 点/线/面/POI 正常，`province-3d-taibai` 在线省级大面场景仍可加载；本轮 HAP 编译通过、`git diff --check` 通过。
+- @Jin 已知边界：高空方案优先保证线条可见，不在全球视角对全省每个顶点做真实地表贴合；若以后接近地平线旋转时观察到穿透、背面可见或浮线，需要继续做视口范围深度策略或真实地表 ribbon。
+- @Jin **未解决待办**：
+  - [ ] @Jin 陕西省级 Polygon/MultiPolygon“大面”在 3D 地形下仍存在被地形遮挡的问题，且不只发生在 z4/z5/z6；该问题与本轮已修复的“本地纯 MultiLineString 省界线”不是同一条路径，后续需单独优化大面 fill/outline 的 DEM 覆盖判定、分 chunk 深度策略、透明填充零几何构建以及边界 ribbon 贴合。
+
 ### 演示工程 globecore-harmonyos
 
 DevEco Studio（5.0+，API 12 SDK）打开 `globecore-harmonyos/`，`ohpm install` 后直接 run `entry`：
@@ -714,6 +728,7 @@ cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build b
   ⑮ @Jin **3D 动态叠加层贴地 stroke 飞线修复**：`Renderer::uploadGlobeOverlayDrapedChunks()` 在线/面描边沿 DEM 加密时，曾以 `const DrapeVertex &prev = corners.back()` 持有上一角点，随后继续向同一 `std::vector` 插入约 20m 加密点；vector 扩容后该引用悬空，插值经纬度可能读到垃圾内存（真机日志出现异常大经度），再烘焙为 ECEF 后表现为青色线和黄色面描边从太白山样例区域辐射到屏幕边缘，容易被误判为 GeoJSON 解析错乱。现改为先复制上一角点值再插点；临时真机诊断同时确认修复后小范围面层 DEM 命中 `3992/3992`、线层 `159/159`，省级 GeoJSON 大层保护路径仍可加载和缩放；动态叠加面入口同时允许宿主只传真实角点（四边形传 4 点），内部自动补回首点让面描边闭合。构建核对 ID：`v0.1.3-20261027-drape-strokefix2`。
   ⑯ @Jin **HarmonyOS NEXT 在线 GeoJSON P0 真机验收**：`feature/geojson-url-data` 分支在鸿蒙 HAR LITE 构建中打通 `ArkTS addVectorLayer(httpUrl) → NAPI vectorCacheDir → C++ RemoteVectorCache 原子下载缓存 → lite_geojson_reader → VectorBuilder/VBO/拾取/贴地`。真机首次下载 669,489 bytes、解析 4 个 MultiPolygon 要素；重启后二次加载 `cache hit elapsed=0ms`、read/build 共约 268ms，且不再走 ArkTS 下载或 overlay 兜底。3D 地形开启后四省边界仍可显示；能力由 `RemoteVectorCache::kExperimentalRemoteGeoJsonSource` 守卫，可一键回退。
   ⑰ @Jin **在线 GeoJSON 岛洞解析、远程大面贴地与动态 overlay 边界修正（实验性，构建核对 `v0.1.3-20261029-remote-vector-drape35`）**：在 P0 URL Source 基础上继续修复 HarmonyOS NEXT LITE GeoJSON 对 Polygon/MultiPolygon 岛洞环的解析与三角剖分回归，陕西省级 `province.json` 真机解析为 4 个 MultiPolygon 要素，其中陕西外环 2434 点、3 个洞、洞点 51 个，未再出现洞间多余连线或几何错乱；远程 GeoJSON 与内存 overlay 的 3D VBO 路径拆分，在线大面使用独立 `uploadGlobeRemoteDrapedChunks()` 实验通路，按当前 DEM 覆盖细分、逐 chunk 标记 `terrainDraped`，运动/flyTo 中延迟重烘焙，停顿后再生成贴地 VBO，避免浏览过程中为整省大面同步采高造成卡顿。内存 overlay 的面填充在 DEM 烘焙后按 `isOverlay` 整层关闭对地形的深度测试，修复太白山小面被粗地形三角面局部遮挡造成的“破碎”；面外边界新增实验性 conformal outline ribbon：不再用屏幕空间横向扩边的 stroke shader，而是将中心线沿 DEM 加密、左右边分别偏移并重新采高，生成随坡面起伏的 `GL_TRIANGLES` 地表窄三角带（10km 测试面真机日志 `outline=0、conformalOutlineRanges=1、ribbonVerts=4476、ribbonHalfM=27.3`）。该边界方案以固定世界宽度换取旋转时不“飘”，尚未做到恒定像素宽度，后续可继续优化；开关和代码均集中在 `Renderer.cpp`，可整体回退到旧 stroke。透明填充样式（fill alpha=0）已由 Demo 验证 2D/3D 仅显示省界，但当前仍会构建 fill 几何，后续需在 `fillAlpha<=0` 时跳过 earcut/fill VBO/远程贴地烘焙。
+  ⑱ @Jin **本地纯线 DEM 贴地与高等级视角遮挡修复（实验性，构建核对 `v0.1.3-20261029-local-line-drape36e`）**：新增仅针对本地文件、非 overlay、非在线 GeoJSON、无 fill/outline/point/icon 的纯 `MultiLineString` 实验通路；低空等待精细 DEM 后沿线加密采高并按 ring 分 chunk，手势/flyTo 中防抖延迟重建；地形加载过渡期和 z3~z6 等高等级视角逐 chunk 临时关闭线对地形的深度测试，避免粗地形瓦片把陕西省界埋住。真机 HUD 实测 z3/z4/z5 场景品红线连续可见，用户人工确认 z4/z5/z6 通过；无地形、太白山 overlay 样例和在线省级大面加载回归正常。遗留：陕西省级 Polygon/MultiPolygon 大面在 3D 地形下仍会被遮挡且不限级别，已列入后续未解决待办。
   > 维护约定：**每次改动定稿后同步更新本版本说明**（与代码提交同批），未发版工作累积在本条，发版时再改版本号与“当前发布”标记。
 - **0.1.4.0（当前发布）**：三项合入——
   ① **GeoPackage 工程读写**：新增 `bridge/geopackage_io.cpp`，OGR GPKG 驱动实现工程文件（七表：tracks / measures / photos / media_groups / survey_plots / project_meta / layer_refs）整体读写，Kotlin/ArkTS 侧以 JSON 跨桥传输；写入整文件 tmp+rename **原子替换**，五张要素表 **SetFID 落盘**使记录 id 持久化（重写不重编号），读侧缺列宽容回退、写侧整文件重建自动升级 schema；
