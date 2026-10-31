@@ -33,6 +33,8 @@ interface GlobeCore {
 
   // ── 瓦片 / 栅格图层 ──
   nativeAddTileLayer(handle: number, cacheDir: string, urlTemplate: string, maxLevel: number, overlay: boolean): void;
+  // @Jin EPSG:4326/4490 地理在线瓦片适配（实验）：crs 传 EPSG:4326/EPSG:4490 启用，tileMatrixOffset 天地图 c 传 1
+  nativeAddTileLayerWithOptions(handle: number, cacheDir: string, urlTemplate: string, maxLevel: number, overlay: boolean, crs: string, tmsY: boolean, tileMatrixOffset: number): void;
   nativeSetLayerVisible(handle: number, index: number, visible: boolean): void;
   nativeAddRasterLayer(handle: number, cacheDir: string, path: string): number;
   /// 移除瓦片图源图层（含栅格层，墓碑；index 为 addTileLayer/addRasterLayer 加入次序）

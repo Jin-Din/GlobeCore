@@ -616,6 +616,33 @@ napi_value NativeAddTileLayer(napi_env env, napi_callback_info info) {
     return nullptr;
 }
 
+// @Jin EPSG:4326/4490 地理在线瓦片适配（feature/epsg-4490，实验、可回退）：
+// 在原参数后追加 crs/tmsY/tileMatrixOffset；crs 为 EPSG:4326 或 EPSG:4490 时启用地理源重采样，其余与旧版一致。
+napi_value NativeAddTileLayerWithOptions(napi_env env, napi_callback_info info) {
+    napi_value args[8];
+    gcohos::NapiGetArgs(env, info, 8, args);
+    int64_t handle = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return nullptr;
+    const std::string cacheDir = gcohos::NapiGetString(env, args[1]);
+    if (cacheDir.empty()) return nullptr;
+    const std::string url = gcohos::NapiGetString(env, args[2]);
+    int32_t maxLevel = 0;
+    gcohos::NapiGetInt32(env, args[3], maxLevel);
+    bool overlay = false;
+    gcohos::NapiGetBool(env, args[4], overlay);
+    const std::string crs = gcohos::NapiGetString(env, args[5]);
+    bool tmsY = false;
+    gcohos::NapiGetBool(env, args[6], tmsY);
+    int32_t tileMatrixOffset = 0;
+    gcohos::NapiGetInt32(env, args[7], tileMatrixOffset);
+    globecore::TileLayerOptions options; // @Jin 显式限定命名空间（napi TU 内无 using namespace globecore）。
+    options.crs = crs;
+    options.tmsY = tmsY;
+    options.tileMatrixOffset = tileMatrixOffset;
+    toGlobeEngine(handle)->addTileLayer(cacheDir, url, maxLevel, overlay, options);
+    return nullptr;
+}
+
 napi_value NativeSetLayerVisible(napi_env env, napi_callback_info info) {
     napi_value args[3];
     gcohos::NapiGetArgs(env, info, 3, args);
@@ -1317,6 +1344,7 @@ napi_value RegisterGlobeEngine(napi_env env, napi_value exports) {
         {"nativeRotateHeading", nullptr, NativeRotateHeading, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeRotateTilt", nullptr, NativeRotateTilt, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeAddTileLayer", nullptr, NativeAddTileLayer, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"nativeAddTileLayerWithOptions", nullptr, NativeAddTileLayerWithOptions, nullptr, nullptr, nullptr, napi_default, nullptr}, // @Jin 4326/4490 地理在线瓦片适配
         {"nativeSetLayerVisible", nullptr, NativeSetLayerVisible, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeAddRasterLayer", nullptr, NativeAddRasterLayer, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeRemoveTileLayer", nullptr, NativeRemoveTileLayer, nullptr, nullptr, nullptr, napi_default, nullptr},

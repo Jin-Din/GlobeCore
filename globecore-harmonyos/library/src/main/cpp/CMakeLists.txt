@@ -211,6 +211,7 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         ${GLOBECORE_ENGINE_ROOT}/render/ShaderProgram.cpp
         ${GLOBECORE_ENGINE_ROOT}/render/Texture.cpp
         ${GLOBECORE_ENGINE_ROOT}/render/ImageDecoder.cpp
+        ${GLOBECORE_ENGINE_ROOT}/render/PngEncoder.cpp # @Jin 4326/4490 地理源 PNG 编码（LITE/全量都编译）
         # KTX2/ETC2/ASTC 纹理压缩解码
         ${GLOBECORE_ENGINE_ROOT}/render/Ktx2Decoder.cpp
         ${GLOBECORE_ENGINE_ROOT}/render/FontAtlas.cpp

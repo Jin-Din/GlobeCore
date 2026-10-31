@@ -22,6 +22,18 @@ namespace globecore {
  * 由 [GlobeEngine] 以 unique_ptr 持有（地址稳定，供 Renderer 长期引用）；Renderer 为每层
  * 维护各自的持久 LRU 纹理缓存，层间纹理互不干扰。
  */
+/**
+ * @Jin 瓦片图层可选切片方案（feature/epsg-4490，实验、可回退）。
+ * 默认构造＝Web 墨卡托（与原 addTileLayer 行为完全一致）；crs 传 EPSG:4326/EPSG:4490 时
+ * 启用「地理在线瓦片适配」：引擎仍按墨卡托选瓦，图层在 TileLoader 内把地理服务瓦（根 2×1、
+ * 纬度线性）重采样到墨卡托瓦。4490(CGCS2000) 与 4326(WGS84) 椭球差异亚米级，可视化按同一地理切片处理。
+ */
+struct TileLayerOptions {
+    std::string crs;               ///< @Jin ""/"EPSG:3857"=墨卡托；"EPSG:4326"/"EPSG:4490"=地理切片。
+    bool tmsY = false;             ///< @Jin 服务行序：true=TMS（y=0 在南），false=XYZ（y=0 在北）。
+    int tileMatrixOffset = 0;      ///< @Jin 服务 TILEMATRIX 相对 0 基层级的偏移（天地图 c 根 2×1 记 1，传 1）。
+};
+
 struct TileLayer {
     /// 该层的磁盘瓦片缓存（baseDir 形如 `/调查宝/tiles/<图源名>`）
     TileCache cache;

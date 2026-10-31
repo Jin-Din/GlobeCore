@@ -13,10 +13,11 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include "layer/TileCache.h" // @Jin 地理在线源持有独立原始瓦缓存值成员，需要完整类型。
 
 namespace globecore {
 
-class TileCache;
+class TileCache; // @Jin 前置声明；完整类型经文件顶部 #include "layer/TileCache.h" 引入（供 geoRawCache_ 值成员使用）。
 
 /**
  * 后台瓦片加载器，对应 参考实现 layer.cache 的「磁盘/网络 TileStore + 异步加载管线」。
@@ -71,6 +72,16 @@ public:
     void setUrlTemplate(std::string urlTemplate);
     bool hasUrlTemplate() const;
 
+    /// @Jin EPSG:4326/4490 地理切片在线源（feature/epsg-4490，实验、可回退）。
+    /// @Jin 启用后本层不再直接按墨卡托 (z,x,y) 取图：worker 对每个引擎墨卡托瓦求相交地理服务瓦
+    /// @Jin （根 2×1、纬度线性），先读原始瓦缓存未命中再下载，拼贴并等经纬重采样成该墨卡托瓦 PNG，
+    /// @Jin 然后复用与普通图层一致的结果缓存/去重/解码上传链路；引擎选瓦四叉树与 3D 几何不变。
+    /// @Jin rawCacheDir 必须与结果缓存目录不同；maxGeoLevel0Based 为 0 基（根 2×1 记 0）上限；
+    /// @Jin tmsY 为服务行序；tileMatrixOffset 为 TILEMATRIX 相对 0 基层级的偏移（天地图 c 传 1）。
+    void setGeographicSource(std::string rawCacheDir, std::string urlTemplate,
+                             int maxGeoLevel0Based, bool tmsY, int tileMatrixOffset);
+    bool isGeographicSource() const;
+
     /// 设置栅格数据源路径（本地 tif/img）。非空时，磁盘缓存未命中的瓦片由 [RasterRenderer] 按 (z,x,y)
     /// 的全球墨卡托经纬度四至即时重投影生成 PNG 字节（GDAL），成功后回写缓存。空路径禁用栅格生成。
     /// 与 URL 模板互斥使用（栅格层不设 URL）。线程安全。
@@ -117,6 +128,8 @@ private:
     static uint64_t key(int z, int x, int y);
     void workerLoop();
     std::string buildUrl(int z, int x, int y);
+    /// @Jin 地理在线源：把一个引擎墨卡托瓦重采样成 256² PNG；anySrcNetwork 表示是否有原始瓦在线下载。
+    bool generateGeographicTile(int z, int x, int y, std::vector<uint8_t> &outPng, bool &anySrcNetwork);
 
     TileCache &cache_;
     const int numThreads_;
@@ -146,6 +159,13 @@ private:
     // URL 模板（独立锁）+ 子域轮询计数 + 栅格数据源路径与四至（共用 urlMtx_：二者互斥、均后台读）
     mutable std::mutex urlMtx_;
     std::string urlTemplate_;
+    // @Jin EPSG:4326/4490 地理在线源配置（urlMtx_ 保护）：默认关闭，关闭时与旧行为完全一致。
+    bool geoScheme_ = false;
+    std::string geoUrlTemplate_;
+    int geoMaxLevel0Based_ = 0;
+    bool geoTmsY_ = false;
+    int geoTileMatrixOffset_ = 0;
+    TileCache geoRawCache_; // @Jin 原始地理服务瓦独立缓存（与结果缓存隔离）。
     std::string rasterPath_;
     // 栅格四至（minLon,minLat,maxLon,maxLat）及有效性：供 request() 交集预判（urlMtx_ 保护）
     bool rasterEnvOk_ = false;

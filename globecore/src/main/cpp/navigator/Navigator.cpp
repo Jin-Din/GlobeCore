@@ -76,6 +76,13 @@ void Navigator::setTileLodAlignDisplay(bool align) {
     tileLodAlignDisplay_ = align;
 }
 
+double Navigator::tileLodSseScale() const {
+    std::lock_guard<std::mutex> lk(mtx_);
+    // @Jin 同级实验自行指定显示级；普通 bias 为 -1/-2 时，用 2^|bias| 放宽 3D SSE，避免只改叶级上限却不影响自然细分。
+    if (tileLodAlignDisplay_) return 1.0;
+    return std::ldexp(1.0, -std::max(-3, std::min(2, tileLodBias_)));
+}
+
 void Navigator::setViewMode(ViewMode mode) {
     std::lock_guard<std::mutex> lk(mtx_);
     mode_ = mode;

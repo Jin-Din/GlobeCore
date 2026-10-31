@@ -5,6 +5,7 @@
 #include "net/HttpClient.h"
 #include "raster/RasterRenderer.h"
 #include "render/ImageDecoder.h"
+#include "render/PngEncoder.h" // @Jin 4326/4490 地理源重采样结果编码（GDAL 无关，LITE 可用）
 #include "util/Log.h"
 
 #include <algorithm>
@@ -53,6 +54,53 @@ void tileBounds(int z, int x, int y, double &minLon, double &minLat, double &max
     minLon = lonNw; maxLon = lonSe; maxLat = latNw; minLat = latSe;
 }
 } // namespace
+/// @Jin EPSG:4326/4490 地理在线源：把 URL 模板（{z}/{x}/{y} 与 {rand=a,b,..}）实例化。
+/// 普通墨卡托层与地理适配层共用同一套占位符替换，保证两种图源的子域轮询/Token 行为一致。
+std::string formatTileUrl(std::string url, int z, int x, int y, std::atomic<uint32_t> &randCounter) {
+    if (url.empty()) return std::string();
+    const size_t rp = url.find("{rand=");
+    if (rp != std::string::npos) {
+        const size_t rpEnd = url.find('}', rp);
+        if (rpEnd != std::string::npos) {
+            const std::string list = url.substr(rp + 6, rpEnd - (rp + 6));
+            std::vector<std::string> opts;
+            size_t start = 0;
+            while (start <= list.size()) {
+                const size_t comma = list.find(',', start);
+                if (comma == std::string::npos) { opts.push_back(list.substr(start)); break; }
+                opts.push_back(list.substr(start, comma - start));
+                start = comma + 1;
+            }
+            std::string chosen;
+            if (!opts.empty()) chosen = opts[randCounter.fetch_add(1) % static_cast<uint32_t>(opts.size())];
+            url.replace(rp, rpEnd - rp + 1, chosen);
+        }
+    }
+    auto replaceAll = [](std::string &s, const char *from, const std::string &to) {
+        const size_t flen = std::string(from).size();
+        size_t pos = 0;
+        while ((pos = s.find(from, pos)) != std::string::npos) { s.replace(pos, flen, to); pos += to.size(); }
+    };
+    replaceAll(url, "{z}", std::to_string(z));
+    replaceAll(url, "{x}", std::to_string(x));
+    replaceAll(url, "{y}", std::to_string(y));
+    return url;
+}
+
+/// @Jin 0 基地理层级 s（根 2×1）：列数 2^(s+1)、行数 2^s；标准 XYZ（y=0 在北）。
+inline void geoTileBoundsXYZ(int s, int x, int y,
+                              double &lonMin, double &latMin, double &lonMax, double &latMax) {
+    const double cols = std::ldexp(1.0, s + 1);
+    const double rows = std::ldexp(1.0, s);
+    lonMin = -180.0 + 360.0 * static_cast<double>(x) / cols;
+    lonMax = -180.0 + 360.0 * static_cast<double>(x + 1) / cols;
+    latMax =  90.0 - 180.0 * static_cast<double>(y) / rows;
+    latMin =  90.0 - 180.0 * static_cast<double>(y + 1) / rows;
+}
+
+/// @Jin 单个引擎墨卡托瓦允许映射的最大地理服务瓦数，防止高纬/异常请求放大（正常近赤道约 1~4 块）。
+constexpr int kMaxGeoSourceTiles = 64;
+
 
 uint64_t TileLoader::key(int z, int x, int y) {
     return (static_cast<uint64_t>(z) << 40) |
@@ -356,11 +404,13 @@ void TileLoader::workerLoop() {
         }
 
         // 诊断采样：本 loader 前若干块处理瓦片逐块打印来源（排查「栅格层零日志」归属问题），超预算自动静默
+        bool geoScheme = false; // @Jin EPSG4326/4490 地理在线源标记。
         std::string rasterPath;
         std::string urlTemplateSnapshot;
         {
             std::lock_guard<std::mutex> lk(urlMtx_);
             rasterPath = rasterPath_;
+            geoScheme = geoScheme_;
             urlTemplateSnapshot = urlTemplate_;
         }
         const bool sampled = diagSample_.fetch_sub(1) > 0;
@@ -421,9 +471,25 @@ void TileLoader::workerLoop() {
             }
             // 无交集/生成失败：不联网（栅格层无 URL），本瓦片无字节，由祖先兜底或保持透明
         }
+        // @Jin 3′) EPSG:4326/4490 地理在线源：把墨卡托瓦映射到相交地理服务瓦，下载拼贴并重采样为该瓦 PNG。
+        if (!haveBytes && rasterPath.empty() && geoScheme) {
+            bytes.clear();
+            bool geoAnyNet = false;
+            const bool geoOk = generateGeographicTile(req.z, req.x, req.y, bytes, geoAnyNet);
+            if (geoOk && !bytes.empty()) {
+                cache_.writeTile(req.z, req.x, req.y, bytes); // @Jin 结果按墨卡托 (z,x,y) 落常规缓存，二次浏览零重采样。
+                haveBytes = true;
+                if (geoAnyNet) fromNetwork = true; else fromCache = true;
+                if (sampled) {
+                    LOGI("TileLoader geo4490 reproject z=%d x=%d y=%d online=%d bytes=%zu",
+                         req.z, req.x, req.y, geoAnyNet ? 1 : 0, bytes.size());
+                }
+            }
+        }
+
         // 3) 仍未命中 → 联网拉取（可被 abort_ 中断），成功则原子写盘。
         //    响应体须过图像魔数校验才落盘/交付：图源限流时以 HTTP 200 回异常 XML，不可当瓦片污染缓存。
-        if (!haveBytes && rasterPath.empty()) {
+        if (!haveBytes && rasterPath.empty() && !geoScheme) { // @Jin 地理源走 3′)，不再按墨卡托直连。
             {
                 std::lock_guard<std::mutex> lk(mtx_);
                 auto inFlight = inflight_.find(key(req.z, req.x, req.y));
@@ -564,50 +630,187 @@ std::string TileLoader::buildUrl(int z, int x, int y) {
         std::lock_guard<std::mutex> lk(urlMtx_);
         tmpl = urlTemplate_;
     }
-    if (tmpl.empty()) return std::string();
+    // @Jin 普通墨卡托层与地理适配层共用 formatTileUrl，保证 {z}/{x}/{y} 与子域轮询口径一致。
+    return formatTileUrl(tmpl, z, x, y, randCounter_);
+}
 
-    std::string url = std::move(tmpl);
+void TileLoader::setGeographicSource(std::string rawCacheDir, std::string urlTemplate,
+                                     int maxGeoLevel0Based, bool tmsY, int tileMatrixOffset) {
+    std::lock_guard<std::mutex> lk(urlMtx_);
+    geoScheme_ = !urlTemplate.empty();
+    geoUrlTemplate_ = std::move(urlTemplate);
+    geoMaxLevel0Based_ = std::max(0, maxGeoLevel0Based);
+    geoTmsY_ = tmsY;
+    geoTileMatrixOffset_ = tileMatrixOffset;
+    // @Jin 原始地理瓦独立缓存：与结果（墨卡托瓦）缓存目录隔离，同一编号两套切片绝不串图。
+    geoRawCache_.setBaseDir(std::move(rawCacheDir));
+    // @Jin 地理适配层不再按墨卡托 (z,x,y) 直连；结果缓存 miss 时改由 generateGeographicTile 取图。
+    urlTemplate_.clear();
+    LOGI("TileLoader geographic source(EPSG4326/4490) on=%d maxGeoLevel0=%d tmsY=%d matrixOffset=%d rawDir=%s",
+         geoScheme_ ? 1 : 0, geoMaxLevel0Based_, geoTmsY_ ? 1 : 0, geoTileMatrixOffset_,
+         geoRawCache_.baseDir().c_str());
+}
 
-    // {rand=a,b,c,...} → 轮询取一个子域（均衡负载，避免随机碰撞）
-    const size_t rp = url.find("{rand=");
-    if (rp != std::string::npos) {
-        const size_t rpEnd = url.find('}', rp);
-        if (rpEnd != std::string::npos) {
-            const std::string list = url.substr(rp + 6, rpEnd - (rp + 6));
-            std::vector<std::string> opts;
-            size_t start = 0;
-            while (start <= list.size()) {
-                const size_t comma = list.find(',', start);
-                if (comma == std::string::npos) {
-                    opts.push_back(list.substr(start));
-                    break;
+bool TileLoader::isGeographicSource() const {
+    std::lock_guard<std::mutex> lk(urlMtx_);
+    return geoScheme_;
+}
+
+bool TileLoader::generateGeographicTile(int z, int x, int y,
+                                        std::vector<uint8_t> &outPng, bool &anySrcNetwork) {
+    outPng.clear();
+    anySrcNetwork = false;
+    std::string geoTmpl;
+    int maxS = 0, matrixOffset = 0;
+    bool tmsY = false;
+    {
+        std::lock_guard<std::mutex> lk(urlMtx_);
+        if (!geoScheme_) return false;
+        geoTmpl = geoUrlTemplate_;
+        maxS = geoMaxLevel0Based_;
+        tmsY = geoTmsY_;
+        matrixOffset = geoTileMatrixOffset_;
+    }
+
+    // @Jin 目标引擎墨卡托瓦地理四至（角纬度为墨卡托反投影；瓦内按线性经纬处理，与 3D 网格/本地栅格同口径）。
+    double tLonMin, tLatMin, tLonMax, tLatMax;
+    tileBounds(z, x, y, tLonMin, tLatMin, tLonMax, tLatMax);
+
+    // @Jin 服务 0 基层级选 s=z（不是 z-1）：地理切片像元在地面上是“水平 cosφ、垂直 1”的扁矩形，
+    // @Jin 若按 s=z-1 取图，水平虽 1:1，但垂直源地面分辨率只有需求的 cosφ 倍（34°≈0.83），
+    // @Jin 输出时垂直被整体放大约 1/cosφ≈1.2，注记文字会上下拉高（与层级无关，肉眼可见）。
+    // @Jin s=z 时每个输出像元从源的约 2(宽)×2cosφ(高) 区域重采样，恰好抵消源像元扁率，地面各向同性。
+    const int s = std::max(0, std::min(maxS, z));
+    const double cols = std::ldexp(1.0, s + 1);
+    const double rows = std::ldexp(1.0, s);
+    constexpr double kEps = 1e-9;
+    int gx0 = static_cast<int>(std::floor((tLonMin + 180.0) / 360.0 * cols));
+    int gx1 = static_cast<int>(std::floor((tLonMax + 180.0) / 360.0 * cols - kEps));
+    int gy0 = static_cast<int>(std::floor((90.0 - tLatMax) / 180.0 * rows));
+    int gy1 = static_cast<int>(std::floor((90.0 - tLatMin) / 180.0 * rows - kEps));
+    gx0 = std::max(0, std::min(gx0, static_cast<int>(cols) - 1));
+    gx1 = std::max(0, std::min(gx1, static_cast<int>(cols) - 1));
+    gy0 = std::max(0, std::min(gy0, static_cast<int>(rows) - 1));
+    gy1 = std::max(0, std::min(gy1, static_cast<int>(rows) - 1));
+    const int spanX = gx1 - gx0 + 1;
+    const int spanY = gy1 - gy0 + 1;
+    if (spanX * spanY > kMaxGeoSourceTiles) {
+        LOGW("地理源映射瓦数超限 z=%d x=%d y=%d count=%d，跳过本瓦（祖先兜底）", z, x, y, spanX * spanY);
+        return false;
+    }
+
+    constexpr int kTile = 256; // @Jin 天地图 c 为 256px；拼贴画布按每块 256 线性排列。
+    const int mosaicW = spanX * kTile;
+    const int mosaicH = spanY * kTile;
+    // @Jin 拼贴缓冲（预乘 alpha）：缺失处保持 0（透明），由祖先兜底，不污染邻区。
+    std::vector<uint8_t> mosaic(static_cast<size_t>(mosaicW) * mosaicH * 4u, 0);
+    const double originLon = -180.0 + 360.0 * static_cast<double>(gx0) / cols; // 拼贴西边界
+    const double originLatN = 90.0 - 180.0 * static_cast<double>(gy0) / rows;   // 拼贴北边界
+    const int matrixZ = s + matrixOffset; // @Jin 服务 TILEMATRIX（天地图 c 根 2×1 记 1）。
+
+    for (int gy = gy0; gy <= gy1; ++gy) {
+        for (int gx = gx0; gx <= gx1; ++gx) {
+            const int urlY = tmsY ? (static_cast<int>(rows) - 1 - gy) : gy; // @Jin XYZ 不翻；TMS 翻转。
+            std::vector<uint8_t> srcBytes;
+            // ① 先读原始地理瓦独立缓存。
+            bool have = geoRawCache_.readTile(matrixZ, gx, gy, srcBytes) && !srcBytes.empty() &&
+                        looksLikeImage(srcBytes);
+            // ② 未命中联网下载并原子写盘。
+            if (!have) {
+                if (abort_.load()) return false;
+                const std::string url = formatTileUrl(geoTmpl, matrixZ, gx, urlY, randCounter_);
+                std::vector<uint8_t> net;
+                if (!url.empty() && HttpClient::get(url, net, 15000, &abort_) &&
+                    !net.empty() && looksLikeImage(net)) {
+                    geoRawCache_.writeTile(matrixZ, gx, gy, net);
+                    srcBytes = std::move(net);
+                    have = true;
+                    anySrcNetwork = true;
                 }
-                opts.push_back(list.substr(start, comma - start));
-                start = comma + 1;
             }
-            std::string chosen;
-            if (!opts.empty()) {
-                const uint32_t idx = randCounter_.fetch_add(1) %
-                                     static_cast<uint32_t>(opts.size());
-                chosen = opts[idx];
+            if (!have) {
+                LOGW("地理源服务瓦获取失败 m=%d x=%d y=%d(urlY=%d)，本墨卡托瓦暂用祖先兜底",
+                     matrixZ, gx, gy, urlY);
+                return false;
             }
-            url.replace(rp, rpEnd - rp + 1, chosen);
+            int sw = 0, sh = 0;
+            std::vector<uint8_t> rgba;
+            if (!ImageDecoder::decodeRGBA(srcBytes.data(), srcBytes.size(), sw, sh, rgba) ||
+                sw != kTile || sh != kTile) {
+                LOGW("地理源服务瓦解码/尺寸异常 m=%d x=%d y=%d %dx%d", matrixZ, gx, gy, sw, sh);
+                return false;
+            }
+            // @Jin 贴入拼贴缓冲并预乘 alpha，供双线性插值（注记 PNG 透明边不发黑）。
+            const int ox = (gx - gx0) * kTile;
+            const int oy = (gy - gy0) * kTile;
+            for (int r = 0; r < kTile; ++r) {
+                const uint8_t *srcLine = rgba.data() + static_cast<size_t>(r) * kTile * 4u;
+                uint8_t *dstLine = mosaic.data() +
+                    (static_cast<size_t>(oy + r) * mosaicW + ox) * 4u;
+                for (int cc = 0; cc < kTile; ++cc) {
+                    const uint8_t a = srcLine[cc * 4 + 3];
+                    dstLine[cc * 4 + 0] = static_cast<uint8_t>(srcLine[cc * 4 + 0] * a / 255);
+                    dstLine[cc * 4 + 1] = static_cast<uint8_t>(srcLine[cc * 4 + 1] * a / 255);
+                    dstLine[cc * 4 + 2] = static_cast<uint8_t>(srcLine[cc * 4 + 2] * a / 255);
+                    dstLine[cc * 4 + 3] = a;
+                }
+            }
         }
     }
 
-    // {z} / {x} / {y} → 瓦片坐标
-    auto replaceAll = [](std::string &s, const char *from, const std::string &to) {
-        const size_t flen = std::string(from).size();
-        size_t pos = 0;
-        while ((pos = s.find(from, pos)) != std::string::npos) {
-            s.replace(pos, flen, to);
-            pos += to.size();
+    // @Jin 双线性重采样到目标墨卡托瓦 256²。经度方向墨卡托本身线性；纬度方向逐行按真实墨卡托
+    // @Jin 反投影取该像元中心纬度（而不是在南北角纬度间线性插值），使输出 PNG 的纬向像素密度与
+    // @Jin 引擎纹理 UV 严格一致——早期“瓦内线性纬度”近似在中纬度低层级会产生 ±1%~3% 的垂直尺度
+    // @Jin 误差，注记文字肉眼可见上下轻微拉伸（3857 原生注记无此问题）；逐行反算后误差为 0。
+    std::vector<uint8_t> dst(static_cast<size_t>(kTile) * kTile * 4u, 0);
+    const double tileLonSpan = tLonMax - tLonMin;
+    const double invTilesZ = std::ldexp(1.0, -z); // @Jin 1/2^z：目标瓦一行对应的归一化世界坐标跨度。
+    const double pixelsPerLon = cols * kTile / 360.0; // 拼贴每经度像素数
+    const double pixelsPerLat = rows * kTile / 180.0;
+    auto samplePM = [&](double fx, double fy, uint8_t out4[4]) {
+        if (fx < 0.0) fx = 0.0;
+        if (fx > mosaicW - 1.0001) fx = mosaicW - 1.0001;
+        if (fy < 0.0) fy = 0.0;
+        if (fy > mosaicH - 1.0001) fy = mosaicH - 1.0001;
+        const int x0i = static_cast<int>(fx), y0i = static_cast<int>(fy);
+        const double tt = fx - x0i, ty = fy - y0i;
+        const uint8_t *p00 = &mosaic[(static_cast<size_t>(y0i) * mosaicW + x0i) * 4u];
+        const uint8_t *p10 = &mosaic[(static_cast<size_t>(y0i) * mosaicW + (x0i + 1)) * 4u];
+        const uint8_t *p01 = &mosaic[(static_cast<size_t>(y0i + 1) * mosaicW + x0i) * 4u];
+        const uint8_t *p11 = &mosaic[(static_cast<size_t>(y0i + 1) * mosaicW + (x0i + 1)) * 4u];
+        for (int b = 0; b < 4; ++b) {
+            const double top = p00[b] * (1.0 - tt) + p10[b] * tt;
+            const double bot = p01[b] * (1.0 - tt) + p11[b] * tt;
+            const double v = top * (1.0 - ty) + bot * ty;
+            out4[b] = static_cast<uint8_t>(v < 0.0 ? 0.0 : (v > 255.0 ? 255.0 : v + 0.5));
         }
     };
-    replaceAll(url, "{z}", std::to_string(z));
-    replaceAll(url, "{x}", std::to_string(x));
-    replaceAll(url, "{y}", std::to_string(y));
-    return url;
+    for (int py = 0; py < kTile; ++py) {
+        // @Jin 第 py 行像元中心的归一化墨卡托 wy=(y+(py+0.5)/256)/2^z，反投影得精确纬度；
+        // @Jin 与纹理 UV 的线性映射（2D 轴对齐瓦、3D 网格 UV）完全对齐，消除瓦内垂直拉伸。
+        const double wy = (static_cast<double>(y) + (static_cast<double>(py) + 0.5) / kTile) * invTilesZ;
+        double rowLonUnused = 0.0;
+        double lat = 0.0;
+        MercatorProjection::worldToLonLat(0.0, wy, rowLonUnused, lat);
+        const double fy = (originLatN - lat) * pixelsPerLat - 0.5;
+        for (int px = 0; px < kTile; ++px) {
+            const double lon = tLonMin + (px + 0.5) / kTile * tileLonSpan;
+            const double fx = (lon - originLon) * pixelsPerLon - 0.5;
+            uint8_t pm[4];
+            samplePM(fx, fy, pm);
+            uint8_t *o = &dst[(static_cast<size_t>(py) * kTile + px) * 4u];
+            const uint8_t a = pm[3];
+            o[3] = a;
+            if (a == 0) { o[0] = o[1] = o[2] = 0; } // @Jin 透明像素 RGB 置 0，避免预乘垃圾色。
+            else { // @Jin 去预乘
+                o[0] = static_cast<uint8_t>(std::min(255.0, pm[0] * 255.0 / a + 0.5));
+                o[1] = static_cast<uint8_t>(std::min(255.0, pm[1] * 255.0 / a + 0.5));
+                o[2] = static_cast<uint8_t>(std::min(255.0, pm[2] * 255.0 / a + 0.5));
+            }
+        }
+    }
+    // @Jin 编码 PNG 后完全复用「结果缓存→looksLikeImage→ImageDecoder→GL 上传」既有链路。
+    return PngEncoder::encodeRGBA(kTile, kTile, dst.data(), outPng);
 }
 
 } // namespace globecore

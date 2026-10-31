@@ -92,6 +92,11 @@ public:
     /// （含 {x}/{y}/{z}/{rand=...} 占位符、Token 须已替换；空串则禁用联网只读缓存）；
     /// maxLevel 为图源数据最大级别（超出后拉伸末级瓦片）；overlay=true 为叠加层（注记，开 alpha 混合）。
     void addTileLayer(const std::string &cacheDir, const std::string &urlTemplate, int maxLevel, bool overlay);
+    /// @Jin 同上，额外携带切片方案 [options]（feature/epsg-4490，实验、可回退）。
+    /// @Jin crs=EPSG:4326/EPSG:4490 时启用地理在线瓦片适配；默认/3857 时与旧 4 参数版完全等价。
+    void addTileLayer(const std::string &cacheDir, const std::string &urlTemplate, int maxLevel, bool overlay,
+                      const TileLayerOptions &options);
+
 
     /// 设置指定图层的可见性（index 为 addTileLayer 的加入次序，0 起）。隐藏层不绘制、不取瓦片（对齐 参考实现 Layer.isEnabled）。
     /// index 越界则忽略；变更后若已注入重绘回调则触发一帧重绘（RENDERMODE_WHEN_DIRTY 下即时生效）。

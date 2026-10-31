@@ -211,13 +211,28 @@ void GlobeEngine::rotateTilt(double deltaDeg) {
     navigator_.rotateTilt(deltaDeg);
 }
 
-void GlobeEngine::addTileLayer(const std::string &cacheDir, const std::string &urlTemplate, int maxLevel, bool overlay) {
-    // 每层自带 TileCache + TileLoader（独立线程池/URL 模板），按加入顺序绘制（底图在前、注记 overlay 在后）。
-    // 锁内仅 push_back（重分配窗口与 GL 帧遍历互斥，口径同 addRasterLayer）
+void GlobeEngine::addTileLayer(const std::string &cacheDir, const std::string &urlTemplate,
+                               int maxLevel, bool overlay) {
+    // @Jin 旧 4 参数入口保持原行为：以默认（Web 墨卡托）选项转发到 5 参数版。
+    addTileLayer(cacheDir, urlTemplate, maxLevel, overlay, TileLayerOptions{});
+}
+
+void GlobeEngine::addTileLayer(const std::string &cacheDir, const std::string &urlTemplate,
+                               int maxLevel, bool overlay, const TileLayerOptions &options) {
+    // 每层自带 TileCache + TileLoader（独立线程池/URL 模板），按加入顺序绘制（底图在前、注记在后）。
     std::lock_guard<std::mutex> lock(layersMtx_);
-    layers_.push_back(std::make_unique<TileLayer>(cacheDir, urlTemplate, maxLevel, overlay));
-    LOGI("GlobeEngine addTileLayer maxLevel=%d overlay=%d net=%s", maxLevel, overlay ? 1 : 0,
-         urlTemplate.empty() ? "off" : "on");
+    auto layer = std::make_unique<TileLayer>(cacheDir, urlTemplate, maxLevel, overlay);
+    const bool geographic = options.crs == "EPSG:4326" || options.crs == "EPSG:4490";
+    if (geographic) {
+        // @Jin 4326/4490 地理在线瓦片适配（实验、可回退）：原始地理瓦缓存目录独立（-geo-raw），
+        // 0 基服务上限＝图源 maxLevel 减去 TILEMATRIX 偏移（天地图 c：18 - 1 = 17，根 2×1 对应 TILEMATRIX=1）。
+        const int maxGeoLevel0 = std::max(0, maxLevel - std::max(0, options.tileMatrixOffset));
+        layer->loader->setGeographicSource(cacheDir + "-geo-raw", urlTemplate,
+                                           maxGeoLevel0, options.tmsY, options.tileMatrixOffset);
+    }
+    layers_.push_back(std::move(layer));
+    LOGI("GlobeEngine addTileLayer maxLevel=%d overlay=%d crs=%s geo=%d", maxLevel, overlay ? 1 : 0,
+         options.crs.empty() ? "EPSG:3857" : options.crs.c_str(), geographic ? 1 : 0);
 }
 
 void GlobeEngine::setLayerVisible(int index, bool visible) {

@@ -26,6 +26,19 @@ OpenGL ES 2.0 绘制全部在 native 完成，并内联编译了 GDAL/OGR、PROJ
 - @Jin 鸿蒙真机 P0 记录（2026-10-28，设备 `5KLBB25911200313`）：首次点击省级在线图层时 native 下载 `province.json` 669,489 bytes，日志依次出现 `[RemoteGeoJson] downloaded`、`[LiteGeoJson] 读取完成 features=4`、`[VecReload] VectorLoader 就绪`，画面显示河南/湖北/四川/陕西四省黄色边界；force-stop 后重启并再次加载，同 URL 命中 `[RemoteGeoJson] cache hit ... elapsed=0ms`，读取与构建总耗时约 268ms，未再出现 ArkTS `province geojson downloaded/overlay` 兜底日志。
 - @Jin 鸿蒙真机同时在 3D 地形开启状态下缩放到四省范围，黄色省级边界仍作为普通 native VectorLayer 叠加显示；在线源读取的是下载后的本地缓存文件，因此 LITE GeoJSON reader 对“远程 URL 落缓存后的本地 .geojson”路径已完成真机验证。本地 rawfile `sample.geojson` 入口仍走同一 `readLiteGeoJsonFile()` 路由，桌面冒烟已通过，后续可再做一次人工 UI 回归。
 
+### @Jin EPSG:4326/4490 地理切片栅格瓦片支持（feature/epsg-4490，P1 实验）
+
+- @Jin 背景：天地图等服务的 img_c/cia_c 为 EPSG:4326 地理切片（根 2x1、纬度线性、TILEMATRIX 从 1 起、XYZ 行序），与引擎现用 Web 墨卡托（根 1x1、墨卡托反投影）不是同一套 TileMatrixSet；4490(CGCS2000) 与 4326(WGS84) 椭球差异亚米级，可视化按同一地理切片处理。方案与对标（Cesium/Mars3D）详见 docs/design/epsg-4490-raster-tile-proposal.md；改造思路、分层改动清单与重投影算法（相交地理瓦映射、等经纬拼贴、预乘 alpha、双线性采样、两级缓存、zlib 自研 PNG 编码）的完整实现详解见 docs/design/epsg-4490-raster-tile-implementation.md。
+- @Jin 采用低风险“方案 A（图层级适配，可回退）”：引擎选瓦四叉树与 3D 几何完全不动；TileLoader 对地理源图层把每个引擎墨卡托瓦映射到相交的地理服务瓦（0 基服务级 s=z，cols=2^(s+1)/rows=2^s；早期曾用 s=z-1，因垂直 1/cos(lat) 拉伸已修正，见 2026-10-31 记录），原始地理瓦先读独立缓存 -geo-raw、未命中再下载，解码后等经纬拼贴并双线性重采样成该墨卡托瓦的 256x256 PNG，再复用既有结果缓存/去重/解码上传链路。二次浏览命中结果缓存，零重采样零网络。
+- @Jin 新增 render/PngEncoder.{h,cpp}：仅依赖 zlib 的内存 RGBA 转 PNG 编码器（GDAL 无关），因此 GLOBECORE_LITE=ON 的鸿蒙包也可用；已登记进 Android 与 Harmony 两套 CMake 源清单。
+- @Jin 公开 API（向后兼容，默认仍墨卡托）：C++ GlobeEngine::addTileLayer(..., const TileLayerOptions&)（TileLayerOptions{crs,tmsY,tileMatrixOffset}）；Harmony NativeMapView.addTileLayerWithOptions(...) 到 NAPI nativeAddTileLayerWithOptions。crs 传 EPSG:4326/EPSG:4490 启用，其余与旧版一致；Android/JNI 重载留作后续预埋（本次未改 Android 公开 API）。
+- @Jin Demo：天地图影像/注记由 img_w/cia_w 改为 img_c/cia_c，切到天地图图源时以 crs=EPSG:4326、tmsY=false、tileMatrixOffset=1 加载，并使用独立缓存目录 map-cache/tiles/tianditu-c4326-{img,cia}（含 -geo-raw 原始瓦缓存），避免与墨卡托瓦串图。默认启动图源仍为 ArcGIS。
+- @Jin Demo 图源菜单后扩展为三项（ArcGIS / 天地图4490 / 天地图3857）：4490 用 img_c/cia_c 走地理源重投影（独立缓存 tianditu-c4326-*）；3857 用 img_w/cia_w 走墨卡托直连（独立缓存 tianditu-w3857-*，实测 w 矩阵根为 2×2、等价标准 XYZ z1，{z} 直传无需偏移）。真机已分别验证 geo=1 与 geo=0 路径影像/中文注记均正常。
+- @Jin 真机验证（2026-10-30，设备 5KLBB25911200313，LITE 包）：日志确认 geographic source on=1 maxGeoLevel0=17 tmsY=0 matrixOffset=1，影像/注记两层均出现 geo4490 reproject（首屏 online=1、随后缓存 online=0），无服务瓦获取失败/尺寸异常/映射超限；3D 全球中国轮廓、2D 放大到中国（地图 z4/瓦片 z7）城市与道路注记、以及太白山开地形飞行后的影像地形贴合均正确。
+- @Jin 回退：不调用 addTileLayerWithOptions（或 Demo URL 改回 img_w/cia_w、缓存目录改回）即完全恢复旧墨卡托直连；地理源默认关闭。
+- @Jin 2026-10-31 修复 4490 注记上下拉伸（两个叠加原因）：①主因——早期地理源按赤道经度 1:1 选服务级 s=z-1，但地理切片像元在地面是 cosφ(宽)×1(高) 的扁矩形，垂直方向源分辨率只有需求的 cosφ 倍（34°≈0.83），输出时垂直被整体放大约 1/cosφ≈1.20 倍，且与层级无关，表现为中文注记字整体拉高（影像因是自然纹理几乎无感）；改为 s=z，每个输出像元从源约 2(宽)×2cosφ(高) 像元重采样，恰好抵消源像元扁率，地面各向同性、与 3857 原生注记同比例。②次因——瓦内 256 行纬度原按角点线性排布，中纬度低层级另含 ±1%~3% 的瓦内不均匀；已改为逐行按真实墨卡托反投影取纬度（经度本就线性），瓦内误差归零，每瓦仅增 256 次 atan·sinh。结果缓存目录升级为 tianditu-c4326-v2-* 与旧结果隔离。
+- @Jin 2026-10-31 遗留问题（暂不修，记录在案；详见 docs/design/epsg-4490-raster-tile-implementation.md §10）：天地图 4490 的中文**栅格注记 cia_c** 仍存在两个观感问题，二者同源、当前方案 A 无法同时消除——①**字偏小**：固定 s=z 时 c 套图在更细矩阵重新制图，注记更密更小（西安 z8 实测字高中位：cia_w≈12px，cia_c 经 s=z 重投影≈8.5px），全球小比例视角尤其明显；②**轻微上下拉伸**：c 瓦像元在地面是 cosφ(宽)×1(高) 的扁矩形，天地图把方块字栅格化在扁像元上，字本身在地面已被南北拉长 1/cosφ（33.7°≈1.20 倍），重投影/墨卡托保角只是如实呈现；合成实验证明无论服务级取 s=z / z-1 / z-2，结果高宽比恒约 1.20，改级差只能放大缩小字与改变模糊度，不能消除拉伸。曾实验每图层 serviceZoomOffset（对 cia_c 传 -1 取粗一级可把字调大到接近 cia_w，但纵向 1.2 倍拉伸随之更明显），经评估方案不妥，**已整体回退**为固定 s=z、接口恢复 8 参、缓存回到 c4326-v2。后续推荐方向：影像走 img_c、中文注记改用墨卡托 cia_w（每层本就支持独立方案），或注记改客户端矢量文字标注；如坚持 cia_c 只能在“字小但拉伸不明显（现状）”与“字大但拉长明显”间二选一。另有与之正交的待办：把全局瓦片 LOD 偏移改造成单图层参数（现 setTileLodOffset 为全局，影像/注记一起受影响）。影像层 img_c 无上述注记问题。
+
 ### @Jin SDK 能力查询与快捷定位峰顶标注
 
 - @Jin 新增 `docs/sdk-capability-queries.md`，专门记录“SDK 是否支持某能力”的查询结论、代码依据、边界与建议 API；2026-10-29 已记录“地形夸张 / 垂直缩放”当前仅有 C++ 内部固定系数 `1.0`，尚未向 Harmony/Android/Qt 公开配置接口。后续每次回答类似能力查询后都要追加到该文档。

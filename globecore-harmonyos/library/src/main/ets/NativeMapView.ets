@@ -230,6 +230,18 @@ export struct NativeMapView {
     this.requestRender();
   }
 
+  /**
+   * @Jin 同上，但携带切片方案（feature/epsg-4490，实验、可回退）。
+   * crs 传 "EPSG:4326"/"EPSG:4490" 启用地理在线瓦片适配（根 2×1、纬度线性，引擎内重采样到墨卡托瓦）；
+   * tmsY 为服务行序（天地图 c 传 false）；tileMatrixOffset 为 TILEMATRIX 与 0 基层级偏移（天地图 c 传 1）。
+   */
+  addTileLayerWithOptions(cacheDir: string, urlTemplate: string, maxLevel: number, overlay: boolean,
+                          crs: string, tmsY: boolean, tileMatrixOffset: number): void {
+    NativeLib.nativeAddTileLayerWithOptions(this.nativeHandle, cacheDir, urlTemplate, maxLevel, overlay,
+      crs, tmsY, tileMatrixOffset);
+    this.requestRender();
+  }
+
   /** 设置指定瓦片图层可见性（index 为 addTileLayer 加入次序，0 起）：隐藏层不绘制、不取瓦片 */
   setLayerVisible(index: number, visible: boolean): void {
     NativeLib.nativeSetLayerVisible(this.nativeHandle, index, visible);

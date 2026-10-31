@@ -122,6 +122,7 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         render/ShaderProgram.cpp
         render/Texture.cpp
         render/ImageDecoder.cpp
+        render/PngEncoder.cpp
         # KTX2/ETC2/ASTC 纹理压缩解码（GPU 硬解压，省显存 4-8 倍）
         render/Ktx2Decoder.cpp
         # 动态字形图集（stb_truetype）：矢量要素标注文本的屏幕空间 billboard 渲染基础

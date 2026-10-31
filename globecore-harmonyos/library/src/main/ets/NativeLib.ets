@@ -193,6 +193,14 @@ export class NativeLib {
     }
   }
 
+  // @Jin EPSG:4326/4490 地理在线瓦片适配（feature/epsg-4490，实验、可回退）。
+  static nativeAddTileLayerWithOptions(handle: number, cacheDir: string, urlTemplate: string,
+    maxLevel: number, overlay: boolean, crs: string, tmsY: boolean, tileMatrixOffset: number): void {
+    if (handle !== 0) {
+      gc.nativeAddTileLayerWithOptions(handle, cacheDir, urlTemplate, maxLevel, overlay, crs, tmsY, tileMatrixOffset);
+    }
+  }
+
   static nativeSetLayerVisible(handle: number, index: number, visible: boolean): void {
     if (handle !== 0) {
       gc.nativeSetLayerVisible(handle, index, visible);

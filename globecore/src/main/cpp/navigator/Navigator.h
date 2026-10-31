@@ -141,6 +141,8 @@ public:
     /// 3D 细分 LOD 阈值（detailControl·densityFactor，与 tileLevel 同源）：供 Tessellator
     /// 屏幕空间误差判据（越大瓦片越粗）。两因子仅初始化期写入，无锁读与 displayDensity 同口径。
     double lodDetailFactor() const { return detailControl_ * densityFactor_; }
+    /// @Jin 3D SSE 额外倍率：LOD -1 时阈值乘 2，使实际四叉树叶级随目标级一起变粗（默认 0 时为 1）。
+    double tileLodSseScale() const;
 
     /// 相机中心的归一化世界坐标
     void worldCenter(double &wx, double &wy) const;

@@ -1910,6 +1910,8 @@ bool Renderer::renderGlobeLayer3D(size_t layerIndex, const Navigator::Camera3D &
         quadtreeLevel = std::min(targetLevel, lastIdleGlobeTileLevel_);
     }
     const double tanHalf = std::tan(nav_.fieldOfViewDeg() * 0.5 * 3.14159265358979323846 / 180.0);
+    // @Jin 3D 的自然叶级由 SSE 决定；LOD 偏移必须同步放宽/收紧 SSE，否则在未达到 targetLevel 上限时点击 -1 可能看起来无效。
+    const double sseDetailFactor = nav_.lodDetailFactor() * nav_.tileLodSseScale();
     TessCamera tc;
     tc.eye = cam.eye;
     // @Jin 帧间缓存必须同时看到相机朝向：仅比较眼点会让 tilt/heading 后继续复用旧视锥叶集，造成周边黑区。
@@ -1922,7 +1924,7 @@ bool Renderer::renderGlobeLayer3D(size_t layerIndex, const Navigator::Camera3D &
     // @Jin exp1h：四叉树原先只按椭球面做地平线/视锥剔除，太白山近景大倾角时山脊会被整块误删。
     const double terrainCullMargin = terrainCullMarginM();
     geoQuadtree_.buildVisibleTiles(tc, quadtreeLevel, layer.maxLevel, tanHalf, viewportHeight_,
-                                   nav_.lodDetailFactor(), Wgs84Globe::instance(), globeTilesScratch_,
+                                   sseDetailFactor, Wgs84Globe::instance(), globeTilesScratch_,
                                    terrainCullMargin);
 
     // @Jin 3D 可见叶可远超纹理容量；交互期只请求 96 块、空闲期 192 块，避免远景请求风暴触发限流。
