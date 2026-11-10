@@ -354,6 +354,41 @@ void main() {
 // uOffset=anchor−eye 补 eye 平移、uAnchor=anchor 供恢复 ecef 求法向。
 // 高度：aMode=1（高程要素）→ 已 baked 在 aPos 的真实高度，不再叠加 uVecAlt；aMode=0（贴地）→ 沿用 uVecAlt
 // 沿法向抬升（防与瓦片 z-fighting、随缩放零重建）。即 抬升 = uVecAlt*(1-aMode)。uMvp 传 viewProjRtc。
+// @Jin 3D Tiles b3dm 模型最小着色器：CPU 已把 ECEF 大数转成 anchor RTC，GPU 只做 viewProjRtc 与简单 Lambert。
+const char *const kTileset3DVertexSrc = R"GLSL(
+attribute vec3 aPos;
+attribute vec3 aNormal;
+attribute vec4 aColor;
+uniform mat4 uMvp;
+uniform vec3 uOffset;
+varying vec4 vColor;
+varying vec3 vNormal;
+varying vec3 vViewDir;
+void main() {
+    vec3 rtc = aPos + uOffset;
+    gl_Position = uMvp * vec4(rtc, 1.0);
+    vColor = aColor;
+    vNormal = aNormal;
+    vViewDir = -rtc;
+}
+)GLSL";
+
+const char *const kTileset3DFragmentSrc = R"GLSL(
+precision mediump float;
+varying vec4 vColor;
+varying vec3 vNormal;
+varying vec3 vViewDir;
+uniform vec3 uSunDir;
+uniform float uAmbient;
+void main() {
+    vec3 n = normalize(vNormal);
+    vec3 v = normalize(vViewDir);
+    float diff = max(dot(n, uSunDir), 0.0);
+    vec3 color = vColor.rgb * (uAmbient + (1.0 - uAmbient) * diff);
+    gl_FragColor = vec4(color, vColor.a);
+}
+)GLSL";
+
 const char *const kGlobeFillVertexSrc = R"GLSL(
 attribute vec3 aPos;
 attribute vec4 aColor;
@@ -1237,6 +1272,18 @@ void Renderer::onSurfaceCreated() {
         gc3USunDir_ = globeColorProgram_.uniformLocation("uSunDir");
         gc3UAmbient_ = globeColorProgram_.uniformLocation("uAmbient");
     }
+    // @Jin 3D Tiles b3dm 模型纯色/简单光照 shader，初始化失败不影响地图与地形既有通路。
+    if (!tileset3DProgram_.init(kTileset3DVertexSrc, kTileset3DFragmentSrc)) {
+        LOGE("Renderer: tileset 3D shader init failed");
+    } else {
+        t3APos_ = tileset3DProgram_.attribLocation("aPos");
+        t3ANormal_ = tileset3DProgram_.attribLocation("aNormal");
+        t3AColor_ = tileset3DProgram_.attribLocation("aColor");
+        t3UMvp_ = tileset3DProgram_.uniformLocation("uMvp");
+        t3UOffset_ = tileset3DProgram_.uniformLocation("uOffset");
+        t3USunDir_ = tileset3DProgram_.uniformLocation("uSunDir");
+        t3UAmbient_ = tileset3DProgram_.uniformLocation("uAmbient");
+    }
     // P2.a 3D 矢量 fill/stroke 两程序（片元均复用 kColorFragmentSrc）
     if (!globeFillProgram_.init(kGlobeFillVertexSrc, kColorFragmentSrc)) {
         LOGE("Renderer: globe fill shader init failed");
@@ -1802,6 +1849,123 @@ bool Renderer::renderLayer(size_t layerIndex, double cwx, double cwy, double hw,
 
 // ==================== 3D 球体通路（P1） ====================
 
+// @Jin 3D Tiles b3dm 最小渲染通路：CPU Provider 只交付模型，GL 资源创建/释放均收敛在 Renderer。
+void Renderer::setTileset3DLayers(const std::vector<std::unique_ptr<Tileset3DLayer>> &layers) {
+    tileset3DLayers_ = &layers;
+}
+
+void Renderer::releaseTileset3D() {
+    for (auto &kv : tileset3DGpu_) {
+        if (kv.second.vbo != 0) glDeleteBuffers(1, &kv.second.vbo);
+        if (kv.second.ibo != 0) glDeleteBuffers(1, &kv.second.ibo);
+    }
+    tileset3DGpu_.clear();
+}
+
+void Renderer::uploadTileset3DModels() {
+    if (tileset3DLayers_ == nullptr) return;
+
+    for (const auto &layerPtr : *tileset3DLayers_) {
+        if (!layerPtr) continue;
+        Tileset3DLayer &layer = *layerPtr;
+        std::vector<Tileset3DModelCpu> pending = layer.drainPendingModels();
+        for (Tileset3DModelCpu &model : pending) {
+            if (model.id.empty() || model.vertices.empty()) continue;
+            auto existing = tileset3DGpu_.find(model.id);
+            if (existing != tileset3DGpu_.end()) continue; // @Jin 同一 b3dm URL 不重复上传，后续 LRU 再做替换淘汰。
+
+            Tileset3DGpuModel gpu;
+            gpu.layerId = layer.layerId();
+            gpu.anchorEcef = model.anchorEcef;
+            gpu.vertexCount = static_cast<int>(model.vertices.size() / 10);
+
+            glGenBuffers(1, &gpu.vbo);
+            glBindBuffer(GL_ARRAY_BUFFER, gpu.vbo);
+            glBufferData(GL_ARRAY_BUFFER,
+                         static_cast<GLsizeiptr>(model.vertices.size() * sizeof(float)),
+                         model.vertices.data(), GL_STATIC_DRAW);
+
+            if (!model.indices.empty()) {
+                // @Jin GLES2 核心只保证 unsigned short；ModelBuilder 已把超过 65535 的索引展开为非索引顶点。
+                std::vector<uint16_t> indices16;
+                indices16.reserve(model.indices.size());
+                for (uint32_t index : model.indices) indices16.push_back(static_cast<uint16_t>(index));
+                glGenBuffers(1, &gpu.ibo);
+                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpu.ibo);
+                glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                             static_cast<GLsizeiptr>(indices16.size() * sizeof(uint16_t)),
+                             indices16.data(), GL_STATIC_DRAW);
+                gpu.indexCount = static_cast<int>(indices16.size());
+            }
+            glBindBuffer(GL_ARRAY_BUFFER, 0);
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+            tileset3DGpu_.emplace(model.id, gpu);
+            LOGI("Tileset3D GPU model uploaded: layer=%d id=%s verts=%d indices=%d",
+                 gpu.layerId, model.id.c_str(), gpu.vertexCount, gpu.indexCount);
+        }
+    }
+}
+
+bool Renderer::drawTileset3D(const Navigator::Camera3D &cam, const Matrix4 &viewProjRtc) {
+    if (tileset3DLayers_ == nullptr || tileset3DProgram_.program() == 0) return false;
+
+    uploadTileset3DModels();
+    if (tileset3DGpu_.empty()) {
+        for (const auto &layerPtr : *tileset3DLayers_) {
+            if (layerPtr && layerPtr->visible && layerPtr->loading.load()) return true;
+        }
+        return false;
+    }
+
+    bool needRedraw = false;
+    tileset3DProgram_.use();
+    glUniformMatrix4fv(t3UMvp_, 1, GL_FALSE, viewProjRtc.data());
+    glUniform3f(t3USunDir_, static_cast<GLfloat>(sunDir_.x),
+                static_cast<GLfloat>(sunDir_.y), static_cast<GLfloat>(sunDir_.z));
+    glUniform1f(t3UAmbient_, kGlobeAmbient);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
+    glDisable(GL_BLEND);
+
+    for (const auto &layerPtr : *tileset3DLayers_) {
+        if (!layerPtr || !layerPtr->visible) continue;
+        if (layerPtr->loading.load()) needRedraw = true;
+        const int layerId = layerPtr->layerId();
+        for (const auto &kv : tileset3DGpu_) {
+            const Tileset3DGpuModel &gpu = kv.second;
+            if (gpu.layerId != layerId) continue;
+
+            const Vec3 offset = gpu.anchorEcef - cam.eye;
+            glUniform3f(t3UOffset_, static_cast<GLfloat>(offset.x),
+                        static_cast<GLfloat>(offset.y), static_cast<GLfloat>(offset.z));
+            glBindBuffer(GL_ARRAY_BUFFER, gpu.vbo);
+            const GLsizei stride = 10 * static_cast<GLsizei>(sizeof(float));
+            glEnableVertexAttribArray(t3APos_);
+            glVertexAttribPointer(t3APos_, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(0));
+            glEnableVertexAttribArray(t3ANormal_);
+            glVertexAttribPointer(t3ANormal_, 3, GL_FLOAT, GL_FALSE, stride,
+                                  reinterpret_cast<const void *>(3 * sizeof(float)));
+            glEnableVertexAttribArray(t3AColor_);
+            glVertexAttribPointer(t3AColor_, 4, GL_FLOAT, GL_FALSE, stride,
+                                  reinterpret_cast<const void *>(6 * sizeof(float)));
+
+            if (gpu.indexCount > 0) {
+                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpu.ibo);
+                glDrawElements(GL_TRIANGLES, gpu.indexCount, GL_UNSIGNED_SHORT, reinterpret_cast<const void *>(0));
+            } else {
+                glDrawArrays(GL_TRIANGLES, 0, gpu.vertexCount);
+            }
+        }
+    }
+
+    glDisableVertexAttribArray(t3APos_);
+    glDisableVertexAttribArray(t3ANormal_);
+    glDisableVertexAttribArray(t3AColor_);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+    return needRedraw;
+}
+
 bool Renderer::onDrawFrame3D() {
     // 清颜色+深度（深度缓冲由 GLSurfaceView 默认 EGLConfig 提供 16bit）；背景仍为深色=太空
     // #9 RHI：经后端抽象清除颜色+深度缓冲
@@ -1860,6 +2024,8 @@ bool Renderer::onDrawFrame3D() {
     // Pass A2：全幅栅格贴图沿经纬网格贴球面（瓦片栅格之后、矢量之前，层级感与 2D 一致）。深度仍开。
     if (drawRasterImages3D(cam, viewProjRtc)) needRedraw = true;
 
+    // @Jin Pass A3：b3dm 倾斜摄影模型与地形/影像共享深度缓冲，放在矢量之前保证遮挡关系正确。
+    if (drawTileset3D(cam, viewProjRtc)) needRedraw = true;
     // Pass B：3D 矢量层（面/描边/线/点/图标），仍开深度、启 polygon offset（实现内局部开关）。
     // drainReady 接管几何，与 2D 共用 loader/glReady 口径；相机未变则绑旧 VBO 直接画。
     if (globeFillProgram_.program() != 0 && globeStrokeProgram_.program() != 0) {
@@ -5849,6 +6015,7 @@ void Renderer::release() {
     texProgram_.release();
     textProgram_.release();
     iconProgram_.release();
+    releaseTileset3D();
     globeTexProgram_.release();
     globeColorProgram_.release();
     globeFillProgram_.release();

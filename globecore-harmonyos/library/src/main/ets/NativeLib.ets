@@ -656,6 +656,18 @@ export class NativeLib {
     }
   }
 
+  // @Jin 3D Tiles/b3dm 倾斜摄影实验入口（feature/3dtiles-b3dm）：成功返回图层 id，失败 -1。
+  static nativeAddTileset3D(handle: number, url: string): number {
+    return handle !== 0 ? gc.nativeAddTileset3D(handle, url) : -1;
+  }
+
+  /** @Jin 切换 3D Tiles 图层显隐；layerId 为 nativeAddTileset3D 返回值。 */
+  static nativeSetTileset3DVisible(handle: number, layerId: number, visible: boolean): void {
+    if (handle !== 0) {
+      gc.nativeSetTileset3DVisible(handle, layerId, visible);
+    }
+  }
+
   // ── PROJ / GDAL 桥（bridge 导出的直通包装，门面见 NativeSrs/NativeLayerInfo/NativeVector）──
 
   static nativeGetProjVersion(): number {

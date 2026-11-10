@@ -41,10 +41,14 @@ GlobeEngine::GlobeEngine() : renderer_(navigator_, layers_, vectorLayers_, raste
     // GDAL/OGR 全进程一次引导（幂等）：注册全部矢量驱动并打印版本自检，同时作为链接期强制
     // 拉入 GDAL 符号的锚点——若依赖链未正确链接，加载 .so 时即暴露未定义符号而非等到首次读矢量。
     ensureGdalRegistered();
+    renderer_.setTileset3DLayers(tileset3dLayers_); // @Jin 注入 3D Tiles 图层引用，Renderer 不拥有容器生命周期。
     LOGI("GlobeEngine created");
 }
 
 GlobeEngine::~GlobeEngine() {
+    // @Jin 先停 3D Tiles worker，避免 Renderer/图层析构期间迟到模型回调。
+    std::lock_guard<std::mutex> tilesetLock(layersMtx_);
+    tileset3dProviders_.clear();
     // @Jin 先停 Provider 并等待下载线程退出，确保迟到回调不会再访问即将析构的 Navigator/Renderer。
     std::lock_guard<std::mutex> terrainLock(terrainProviderMtx_);
     if (terrainProvider_) {
@@ -73,6 +77,24 @@ void GlobeEngine::drawFrame() {
     // 全程持 layersMtx_：整帧对 layers_/vectorLayers_/rasterImageLayers_ 及其对齐缓存 layerTextures_
     // 做下标遍历，须与 UI 线程 add* 的 push_back（可能重分配内部数组）互斥（见 GlobeEngine.h 注释）。
     // renderCallback_（requestRender）非阻塞，锁内调用安全；不嵌套取锁，无死锁路径。
+    // @Jin 将当前 3D 眼点投递给 3D Tiles Provider；内部按量化签名去重，静态画面不会反复唤醒 worker。
+    if (navigator_.viewMode() == Navigator::ViewMode::MODE_3D) {
+        const Navigator::Camera3D cam3d = navigator_.camera3D();
+        if (cam3d.valid) {
+            Tileset3DViewport viewport;
+            viewport.valid = true;
+            viewport.eyeEcef = cam3d.eye;
+            viewport.viewportHeightPx = std::max(1, navigator_.viewportHeight());
+            viewport.fovYRad = navigator_.fieldOfViewDeg() * 3.14159265358979323846 / 180.0;
+            // @Jin 传入 Navigator 以 double 精度预算的视锥 6 平面，Provider 选择器据此做保守剔除。
+            viewport.hasFrustum = true;
+            viewport.frustumPlanes = cam3d.frustumPlanes;
+            std::lock_guard<std::mutex> tilesetLock(layersMtx_);
+            for (auto &provider : tileset3dProviders_) {
+                if (provider) provider->updateViewport(viewport);
+            }
+        }
+    }
     renderer_.setCameraFlightActive(cameraFlightWantsFrame); // @Jin flyTo 动画帧使用与手势相同的保守 GL 预算。
     std::lock_guard<std::mutex> lock(layersMtx_);
     bool needRedraw = renderer_.onDrawFrame();
@@ -1127,6 +1149,55 @@ void GlobeEngine::setFontPath(const std::string &path) {
 
 void GlobeEngine::setDisplayDensity(double density) {
     navigator_.setDisplayDensity(density); // LOD densityFactor（对齐 参考实现 displayMetrics.density）
+}
+
+int GlobeEngine::addTileset3D(const std::string &url) {
+    if (url.empty()) return -1; // @Jin 空地址不创建图层，避免 Provider 空转。
+    auto layer = std::make_unique<Tileset3DLayer>(static_cast<int>(tileset3dLayers_.size()));
+    layer->loading = true;
+    Tileset3DLayer *layerRaw = layer.get();
+    int layerId = -1;
+    {
+        std::lock_guard<std::mutex> lock(layersMtx_);
+        tileset3dLayers_.push_back(std::move(layer));
+        layerId = static_cast<int>(tileset3dLayers_.size()) - 1;
+        auto provider = std::make_unique<Tileset3DProvider>(
+            layerId, url,
+            [this] {
+                Tileset3DViewport viewport;
+                if (navigator_.viewMode() != Navigator::ViewMode::MODE_3D) return viewport;
+                const Navigator::Camera3D cam = navigator_.camera3D();
+                if (!cam.valid) return viewport;
+                viewport.valid = true;
+                viewport.eyeEcef = cam.eye;
+                viewport.viewportHeightPx = std::max(1, navigator_.viewportHeight());
+                viewport.fovYRad = navigator_.fieldOfViewDeg() * 3.14159265358979323846 / 180.0;
+                // @Jin Provider 首次刷新可能早于首帧投递，这里同样补齐视锥平面，保证首轮即可裁剪。
+                viewport.hasFrustum = true;
+                viewport.frustumPlanes = cam.frustumPlanes;
+                return viewport;
+            },
+            [layerRaw](Tileset3DModelCpu &&model) {
+                layerRaw->enqueueModel(std::move(model));
+                layerRaw->loading = false; // @Jin 首个模型到达后退出加载态，后续 LRU/加载状态再精细化。
+            },
+            [this] { if (renderCallback_) renderCallback_(); }
+        );
+        provider->start();
+        tileset3dProviders_.push_back(std::move(provider));
+    }
+    LOGI("GlobeEngine addTileset3D layer=%d url=%s", layerId, url.c_str());
+    if (renderCallback_) renderCallback_();
+    return layerId;
+}
+
+void GlobeEngine::setTileset3DVisible(int layerId, bool visible) {
+    std::lock_guard<std::mutex> lock(layersMtx_);
+    if (layerId < 0 || layerId >= static_cast<int>(tileset3dLayers_.size())) return;
+    if (tileset3dLayers_[static_cast<size_t>(layerId)]) {
+        tileset3dLayers_[static_cast<size_t>(layerId)]->visible = visible;
+    }
+    if (renderCallback_) renderCallback_();
 }
 
 void GlobeEngine::setRenderCallback(std::function<void()> cb) {

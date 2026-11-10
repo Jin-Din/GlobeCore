@@ -88,6 +88,14 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         gltf/GltfDecoder.cpp
         # 3D Tiles tileset.json 解析器（tile 树+boundingVolume+geometricError+content.uri）
         layer/TilesetJson.cpp
+        # @Jin P0 b3dm 容器解包、3D Tiles URL 解析与同步数据加载器（暂不接入渲染，可独立回退）
+        tileset3d/B3dmDecoder.cpp
+        tileset3d/Tileset3DUrl.cpp
+        tileset3d/Tileset3DLoader.cpp
+        tileset3d/Tileset3DTransform.cpp
+        tileset3d/Tileset3DGraph.cpp
+        tileset3d/Tileset3DModel.cpp
+        tileset3d/Tileset3DProvider.cpp
         # 瓦片磁盘缓存读取（对应 参考实现 layer.cache 的 TileStore 只读部分）
         layer/TileCache.cpp
         # 后台瓦片加载器（线程池联网取瓦片 + 写缓存 + 交付 GL 上传，Phase C）

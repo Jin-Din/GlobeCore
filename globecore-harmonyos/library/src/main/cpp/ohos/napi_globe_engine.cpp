@@ -1316,9 +1316,36 @@ napi_value NativeSetTerrainProviderEventCallback(napi_env env, napi_callback_inf
         std::lock_guard<std::mutex> lock(g_terrainEventMtx);
         g_terrainEventListeners[handle] = listener;
     }
+    // @Jin 恢复引擎回调注册（此前锚点替换误删）：Provider 事件经 listener 的 TSFN 跨线程投递给 ArkTS。
     toGlobeEngine(handle)->setTerrainProviderEventCallback([listener](const std::string &json) {
         listener->emit(json);
     });
+    return nullptr;
+}
+
+// @Jin 3D Tiles（b3dm 倾斜摄影）实验入口（feature/3dtiles-b3dm）：加载根 tileset.json，返回图层 id；失败返回 -1。
+napi_value NativeAddTileset3D(napi_env env, napi_callback_info info) {
+    napi_value args[2];
+    gcohos::NapiGetArgs(env, info, 2, args);
+    int64_t handle = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return gcohos::NapiMakeInt32(env, -1);
+    const std::string url = gcohos::NapiGetString(env, args[1]);
+    if (url.empty()) return gcohos::NapiMakeInt32(env, -1); // @Jin 空 URL 不创建 Provider，与 C++ 层防护保持一致。
+    const int layerId = toGlobeEngine(handle)->addTileset3D(url);
+    return gcohos::NapiMakeInt32(env, layerId);
+}
+
+// @Jin 切换 3D Tiles 图层显隐；layerId 来自 nativeAddTileset3D 的返回值。
+napi_value NativeSetTileset3DVisible(napi_env env, napi_callback_info info) {
+    napi_value args[3];
+    gcohos::NapiGetArgs(env, info, 3, args);
+    int64_t handle = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return nullptr;
+    int32_t layerId = -1;
+    bool visible = false;
+    gcohos::NapiGetInt32(env, args[1], layerId);
+    gcohos::NapiGetBool(env, args[2], visible);
+    toGlobeEngine(handle)->setTileset3DVisible(layerId, visible);
     return nullptr;
 }
 
@@ -1392,6 +1419,9 @@ napi_value RegisterGlobeEngine(napi_env env, napi_value exports) {
         {"nativePrefetchTerrainProviderMetadata", nullptr, NativePrefetchTerrainProviderMetadata, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeTerrainProviderStatus", nullptr, NativeTerrainProviderStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeSetTerrainProviderEventCallback", nullptr, NativeSetTerrainProviderEventCallback, nullptr, nullptr, nullptr, napi_default, nullptr},
+        // @Jin 3D Tiles/b3dm 实验性入口（feature/3dtiles-b3dm）：加载倾斜摄影 tileset 与图层显隐。
+        {"nativeAddTileset3D", nullptr, NativeAddTileset3D, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"nativeSetTileset3DVisible", nullptr, NativeSetTileset3DVisible, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;

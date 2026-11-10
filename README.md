@@ -14,6 +14,14 @@ OpenGL ES 2.0 绘制全部在 native 完成，并内联编译了 GDAL/OGR、PROJ
 
 当前版本 **0.1.4.0**：GeoPackage 工程读写（`geopackage_io`，七表结构 + JSON 桥接 + 原子写 + SetFID 记录 id 持久化）、着色器精度修复（顶点阶段归一化法向/视线方向，修复真机 3D 光照无过渡问题）、瓦片缓存 MBTiles 单文件后端（含 `added_at` 入库时间列）。tag 后追加（未重新打版）：鸿蒙 HAR 构建补齐引擎源清单（修复 so 链接缺符号）、photos 表新增 `photo_data` BLOB（主照片随工程文件入库）。
 
+### @Jin 实验性 3D Tiles（b3dm 倾斜摄影）支持（feature/3dtiles-b3dm，P0–P3 实验）
+
+- @Jin 新增独立 `globecore/src/main/cpp/tileset3d/` 模块：`TilesetJson` 解析 3D Tiles 1.0 tileset.json（transform/boundingVolume box·sphere·region/geometricError/refine/content.uri 兼容旧 `url` 字段/asset.gltfUpAxis）；`B3dmDecoder` 解 b3dm header、Feature/Batch Table、`RTC_CENTER` 并提取内嵌 GLB；`Tileset3DUrl` 解析 `./`、`../`、站点绝对路径等相对 URL；`Tileset3DLoader` 复用 `HttpClient` 下载 JSON/b3dm。
+- @Jin `Tileset3DProvider` 后台线程调度：外部 tileset 工作清单递归展开（任意深度嵌套）、SSE 屏幕空间误差 + 视锥 6 平面保守裁剪选择可见 tile、量化眼点签名去重避免静态画面空转、锁内只遍历内存结构而网络 IO 全部锁外、单帧最多处理 8 个 b3dm；`Tileset3DModelBuilder` 完成 Z-up 换轴、RTC_CENTER 与 tile ECEF transform 的 CPU 转换，超 65535 索引自动展开非索引三角形兼容 GLES2；`Renderer` 新增独立 3D Tiles shader（纯色 + Lambert，深度测试，栅格之后矢量之前绘制）。
+- @Jin 平台链路：C++ `GlobeEngine::addTileset3D/setTileset3DVisible` → Harmony NAPI → ArkTS `NativeMapView.addTileset3D/setTileset3DVisible`；Harmony Demo「数据与样例」面板提供「倾斜摄影 3D Tiles」开关，点击自动切 3D 并 flyTo 数据区域。当前仅纯色渲染，glTF 纹理/PBR、i3dm/pnts/cmpt、要素拾取、磁盘缓存、LRU 卸载、失败重试、ADD refine 留待后续阶段。
+- @Jin P3 真机阻断缺陷修复（runtime 节点悬空指针，症状：真机 `item diag` 打印乱码 URL、b3dm 全部无法下载）：根因是 `Tileset3DRuntimeNode::source` 裸指针先指向 `build()` 入参 `TilesetResult`（函数返回即销毁）；即便改指图内拷贝，`TilesetResult::root` 仍是值类型内嵌成员，Provider `*graph = build(...)` move 赋值后 root 随对象搬迁，根节点指针照样悬空（vector 内子节点因堆缓冲随 move 转移而幸免）。治本修复：`Tileset3DGraph::tileset` 改为 `std::unique_ptr<TilesetResult>` 堆托管，图的任何 move 都不搬动节点树，全部 `source` 在图生命周期内地址恒定。
+- @Jin P3 真机朝向与明暗修复（2026-11-10）：① 该数据 b3dm 无 NORMAL 属性，旧逻辑统一赋默认法向导致 Lambert 光照均匀、模型退化为灰板，现按三角形叉积做面积加权自动生成平滑顶点法向，`model built` 日志带 `genNormal=1` 标识；② 换轴朝向问题经根 transform 的 ENU 数学验证定论——mars3d osgb2tiles3 虽声明 `gltfUpAxis:"Z"`，但其 tile 局部帧本身就是 Z-up 的 ENU 帧（localX→东、localY→北、localZ→天），内容同为 Z-up，套用 Cesium 标准 Z-up→Y-up 换轴反而把建筑高度转到水平方向（真机 90° 立起），故换轴矩阵改为 identity；未来接入 Y-up 局部帧的标准 Cesium 数据需先做帧上轴检测再决定是否换轴。
+- @Jin 真机验证（2026-11-10，设备 `5KLBB25911200313`，数据 `http://210.74.129.84:8520/app-pub/web-data/3dtiles/qx-dyt/tileset.json`）：根图 3 节点、外部 `0/root.json` 93 节点构建成功，选中 URL 全部完整无乱码；放大 3 级累计 18 个不同 b3dm 完成「下载→解码→GPU 上传」全链路，b3dm/glb/JSON 失败计数均为 0，模型在目标地理位置正确出现。分阶段方案与排查细节见 `docs/design/3dtiles-b3dm-plan.md`；回退方式：从 CMakeLists 移除 `tileset3d/` 源清单并移除 GlobeEngine/Renderer 中标注 @Jin 的 3D Tiles 接线，不影响栅格、地形、矢量通路。
 ### @Jin 实验性在线 GeoJSON Source（P0）
 
 - @Jin `NativeMapView.addVectorLayer(path, ...)` 的 `path` 在 Android 与 HarmonyOS NEXT HAR 两端除本地文件外，实验性支持公开 `http://` / `https://` GeoJSON URL。native 不依赖 GDAL `/vsicurl/`，而是在后台通过现有 `HttpClient` 下载、做基础 JSON/HTML/空响应/80MB 上限校验，并原子写入应用私有目录 `filesDir/globecore/vector-cache/url/<hash>.geojson`，随后复用现有 `buildGeometry → Renderer VBO/拾取/贴地` 管线。

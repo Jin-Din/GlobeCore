@@ -159,6 +159,10 @@ interface GlobeCore {
   /// @Jin 统一地形事件回调；payload 为含 event 与 stats 的单行 JSON，null 反注册。
   nativeSetTerrainProviderEventCallback(handle: number, callback: ((payload: string) => void) | null): void;
 
+  // @Jin 3D Tiles/b3dm 实验入口（feature/3dtiles-b3dm）：返回图层 id，失败 -1
+  nativeAddTileset3D(handle: number, url: string): number;
+  nativeSetTileset3DVisible(handle: number, layerId: number, visible: boolean): void;
+
   // ── GDAL / 图层元信息（bridge/gdal_info、layer_info）──
   nativeGetGdalVersion(): string;
   nativeGetVectorDrivers(): string;

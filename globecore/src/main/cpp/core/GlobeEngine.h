@@ -17,6 +17,7 @@
 #include "navigator/Navigator.h"
 #include "render/Renderer.h"
 #include "terrain/CesiumTerrainProvider.h"
+#include "tileset3d/Tileset3DProvider.h"
 
 namespace globecore {
 
@@ -340,6 +341,12 @@ public:
      */
     void setTerrainProviderEventCallback(std::function<void(const std::string &)> callback);
 
+    // @Jin P2 实验性 3D Tiles/b3dm 入口；当前仅 C++ core 内部使用，尚未导出 JNI/NAPI，效果不达标可整体移除 tileset3d。
+    // @Jin 返回独立 3D Tiles 图层 id；url 指向根 tileset.json，Provider 后台加载外部 tileset 与 b3dm。
+    int addTileset3D(const std::string &url);
+    /// @Jin 控制 3D Tiles 图层显隐；索引越界忽略，隐藏后 Renderer 跳过该层全部模型。
+    void setTileset3DVisible(int layerId, bool visible);
+
 private:
     Navigator navigator_;
     // 瓦片图源图层（按加入顺序绘制）；以 unique_ptr 持有保证地址稳定，供 Renderer 长期引用
@@ -350,7 +357,11 @@ private:
     // 全幅栅格图层（整幅贴图）：独立容器/索引空间，不与 layers_ 的底图/注记索引混淆。
     // 须声明在 renderer_ 之前：Renderer 构造时引用本向量。
     std::vector<std::unique_ptr<RasterImageLayer>> rasterImageLayers_;
+    // @Jin 3D Tiles 图层同样在 renderer_ 前声明，构造后通过 setTileset3DLayers 注入稳定引用。
+    std::vector<std::unique_ptr<Tileset3DLayer>> tileset3dLayers_;
     Renderer renderer_;     // 引用 navigator_、layers_、vectorLayers_、rasterImageLayers_，须在其后声明以保证构造顺序
+    // @Jin 3D Tiles 后台 Provider 在 renderer_ 后声明，析构时先停 worker，避免迟到 GL/图层访问。
+    std::vector<std::unique_ptr<Tileset3DProvider>> tileset3dProviders_;
     // @Jin 地形 Provider 在 renderer_ 之后声明：析构时先停下载线程，再释放 Renderer。
     mutable std::mutex terrainProviderMtx_;
     std::unique_ptr<CesiumTerrainProvider> terrainProvider_;

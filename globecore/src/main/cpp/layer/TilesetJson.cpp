@@ -13,6 +13,16 @@ namespace {
 static TilesetNode parseNode(const JsonValue &nodeVal) {
     TilesetNode node;
 
+    // @Jin 解析 tile transform；缺省时保持单位矩阵，兼容只有根节点带 ECEF 变换的数据。
+    const JsonValue &transform = nodeVal.at("transform");
+    if (transform.isArray() && transform.arr.size() >= 16) {
+        for (int i = 0; i < 16; ++i) {
+            if (transform.arr[static_cast<size_t>(i)].isNumber()) {
+                node.transform[static_cast<size_t>(i)] = transform.arr[static_cast<size_t>(i)].numVal;
+            }
+        }
+    }
+
     // boundingVolume
     const JsonValue &bv = nodeVal.at("boundingVolume");
     if (bv.isObject()) {
@@ -52,7 +62,13 @@ static TilesetNode parseNode(const JsonValue &nodeVal) {
     const JsonValue &content = nodeVal.at("content");
     if (content.isObject()) {
         const JsonValue &uri = content.at("uri");
-        if (uri.isString()) node.content.uri = uri.strVal;
+        if (uri.isString()) {
+            node.content.uri = uri.strVal;
+        } else {
+            // @Jin 兼容 3D Tiles 0.0/早期工具链输出的 content.url 字段。
+            const JsonValue &legacyUrl = content.at("url");
+            if (legacyUrl.isString()) node.content.uri = legacyUrl.strVal;
+        }
     }
 
     // children (recursive)
@@ -78,11 +94,13 @@ TilesetResult parseTileset(const std::string &jsonText) {
         return result;
     }
 
-    // asset geometricError (optional, root-level)
+    // asset geometricError / gltfUpAxis (optional, root-level)
     const JsonValue &asset = root.at("asset");
     if (asset.isObject()) {
         const JsonValue &ge = asset.at("geometricError");
         if (ge.isNumber()) result.geometricError = ge.numVal;
+        const JsonValue &upAxis = asset.at("gltfUpAxis");
+        if (upAxis.isString() && !upAxis.strVal.empty()) result.gltfUpAxis = upAxis.strVal;
     }
 
     // root node
@@ -102,8 +120,9 @@ TilesetResult parseTileset(const std::string &jsonText) {
     };
     count(result.root);
 
-    LOGI("TilesetJson parsed: tiles=%d rootErr=%.1f content=%s",
-         tileCount, result.root.geometricError, result.root.content.uri.c_str());
+    LOGI("TilesetJson parsed: tiles=%d rootErr=%.1f up=%s content=%s",
+         tileCount, result.root.geometricError, result.gltfUpAxis.c_str(),
+         result.root.content.uri.c_str());
     return result;
 }
 

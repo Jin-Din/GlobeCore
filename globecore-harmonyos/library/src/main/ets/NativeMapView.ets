@@ -319,6 +319,19 @@ export struct NativeMapView {
     NativeLib.nativeSetTerrainProviderEventCallback(this.nativeHandle, listener ?? null);
   }
 
+  // @Jin 3D Tiles/b3dm 倾斜摄影实验入口（feature/3dtiles-b3dm）：加载根 tileset.json，返回图层 id（失败 -1）。
+  addTileset3D(url: string): number {
+    const layerId: number = NativeLib.nativeAddTileset3D(this.nativeHandle, url);
+    this.requestRender();
+    return layerId;
+  }
+
+  /** @Jin 切换 3D Tiles 图层显隐；layerId 为 addTileset3D 的返回值。 */
+  setTileset3DVisible(layerId: number, visible: boolean): void {
+    NativeLib.nativeSetTileset3DVisible(this.nativeHandle, layerId, visible);
+    this.requestRender();
+  }
+
   /**
    * 移除一个瓦片图源图层（index 为 addTileLayer / addRasterLayer 的加入次序，0 起）：墓碑—native
    * 置 removed + 隐藏，不 erase 底层容器，其它层 index 保持稳定；其瓦片纹理由 GL 线程下一帧释放
