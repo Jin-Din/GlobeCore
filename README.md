@@ -29,6 +29,10 @@ OpenGL ES 2.0 绘制全部在 native 完成，并内联编译了 GDAL/OGR、PROJ
 - @Jin 3D Tiles(b3dm) 倾斜摄影加载渲染：tileset 解析/SSE 调度/换轴/纹理解码全链路，仅 b3dm 三角网，实验可回退（2026-11-11 合入主线）
 - @Jin 3D Tiles 图层级高度偏移 `setTileset3DHeightOffset(layerId, meters)`（仅作用于指定模型图层）；地形服务高层级瓦片 404 时自动父级回退 + 缺失负缓存
 - @Jin 快捷定位峰顶 POI 文字标注；SDK 能力查询结论文档 `docs/sdk-capability-queries.md`；Android/Harmony 双 API HTML 帮助文档 `docs/api/`
+- @Jin 3D 低空操作参数化（fix/3d-gesture-low-altitude，实验可回退）：相机高度地板 `setMinCameraAltitudeMeters`（默认 38.2m）、地形安全净空 `setTerrainClearanceMeters`（默认 150m）可调，山区大比例尺可继续放大（真机 z16→z20）
+- @Jin 3D 射线投影平移（同分支，实验默认开、可回退）：`setRaycastPanEnabled`，逐帧屏幕射线求交替代 mPerPx 线性近似，修复带倾角低空“拖不动/发飘”；射线失败自动回退旧路径（真机同条件画面响应 16px→280px+）
+- @Jin 触摸单位口径勘误：OH_NativeXComponent 事件确认为物理像素 px（真机实测），修正 native 手势层误标 vp 的注释/内部命名，零逻辑改动
+- @Jin 图层初始化参数入参化（layer-init-options，实验可回退）：`addTileLayerWithLayerOptions(..., options)` 建层即传 `serviceZoomOffset`（options 另含 crs/tmsY/tileMatrixOffset），`addTileset3DWithOptions(url, { heightOffset })` 建层即带高度偏移；既有 setter 全保留、运行时覆盖初值，options 缺省/为 0 时旧行为完全不变
 
 **增强/改造**
 
@@ -48,6 +52,8 @@ OpenGL ES 2.0 绘制全部在 native 完成，并内联编译了 GDAL/OGR、PROJ
 - @Jin 未解决待办：陕西省级大面 3D 地形遮挡；4490 注记字小/拉伸的彻底方案；高斯泼溅 GLB 点云管线；heightOffset 步进节流防抖；政务版陕西底图（地址待核实）
 - @Jin 原“全局 LOD 偏移改造为单图层参数”待办已于 2026-11-11 完成（`setLayerZoomOffset`，Harmony 全链路 + API 文档）
 - @Jin 3D Tiles(b3dm) 已随 `feature/3dtiles-b3dm` 合入主线（2026-11-11），仍按实验能力管理：纹理解码已通，PBR/i3dm/pnts/cmpt、要素拾取、磁盘缓存、高斯泼溅未支持，回退方式见 `docs/jin-modification-records.md` 与 `docs/design/3dtiles-b3dm-plan.md`
+
+- @Jin fix/3d-gesture-low-altitude 分支（2026-11-11）：P1 低空参数化 + P2 射线平移，均为实验性运行时开关、默认值零行为变化；真机验证通过后合主线，详细数据与回退方式见 `docs/jin-modification-records.md`
 
 **工程约定**
 
@@ -85,7 +91,8 @@ SDK**。
 | 16 | 拾取 | 要素拾取、屏幕点反算经纬度、要素几何回取 | 原生 | `pickVector` / `screenToGeo` / `featureGeometry` |
 | 17 | 定位 | 蓝点/自定义图标定位标记、方位角箭头 | 原生 | `setLocationMarker` / `setLocationMarkerIcon` |
 | 18 | 坐标系 | PROJ 任意 EPSG / PROJ 文本互转，proj.db 随包分发（**Harmony LITE 包为桩，convert 恒 null，需全量包**） | 原生 | `NativeSrs.initProjData` / `convert` |
-| 19 | 手势 | 平移/捏合/惯性/双指旋转俯仰；多指切换与依次抬指防跳变 | 原生 + **@Jin 改造**（防跳） | `MapGestures` / `setOnTapListener` |
+| 19 | 手势 | 平移/捏合/惯性/双指旋转俯仰；多指切换与依次抬指防跳变；3D 射线投影平移、高度地板/地形净空可调 | 原生 + **@Jin 改造**（防跳/低空） | `MapGestures` / `setRaycastPanEnabled` / `setMinCameraAltitudeMeters` |
+| 25 | 手势 | 3D 低空操作限制参数化（相机高度地板 1~100000m、地形净空 0~10000m），默认值等同旧硬编码、不调用即旧行为 | **@Jin 新增（实验）** | `setMinCameraAltitudeMeters` / `setTerrainClearanceMeters` |
 | 20 | 调试 | 相机级别/瓦片级别查询、瓦片 LOD 运行时偏移、高分辨率密度对齐 | **@Jin 新增** | `cameraZoomLevel` / `tileZoomLevel` / `setTileLodOffset` / `setTileLodAlignDisplay` |
 | 21 | 矢量 IO | 属性 SQL 查询、要素计数、按 FID 读写回源、几何简化读取（**Harmony LITE 包为桩**） | 原生 | `NativeVector` |
 | 22 | 元信息 | 文件四至/SRS/字段清单/GDAL 驱动清单 | 原生 | `NativeLayerInfo` |

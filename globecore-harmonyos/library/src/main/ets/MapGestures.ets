@@ -1,4 +1,7 @@
 // MapGestures.ets —— 地图手势识别器（对应 Android MapGestures.kt，行为逐项对齐）。
+// @Jin 单位口径说明（2026-11 真机实测勘误）：本类消费 ArkUI TouchEvent，坐标单位为 vp；当前 SURFACE 型
+// XComponent 的触摸实际只走 native XComponentBridge（OH_NativeXComponent 事件为物理像素 px，与引擎视口同口径），
+// 本类为 ArkTS .onTouch 兜底通路，两条通路单位不同，切勿在 native 侧再乘/除 density。
 //
 // Android 版基于 GestureDetector/ScaleGestureDetector/OverScroller/Choreographer；
 // ArkUI 无对应检测器，本类基于 TouchEvent 多指坐标手写识别，输出与 GestureSink 接口不变：

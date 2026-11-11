@@ -11,7 +11,68 @@
 - 三、飞行相机与矢量地形贴地（drape 系列）
 - 四、API 文档与工程约定
 - 五、未解决待办与实验开关/回退索引
+- 六、3D 低空手势改造（fix/3d-gesture-low-altitude，2026-11-11）：单位勘误、P1 低空参数化、P2 射线投影平移
+- 七、图层初始化参数入参化 layer-init-options（fix/3d-gesture-low-altitude，2026-11-11）：serviceZoomOffset/heightOffset 建层 options 一次性传入
 
+## 六、3D 低空手势改造（fix/3d-gesture-low-altitude，2026-11-11）
+
+> 背景：真机反馈 3D 模式倾角 0 时最大只能到约 17 级、带倾角（55°/-35°）大比例尺下不能继续缩放且平移困难。先分析后改造，全部为实验性、可回退，代码注释统一 @Jin。
+
+### 0. 前置结论：手势单位口径勘误（零逻辑改动）
+
+- 真机实测（2560×1600、DPR 2.38）：在超出 vp 视口（约 1076×672）的物理像素点 (1800,1000) 长按，2D 逆地理 marker 落点 (1790~1810,988~1010) 与触点逐像素重合，结合官方文档确认 `OH_NativeXComponent_TouchEvent.x/y` 单位为**物理像素 px**而非 vp。
+- 修正 XComponentBridge/EglContext/napi 层把 px 误标为 vp 的注释与内部符号（kFling*VpPerSec→PxPerSec、xVp→xPx 等）；公开 API 无变化。MapGestures.ets 消费 ArkUI TouchEvent（真 vp），加注释标明两条通路差异。
+
+### P1. 高度地板与地形净空参数化
+
+- 旧约束：`Navigator.cpp` 编译期常量 `kMinCameraAltitudeMeters=38.2m`（相机离地地板）与 `kMinTerrainClearanceM=150m`（眼点相对视野最高地形的净空），山区低空被安全壳强制抬升，缩放无感。
+- 改造：下沉为成员 `minCameraAltitudeMeters_`（钳 1~100000m，默认 38.2）、`terrainClearanceM_`（钳 0~10000m，默认 150），经 GlobeEngine→Harmony NAPI/ArkTS、Android JNI/Kotlin 双端暴露：
+  - `setMinCameraAltitudeMeters(meters)` / `setTerrainClearanceMeters(meters)`；setter 后立即 `clampAltitude()` 生效。
+- 真机数据（太白山、倾角 55°）：默认参数按钮缩放止于 displayLevel **z16**（另发现 demo `zoom()` 自带 500m 硬下限，已放宽到 5m 以暴露 SDK 真实地板）；切 5m 地板 + 0m 净空后同场景放大到 **z20**（瓦片仍 z18，图源 maxLevel=18 的数据天花板，之上为纹理拉伸，符合预期）。
+
+### P2. 3D 射线投影平移
+
+- 旧路径：`panByPixels` 3D 分支用正射口径 `mPerPx=2·alt·tan(fov/2)/视口高` 线性近似 + 屏幕基向量折算；低 alt（z20 时约 0.05m/px）且透视压缩下手感“拖不动、发飘”。
+- 新路径（默认开）：手势 DOWN 调 `beginPanGesture(sx,sy)` 记录屏幕锚点的椭球射线交点；每帧把“锚点屏幕坐标+本帧位移”作为新屏幕点再次 `screenToGeo3DUnlocked` 求交，按两交点 ENU 差分平移中心并逐帧滚动锚点（支持长拖动）；射线落到地平线外失败时本帧自动回退线性近似、锚点保留。UP/CANCEL 调 `endPanGesture`；fling 不经会话走旧路径。
+- 开关：`setRaycastPanEnabled(false)` 整体回退；Harmony 手势桥在 DOWN/UP 自动维护会话，Android 在 NativeMapView.onTouchEvent 按 action 维护。
+- 真机数据（z20、倾角 55°，NCC 块匹配估计画面位移）：同 700px 手指拖动，旧线性路径画面仅响应 **16px**（NCC 0.92 几乎不动），射线路径响应 **≥280px**；300px 短拖响应 320px+，开关双向切换有效。
+
+### 附带发现（未在本分支修复）
+
+- 3D 长按拾取只与椭球求交（高程 0），overlay 点按 DEM 表面烘焙，倾角下 marker 与触点存在数百 px 屏幕偏差（2D 无此问题）；后续 P3 拟在拾取/缩放锚点增加 DEM 求交修正。
+- 构建 ID：`v0.1.4-20261111-low-alt-gesture-p1p2`（Renderer.cpp GLOBECORE_BUILD_ID）。
+
+## 七、图层初始化参数入参化 layer-init-options（2026-11-11）
+
+> 背景：3D Tiles 的 `heightOffset` 与瓦片层的 `serviceZoomOffset` 引擎内部早已是逐层独立状态，但公开 API 只有“先建层、后补调 setter”一条路径，宿主首帧先按 0 渲染再跳变。方案存档：`docs/design/layer-init-options-proposal.md`。实验性、可回退，注释统一 @Jin。
+
+### 1. 改造内容（双端共用 C++ 核心，Harmony 全链路已通，Android 待移植入口）
+
+- C++ 核心：`TileLayerOptions` 新增 `int serviceZoomOffset = 0`，`GlobeEngine::addTileLayer` 建层即写入并沿用 `[-3,2]` 钳制；新增 `struct Tileset3DOptions { double heightOffset = 0.0; }` 与重载 `addTileset3D(url, const Tileset3DOptions*)`，旧单参签名保留并以 nullptr 委托，建层后立即 `setHeightOffset`（Renderer 下一帧 uniform 生效，无模型重建）。
+- Harmony NAPI：新增 `nativeAddTileLayerWithLayerOptions(handle, cacheDir, url, maxLevel, overlay, options)` 与 `nativeAddTileset3DWithOptions(handle, url, options)`，options 为 JS 对象、字段全可选，缺省即旧默认值；旧 NAPI 函数全部保留。
+- ArkTS：具名接口 `TileLayerInitOptions`/`Tileset3DInitOptions` 定义在 NativeLib.ets（ArkTS 禁止对象字面量作类型），NativeMapView 再导出保持 HAR 根出口不变；门面 `addTileLayerWithLayerOptions(...)`、`addTileset3DWithOptions(url, options)`。
+- 语义：初始化值负责开箱即适配，运行时 setter（`setLayerZoomOffset`/`setTileset3DHeightOffset`）覆盖初值；默认 0/不传 options 时与改造前行为完全一致。
+- Demo：四个建层点（4326/墨卡托各影像+注记）改用 options 一次性携带 `serviceZoomOffset`，删除建后 setter 重放块；qx-dyt 改 `addTileset3DWithOptions(url, {heightOffset:-20})`，步进面板仍走 setter。
+
+### 2. 调试中发现并修复的空指针崩溃
+
+- 首版真机启动即 SIGSEGV（SEGV_MAPERR @0x7c），符号化定位到 `GlobeEngine::addTileLayer`（GlobeEngine.cpp:259）：`layers_.push_back(std::move(layer))` 后 unique_ptr 已置空，新 LOGI 仍解引用 `layer->serviceZoomOffset`，0x7c 即该成员相对对象基址的偏移。
+- 修复：move 前先把钳制结果落到本地 `appliedZoomOffset`，日志改读本地变量；`addTileset3D` 路径使用 move 前缓存的裸指针 `layerRaw`，无此问题。
+
+### 3. 真机验证（MatePad HarmonyOS NEXT，BUILD_ID v0.1.5-20261111-layer-init-options-fix1）
+
+- 默认档位切图源：hilog 两层均为 `addTileLayer ... zoomOffset=0`，且无 `setLayerZoomOffset` 重放日志。
+- 调试坞影像/注记均置 -1 后切天地图 4490：两层建层日志 `crs=EPSG:4326 geo=1 zoomOffset=-1`，中文注记渲染正常；切 ArcGIS 后同态保留 `crs=EPSG:3857 zoomOffset=-1`。
+- 恢复标准后天地图 3857/ArcGIS 建层日志回到 `zoomOffset=0`。
+- 大雁塔（qx-dyt）建层日志 `addTileset3D ... initHeightOffset=-20.000`，面板初值即 -20m；步进 +5/复位经 setter 正常覆盖，无崩溃。
+
+### 4. 回退方式
+
+- 宿主不传 options 或恒传 0 即恢复旧行为；删除 NAPI/ArkTS 两个 WithOptions 接线与 C++ 重载即可完全回退，旧签名与 setter 全保留。
+
+### 5. 遗留
+
+- Android JNI/Kotlin 尚未提供 tileset3d 与 WithOptions 入口（C++ 核心已双端共用），列入待办；heightOffset 步进节流防抖待办不变。
 ## 一、新增能力
 
 ### @Jin 实验性在线 GeoJSON Source（P0）
@@ -247,6 +308,7 @@ NativeMapView({
 - @Jin 地形 Provider 选块仍为中心 7×7 固定窗口，未升级为按 tilt/heading/FOV 的非对称视锥选块；大倾角极近景边缘可能缺 DEM。详见一、自动跟随节「已知边界」。
 - @Jin 3D Tiles(b3dm) 已合入主线（2026-11-11，仍按实验能力管理）：纹理已通、朝向已修正、heightOffset=-20m 校准贴地；高斯泼溅 GLB、PBR、拾取、磁盘缓存为后续待办。
 - @Jin 新增待办：heightOffset 步进按钮快速连点可能一次跳多档，需节流防抖；政务版陕西底图接入（服务地址与 xyz 规则待核实）。
+- @Jin 新增待办（fix/3d-gesture-low-altitude 遗留 P3）：3D 拾取/缩放锚点只与椭球求交（高程 0），而 overlay 点按 DEM 表面烘焙，倾角下长按 marker 与触点有数百 px 屏幕偏差；拟在 screenToGeo3D/zoomBy 锚点增加 DEM 求交修正，与射线平移共用地形采样。
 
 ### 实验开关 / 回退方式索引
 
@@ -265,3 +327,5 @@ NativeMapView({
 | 单图层 serviceZoomOffset | 移除 TileLayer.serviceZoomOffset 字段与 setLayerZoomOffset 调用链（默认 0 即原行为） | 一、单图层 serviceZoomOffset |
 | 地形父级回退 | 删除 CesiumTerrainProvider fetchTileWithFallback 与 missingServiceTiles_ 负缓存 | 一、地形父级回退 |
 | 3D Tiles(b3dm) | CMakeLists 移除 tileset3d/ 源清单及 GlobeEngine/Renderer 相关代码 | 一、3D Tiles 节 + docs/design/3dtiles-b3dm-plan.md |
+| P1 高度地板/地形净空 | 运行时参数不持久化，不调用 setter 即默认 38.2m/150m 旧行为；调试坞选“默认”档恢复 | 六、P1 |
+| P2 射线投影平移 | `setRaycastPanEnabled(false)` 回退 mPerPx 线性近似；默认开，射线失败自动单帧回退 | 六、P2 |

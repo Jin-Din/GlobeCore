@@ -28,7 +28,7 @@ namespace globecore {
 // 每次准备重建 HAR 前，把 GLOBECORE_BUILD_ID 改成一个全新的唯一串（例如末尾序号 +1，或带上你自定义的标记）。
 // 装机日志出现该串 = 跑的确实是你这次改过、并重新构建 + 重新链接的 HAR；
 // 未出现 / 仍是旧串 = app 还在用旧 HAR（引擎源码根本没进设备）。改完务必：重建 HAR → app Sync/ohpm 重新链接 → 卸载重装。
-#define GLOBECORE_BUILD_ID "v0.1.3-20261111-per-layer-lod1" // @Jin 构建核对：单图层 serviceZoomOffset（LOD 偏移逐层可调） // @Jin 构建核对：3DTiles 纹理解码修复版（补 main 入口、GLES2 NPOT 回退 LINEAR） // @Jin [诊断-临时] 3DTiles 8 相位诊断构建，定位后回退 // @Jin 构建核对：快捷定位 POI 与文字拆层、显式加载 Harmony 中文字体，并放大山顶文字。
+#define GLOBECORE_BUILD_ID "v0.1.5-20261111-layer-init-options-fix1" // @Jin 构建核对：P1 高度地板/地形净空参数化、P2 3D 射线投影平移（实验性可回退） // @Jin 构建核对：单图层 serviceZoomOffset（LOD 偏移逐层可调） // @Jin 构建核对：3DTiles 纹理解码修复版（补 main 入口、GLES2 NPOT 回退 LINEAR） // @Jin [诊断-临时] 3DTiles 8 相位诊断构建，定位后回退 // @Jin 构建核对：快捷定位 POI 与文字拆层、显式加载 Harmony 中文字体，并放大山顶文字。
 
 // 祖先链请求深度帽：叶子只向上请求 4 级。更深的祖先拉伸 >16× 已无兜底价值，而链条请求数是
 // 数量倍增器；尤其无金字塔栅格源，低级别粗瓦源窗口≈整幅（单块秒级～十几秒），砍深度直接减掉

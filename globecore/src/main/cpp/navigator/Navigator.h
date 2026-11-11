@@ -108,6 +108,22 @@ public:
     /// 设置细节控制因子（对齐 参考实现 TiledSurfaceImage.detailControl，默认 1.0）：越大瓦片越粗、越省流量/内存。
     void setDetailControl(double detailControl);
 
+    // @Jin P1（实验性/可回退）：3D 低空操作参数化，默认值与旧硬编码逐位一致；回退方式：不调用 setter 即恢复原行为。
+    /// 相机离地高度地板（米），默认 38.2（对齐参考实现 MercatorZoom.MIN_CAMERA_ALTITUDE）。调小可在大比例尺继续放大。
+    void setMinCameraAltitudeMeters(double meters);
+    double minCameraAltitudeMeters() const;
+    /// 地形安全净空（米），默认 150：眼点相对视野内最高地形的最小离地高度。山区调小后低空缩放不再被强制抬升。
+    void setTerrainClearanceMeters(double meters);
+    double terrainClearanceMeters() const;
+
+    // @Jin P2（实验性/可回退）：3D 射线投影平移。手势 DOWN 调 beginPanGesture 记录屏幕锚点，
+    // panByPixels 逐帧对新屏幕点射线求交、按交点 ENU 差平移中心；UP 调 endPanGesture 结束会话。
+    // 射线落在地平线外时自动回退旧的 mPerPx 线性近似；setRaycastPanEnabled(false) 可整体回退。
+    void beginPanGesture(double sxPx, double syPx);
+    void endPanGesture();
+    void setRaycastPanEnabled(bool enabled);
+    bool raycastPanEnabled() const;
+
     /// @Jin 设置相对标准屏幕误差的瓦片 LOD 偏移：负数使用更粗父瓦，正数仅用于实验更细子瓦。
     void setTileLodBias(int bias);
 
@@ -226,6 +242,16 @@ private:
     // @Jin 3D 相机把目标点抬到真实 DEM 表面；safety 是当前地形缓存中的保守最高点。
     double terrainTargetHeightM_ = 0.0;
     double terrainSafetyHeightM_ = 0.0;
+    // @Jin P1（实验性/可回退）：高度地板与地形净空可调参数，默认 38.2m/150m 与旧硬编码一致。
+    double minCameraAltitudeMeters_ = 38.2;
+    double terrainClearanceM_ = 150.0;
+    // @Jin P2（实验性/可回退）：射线平移会话状态。panRayValid_=false 时 panByPixels 走旧线性路径。
+    bool raycastPanEnabled_ = true;
+    bool panRayValid_ = false;
+    double panLastScreenX_ = 0.0;
+    double panLastScreenY_ = 0.0;
+    double panLastLon_ = 0.0;
+    double panLastLat_ = 0.0;
     // @Jin 手势静默窗口：最后一次 pan/zoom/rotate/tilt 后短时间内仍视为交互中，避免抬手瞬间预算突增造成跳帧。
     std::chrono::steady_clock::time_point lastInteractionTime_{};
     bool hasInteractionTime_ = false;

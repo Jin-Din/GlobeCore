@@ -21,6 +21,12 @@
 
 namespace globecore {
 
+// @Jin layer-init-options（实验/可回退）：3D Tiles 图层初始化校准参数；默认 0 与旧单参 addTileset3D 行为一致。
+// 字段按需扩展（后续如显示策略/缓存开关等图层级选项均可入内），宿主在创建图层时一次性传入，setter 仍保留用于运行时调节。
+struct Tileset3DOptions {
+    double heightOffset = 0.0; ///< @Jin 垂直高度偏移（米，正上负下），沿锚点 ECEF 天顶平移，建层即写入、首帧生效。
+};
+
 /**
  * GlobeEngine：globecore 模块的顶层渲染引擎对象，合并了参考实现中视图窗口与渲染引擎两层职责。
  *
@@ -289,6 +295,17 @@ public:
     /// 作为 LOD 细分判据的 densityFactor 传入 [Navigator]。由 Kotlin 侧 displayMetrics.density 传入。
     void setDisplayDensity(double density);
 
+    // @Jin P1（实验性/可回退）：3D 低空操作限制参数化，透传 Navigator；不调用即保持 38.2m/150m 默认行为。
+    /// 设置相机离地高度地板（米，钳 1~100000），调小后大比例尺可继续放大。
+    void setMinCameraAltitudeMeters(double meters);
+    /// 设置地形安全净空（米，钳 0~10000），山区调小后低空缩放不再被地形安全壳强制抬升。
+    void setTerrainClearanceMeters(double meters);
+
+    // @Jin P2（实验性/可回退）：3D 射线投影平移会话，透传 Navigator；默认开启，setRaycastPanEnabled(false) 回退线性近似。
+    void beginPanGesture(double sxPx, double syPx);
+    void endPanGesture();
+    void setRaycastPanEnabled(bool enabled);
+
     /// 设置「需重绘」回调（由 JNI 层注入，内部调用 Kotlin GLSurfaceView.requestRender）。
     /// RENDERMODE_WHEN_DIRTY 下，native 在瓦片异步加载/解码完成、需再画一帧时回调它触发重绘
     /// （对齐 参考实现 资源到位触发重绘）。回调可能在 GL 线程被调用，实现须线程安全（requestRender 是）。
@@ -348,6 +365,9 @@ public:
     // @Jin P2 实验性 3D Tiles/b3dm 入口；当前仅 C++ core 内部使用，尚未导出 JNI/NAPI，效果不达标可整体移除 tileset3d。
     // @Jin 返回独立 3D Tiles 图层 id；url 指向根 tileset.json，Provider 后台加载外部 tileset 与 b3dm。
     int addTileset3D(const std::string &url);
+    // @Jin layer-init-options（实验/可回退）：建层时一次性传入校准参数；opts=nullptr 等同旧单参入口，默认偏移 0。
+    // heightOffset 在建层后立即写入图层原子量，首帧即带偏移，免“先按 0 渲染一帧再补调跳变”；运行时仍可用 setter 覆盖。
+    int addTileset3D(const std::string &url, const struct Tileset3DOptions *opts);
     /// @Jin 控制 3D Tiles 图层显隐；索引越界忽略，隐藏后 Renderer 跳过该层全部模型。
     void setTileset3DVisible(int layerId, bool visible);
     /// @Jin 实验性：设置 3D Tiles 图层垂直高度偏移（米，正上负下），沿锚点 ECEF 天顶平移，默认 0；用于校准倾斜模型与地形的高程基准差。

@@ -306,6 +306,15 @@ internal object NativeLib {
     /** 设置屏幕密度（`displayMetrics.density`），作为 LOD 细分判据的 densityFactor（对齐 参考实现 `setupViewport(w,h,density)`） */
     external fun nativeSetDisplayDensity(handle: Long, density: Double)
 
+    // @Jin P1（实验性/可回退）：3D 低空操作限制参数化，默认 38.2m/150m，不调用即旧行为。
+    external fun nativeSetMinCameraAltitude(handle: Long, meters: Double)
+    external fun nativeSetTerrainClearance(handle: Long, meters: Double)
+
+    // @Jin P2（实验性/可回退）：射线投影平移会话与开关。
+    external fun nativeBeginPanGesture(handle: Long, sxPx: Double, syPx: Double)
+    external fun nativeEndPanGesture(handle: Long)
+    external fun nativeSetRaycastPanEnabled(handle: Long, enabled: Boolean)
+
     /**
      * 注册「需重绘」回调：RENDERMODE_WHEN_DIRTY 省电模式下，native 在瓦片异步加载/解码完成、
      * 需再画一帧时回调 [view] 的 `requestRender`（对齐 参考实现 资源到位触发重绘）。[view] 传 [NativeMapView] 实例。

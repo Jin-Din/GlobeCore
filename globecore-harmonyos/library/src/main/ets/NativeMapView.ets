@@ -13,13 +13,15 @@
 // 使用方（entry 演示页 / 宿主页面）需：
 //  - 组件 aboutToAppear 自动创建 native 实例，aboutToDisappear 自动 detach + destroy；
 //  - XComponent libraryname 'globecore' ↔ libglobecore.so（nm_modname "globecore"）。
-import { NativeLib } from './NativeLib';
+import { NativeLib, TileLayerInitOptions, Tileset3DInitOptions } from './NativeLib';
 import { Camera, AltitudeMode } from './Camera';
 import { Position } from './Position';
 import { VectorStyle } from './VectorStyle';
 import { VectorExtent } from './VectorExtent';
 import { FeatureGeometry, PickResult } from './FeatureGeometry';
 import { MapGestures, GestureSink } from './MapGestures';
+// @Jin layer-init-options：初始化选项接口下沉至 NativeLib 定义，此处再导出以保持 HAR 根出口不变。
+export type { TileLayerInitOptions, Tileset3DInitOptions };
 
 /** 组件内区域/偏移坐标（onAreaChange 的 Area.position 取值，与地理 Position 无关） */
 interface Position2D {
@@ -121,7 +123,7 @@ export struct NativeMapView {
     return this.nativeHandle;
   }
 
-  /** 视图高（vp）只读取器（GestureSink 换算 tilt 灵敏度用；宿主勿调） */
+  /** @Jin 视图高（vp，来自 onAreaChange；仅 ArkTS 兜底通路 MapGestures 的 tilt 换算用；native 手势俯仰用 viewportHeight() 物理像素 px，二者勿混用。宿主勿调） */
   getViewHeightVp(): number {
     return this.viewHeight;
   }
@@ -249,6 +251,18 @@ export struct NativeMapView {
   }
 
   /**
+   * @Jin layer-init-options（实验/可回退）：options 对象形态建层，字段全可选。
+   * serviceZoomOffset 在建层时写入（首帧选瓦即带偏移），运行时仍可用 setLayerZoomOffset 覆盖；
+   * 不传 serviceZoomOffset 或传 0 与旧 addTileLayer/addTileLayerWithOptions 行为完全一致。
+   */
+  addTileLayerWithLayerOptions(cacheDir: string, urlTemplate: string, maxLevel: number, overlay: boolean,
+    options: TileLayerInitOptions): void {
+    NativeLib.nativeAddTileLayerWithLayerOptions(this.nativeHandle, cacheDir, urlTemplate, maxLevel, overlay,
+      options);
+    this.requestRender();
+  }
+
+  /**
    * 注入一块三维地形瓦片（Cesium quantized-mesh v1.0，feature/terrain-pre）。
    *
    * [z]/[x]/[y] 用本引擎瓦片网格编号（与底图瓦片一致），[bbox] 用该地形服务自己的分块方案
@@ -331,6 +345,13 @@ export struct NativeMapView {
   setTileset3DHeightOffset(layerId: number, meters: number): void {
     NativeLib.nativeSetTileset3DHeightOffset(this.nativeHandle, layerId, meters);
     this.requestRender();
+  }
+
+  // @Jin layer-init-options（实验/可回退）：建层即传校准参数，免“先建后补”；setTileset3DHeightOffset 保留用于运行时调节并覆盖初值。
+  addTileset3DWithOptions(url: string, options: Tileset3DInitOptions): number {
+    const layerId: number = NativeLib.nativeAddTileset3DWithOptions(this.nativeHandle, url, options);
+    this.requestRender();
+    return layerId;
   }
 
   setTileset3DVisible(layerId: number, visible: boolean): void {
@@ -614,6 +635,23 @@ export struct NativeMapView {
   /** 请求一帧重绘（surface 未就绪时 native 忽略；对齐 Kotlin requestRender WHEN_DIRTY 语义） */
   requestRender(): void {
     NativeLib.nativeRequestRender(this.nativeHandle);
+  }
+
+  // @Jin P1（实验性/可回退）：3D 低空操作限制参数化门面；默认值与旧硬编码一致，不调用即旧行为，回退无需改 native。
+  /** 相机离地高度地板（米，native 钳 1~100000），调小后大比例尺可继续放大。 */
+  setMinCameraAltitudeMeters(meters: number): void {
+    NativeLib.nativeSetMinCameraAltitude(this.nativeHandle, meters);
+  }
+
+  /** 地形安全净空（米，native 钳 0~10000），山区调小后低空缩放不再被安全壳强制抬升。 */
+  setTerrainClearanceMeters(meters: number): void {
+    NativeLib.nativeSetTerrainClearance(this.nativeHandle, meters);
+  }
+
+  // @Jin P2（实验性/可回退）：射线投影平移开关；native 手势 DOWN/UP 已自动维护会话，宿主仅需切换开关。
+  /** 3D 平移是否使用屏幕射线投影（默认开）；关闭后回退 mPerPx 线性近似，用于效果对比/回退。 */
+  setRaycastPanEnabled(enabled: boolean): void {
+    NativeLib.nativeSetRaycastPanEnabled(this.nativeHandle, enabled);
   }
 
   // ── 组件生命周期与渲染接线 ──

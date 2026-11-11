@@ -189,17 +189,17 @@ void XComponentBridge::dispatchTouchEventCB(OH_NativeXComponent *component, void
 }
 
 namespace {
-constexpr float kTouchSlop = 8.0f;        // vp：越过此位移才判定拖动
+constexpr float kTouchSlop = 8.0f;        // @Jin px（物理像素，非 vp）：越过此位移才判定拖动；2026-11 真机实测勘误
 // 长按判定时长：单指按下保持（未越过 touchSlop 拖动、未抬离）超此时长即确认为长按。
 constexpr int64_t kLongPressTimeoutNs = 500LL * 1000 * 1000; // 500ms
 // 俯仰灵敏度直接采用 参考实现 口径：tiltDelta = 180° · Δcy / 视口高（见 handleTouch），不再用自定
-// 的固定「度/vp」常量（旧 0.15/0.25 为拍脑袋值，与 参考实现的 180°/屏高不一致）。
+// @Jin 的固定「度/px」常量（旧 0.15/0.25 为拍脑袋值，与 参考实现的 180°/屏高不一致）；触摸与视口均为物理像素 px。
 // 旋转/俯仰解耦阈值（度/事件）：双指连线角逐帧增量绝对值超此值判为「旋转手势」，本帧不据质心 Y 调仰角
 // （对齐 参考实现：旋转仅改 heading、tilt 为独立手势；我们保留双指俯仰故需此阈值近似解耦）
 constexpr double kRotateSuppressTiltDeg = 0.8;
-// 惯性滑动：抬指瞬时速度低于此不起惯性；高于上限钳住（防极限甩动飞出国）；单位 vp/s
-constexpr double kFlingMinVpPerSec = 60.0;
-constexpr double kFlingMaxVpPerSec = 12000.0;
+// @Jin 惯性滑动：抬指瞬时速度低于此不起惯性；高于上限钳住（防极限甩动飞出国）；单位 px/s（物理像素，2026-11 勘误，旧误标 vp/s）
+constexpr double kFlingMinPxPerSec = 60.0;  // @Jin 旧名 kFlingMinVpPerSec，单位勘误为 px/s
+constexpr double kFlingMaxPxPerSec = 12000.0; // @Jin 旧名 kFlingMaxVpPerSec，单位勘误为 px/s
 
 inline int64_t steadyNowNs() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -215,7 +215,7 @@ void XComponentBridge::handleTouch(const OH_NativeXComponent_TouchEvent &ev) {
     if (engine_ == nullptr) return;
     const uint32_t n = ev.numPoints;
     if (n == 0) return;
-    // 主触点：touchPoints[0]（x/y 为相对 XComponent 左上角的 vp 坐标，与引擎既有通路同口径）
+    // @Jin 主触点：touchPoints[0]（x/y 为相对 XComponent 左上角的物理像素 px，与引擎视口/ panByPixels 同口径；2026-11 真机实测勘误，旧注释误标 vp）
     const float x0 = ev.touchPoints[0].x;
     const float y0 = ev.touchPoints[0].y;
 
@@ -228,6 +228,8 @@ void XComponentBridge::handleTouch(const OH_NativeXComponent_TouchEvent &ev) {
             gVelRefTsNs_ = 0;
             gLongPressFired_ = false; // 新按下序列复位长按标志
             if (host_) host_->cancelFling(); // 新按下接管相机：中止进行中的惯性滑动
+            // @Jin P2（实验性/可回退）：DOWN 建立射线投影平移锚点；2D/开关关闭时 native 内部自动忽略。
+            engine_->beginPanGesture(static_cast<double>(x0), static_cast<double>(y0));
             gLastX_ = gDownX_ = x0;
             gLastY_ = gDownY_ = y0;
             if (n >= 2) {
@@ -316,6 +318,7 @@ void XComponentBridge::handleTouch(const OH_NativeXComponent_TouchEvent &ev) {
         }
         case OH_NATIVEXCOMPONENT_UP:
         case OH_NATIVEXCOMPONENT_CANCEL: {
+            engine_->endPanGesture(); // @Jin P2：抬手/取消结束射线平移会话，后续 fling 走线性路径
             const bool canceled = (ev.type == OH_NATIVEXCOMPONENT_CANCEL);
             const float ux = ev.x; // 事件级 x/y 即触发本次 UP/CANCEL 的触点
             const float uy = ev.y;
@@ -338,9 +341,9 @@ void XComponentBridge::handleTouch(const OH_NativeXComponent_TouchEvent &ev) {
                     double vx = (ux - gVelRefX_) * 1e9 / static_cast<double>(dtNs);
                     double vy = (uy - gVelRefY_) * 1e9 / static_cast<double>(dtNs);
                     const double sp = std::hypot(vx, vy);
-                    if (sp > kFlingMinVpPerSec) {
-                        if (sp > kFlingMaxVpPerSec) {
-                            const double s = kFlingMaxVpPerSec / sp;
+                    if (sp > kFlingMinPxPerSec) {
+                        if (sp > kFlingMaxPxPerSec) {
+                            const double s = kFlingMaxPxPerSec / sp;
                             vx *= s;
                             vy *= s;
                         }
@@ -368,14 +371,14 @@ void XComponentBridge::handleTouch(const OH_NativeXComponent_TouchEvent &ev) {
     }
 }
 
-void XComponentBridge::handleLongPress(float xVp, float yVp) {
-    // 渲染线程在长按候选到点（单指保持按住、未越过拖动阈值、未抬离）时触发，坐标为视图内 vp。
+void XComponentBridge::handleLongPress(float xPx, float yPx) { // @Jin 参数旧名 xVp/yVp 勘误：实际为物理像素 px
+    // @Jin 渲染线程在长按候选到点（单指保持按住、未越过拖动阈值、未抬离）时触发，坐标为视图内物理像素 px（旧注释误标 vp，2026-11 勘误）。
     // 置位标志：本次按下序列后续的 UP 不再按惯性处理（见 handleTouch 的 UP 分支门控）；
-    // 单击不否决，口径同 Android MapGestures.handleLongPress（长按与拾取消费由宿主自行决定）。
+    // @Jin 坐标为物理像素 px（同单击回调口径，旧注释误标 vp）；单击不否决，口径同 Android MapGestures.handleLongPress（长按与拾取消费由宿主自行决定）。
     gLongPressFired_ = true;
     // 透传 ArkTS 侧：longPressCb_ 为 NAPI 层注册的 TSFN 投递器（渲染线程直接入队，非阻塞），
     // 供宿主弹落点操作菜单等；未注册（纯 native 演示/未设回调）则仅置标志。
-    if (longPressCb_) longPressCb_(xVp, yVp);
+    if (longPressCb_) longPressCb_(xPx, yPx);
 }
 
 } // namespace gcohos

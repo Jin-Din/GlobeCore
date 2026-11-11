@@ -15,7 +15,7 @@ constexpr double kZoomDenomFactor = 512.0;
 // 相机高度固定下限（米）：与 app 显示级别口径同源的放大到底值
 // （log2(赤道周长/38.2)≈20，与 app MercatorZoom.MIN_CAMERA_ALTITUDE 同源），
 // 见 clampAltitude 注释
-constexpr double kMinCameraAltitudeMeters = 38.2;
+constexpr double kMinCameraAltitudeMeters = 38.2; // @Jin P1 起仅作默认值出处，运行时下限改由成员 minCameraAltitudeMeters_ 控制
 
 inline double tanHalfFov(double fovDeg) { return std::tan(fovDeg * 0.5 * kPi / 180.0); }
 } // namespace
@@ -61,6 +61,62 @@ void Navigator::setTerrainSurfaceHeights(double targetHeightM, double safetyHeig
 void Navigator::setDetailControl(double detailControl) {
     std::lock_guard<std::mutex> lk(mtx_);
     detailControl_ = detailControl > 0.0 ? detailControl : 1.0;
+}
+
+// @Jin P1（实验性/可回退）：高度地板/地形净空参数化实现。钳到安全区间，防 0 或负值导致穿地/除零。
+void Navigator::setMinCameraAltitudeMeters(double meters) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    // 允许 1m~100km：低于 1m 浮点精度不足，高于 100km 失去近地放大意义
+    minCameraAltitudeMeters_ = std::max(1.0, std::min(meters, 100000.0));
+    clampAltitude(); // 立即按新地板钳制当前高度
+}
+
+double Navigator::minCameraAltitudeMeters() const {
+    std::lock_guard<std::mutex> lk(mtx_);
+    return minCameraAltitudeMeters_;
+}
+
+void Navigator::setTerrainClearanceMeters(double meters) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    // 允许 0~10000m：0 表示不额外抬升（仅靠眼点沉地保护），上限对齐 safetyHeight 的 9000m 量级
+    terrainClearanceM_ = std::max(0.0, std::min(meters, 10000.0));
+}
+
+double Navigator::terrainClearanceMeters() const {
+    std::lock_guard<std::mutex> lk(mtx_);
+    return terrainClearanceM_;
+}
+
+// @Jin P2（实验性/可回退）：射线平移会话。仅 3D 且开关打开时建立锚点；求交失败则 panRayValid_=false，
+// 后续 panByPixels 自动走旧线性路径，手势不中断。
+void Navigator::beginPanGesture(double sxPx, double syPx) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    panRayValid_ = false;
+    if (mode_ != ViewMode::MODE_3D || !raycastPanEnabled_) return;
+    double lon = 0.0, lat = 0.0;
+    if (screenToGeo3DUnlocked(sxPx, syPx, lon, lat)) {
+        panRayValid_ = true;
+        panLastScreenX_ = sxPx;
+        panLastScreenY_ = syPx;
+        panLastLon_ = lon;
+        panLastLat_ = lat;
+    }
+}
+
+void Navigator::endPanGesture() {
+    std::lock_guard<std::mutex> lk(mtx_);
+    panRayValid_ = false; // 抬手/取消：结束会话；fling 不经会话，自动走线性路径
+}
+
+void Navigator::setRaycastPanEnabled(bool enabled) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    raycastPanEnabled_ = enabled;
+    if (!enabled) panRayValid_ = false;
+}
+
+bool Navigator::raycastPanEnabled() const {
+    std::lock_guard<std::mutex> lk(mtx_);
+    return raycastPanEnabled_;
 }
 
 void Navigator::setTileLodBias(int bias) {
@@ -150,10 +206,10 @@ Navigator::Camera3D Navigator::camera3DUnlocked() const {
         }
         const Vec3 uDir = c.up; // 水平屏幕上方（已归一、⟂ nrm）
         const Vec3 forward = uDir * std::sin(t) - nrm * std::cos(t); // 单位视线（由 -nrm 向地平线倾 t，指向 T）
-        constexpr double kMinTerrainClearanceM = 150.0;
-        // @Jin 若当前视野缓存内的山脊高于目标点，强制增加斜距，保证眼点始终位于安全地形壳之上。
+        // @Jin P1：净空改读可调成员 terrainClearanceM_（默认 150.0 与旧常量一致），山区可下调换取低空操作空间。
+        // 若当前视野缓存内的山脊高于目标点，强制增加斜距，保证眼点始终位于安全地形壳之上。
         const double altitudeAboveTerrain = std::max(
-            altitude_, terrainSafetyHeightM_ - terrainTargetHeight + kMinTerrainClearanceM);
+            altitude_, terrainSafetyHeightM_ - terrainTargetHeight + terrainClearanceM_);
         const double slantDistance = altitudeAboveTerrain / std::cos(t);
         c.eye = c.center - forward * slantDistance; // 目标不动，眼后退且保持眼高
         c.up = uDir * std::cos(t) + nrm * std::sin(t);
@@ -244,6 +300,46 @@ void Navigator::panByPixels(double dxPx, double dyPx) {
         return;
     }
     if (mode_ == ViewMode::MODE_3D) {
+        // @Jin P2（实验性/可回退）：射线投影平移优先于线性近似。手势 DOWN 时 beginPanGesture 记录
+        // 屏幕锚点的椭球交点；每帧把“锚点屏幕坐标 + 本帧位移”作为新屏幕点再次射线求交，按两交点
+        // 的 ENU 差分平移中心（内容随手）。透视近地/带倾角时方向与缩放感均正确，解决旧 mPerPx
+        // 正射近似在低空“拖不动、发飘”的问题。射线落到地平线外（intersectRay 失败）本帧自动回退
+        // 下方线性路径，锚点保留以便下一帧继续尝试；setRaycastPanEnabled(false) 可整体关闭。
+        if (raycastPanEnabled_ && panRayValid_) {
+            const double nextSx = panLastScreenX_ + dxPx;
+            const double nextSy = panLastScreenY_ + dyPx;
+            double hitLon = 0.0, hitLat = 0.0;
+            if (screenToGeo3DUnlocked(nextSx, nextSy, hitLon, hitLat)) {
+                const Wgs84Globe &gRay = Wgs84Globe::instance();
+                Vec3 prevCart, hitCart;
+                gRay.geographicToCartesian(panLastLon_, panLastLat_, 0.0, prevCart);
+                gRay.geographicToCartesian(hitLon, hitLat, 0.0, hitCart);
+                const double cLat = centerLat_ * kPi / 180.0;
+                const double cLon = centerLon_ * kPi / 180.0;
+                const Vec3 nVec{-std::sin(cLat) * std::cos(cLon), -std::sin(cLat) * std::sin(cLon), std::cos(cLat)};
+                const Vec3 eVec{-std::sin(cLon), std::cos(cLon), 0.0};
+                // 中心修正量（米）= 旧交点 − 新交点：新屏幕点对应的地面点被拖到旧锚点位置
+                const Vec3 shiftM = prevCart - hitCart;
+                const double dNorth = shiftM.dot(nVec);
+                const double dEast = shiftM.dot(eVec);
+                const double rad2DegRay = 180.0 / kPi;
+                centerLat_ = MercatorProjection::clampLatitude(
+                    centerLat_ + dNorth / EQUATORIAL_RADIUS * rad2DegRay);
+                double cosLatRay = std::cos(cLat);
+                if (cosLatRay < 1e-3) cosLatRay = 1e-3;
+                centerLon_ += dEast / (EQUATORIAL_RADIUS * cosLatRay) * rad2DegRay;
+                while (centerLon_ < -180.0) centerLon_ += 360.0;
+                while (centerLon_ >= 180.0) centerLon_ -= 360.0;
+                // 逐帧滚动锚点：支持长距离拖动，避免累计位移把屏幕点推到视口外
+                panLastScreenX_ = nextSx;
+                panLastScreenY_ = nextSy;
+                panLastLon_ = hitLon;
+                panLastLat_ = hitLat;
+                markInteractionUnlocked();
+                return;
+            }
+            // 本帧射线失败：落入下方线性近似，panRayValid_ 保留，下一帧继续尝试射线通路
+        }
         // 3D：把像素位移按「地面米/像素」换算为中心经纬度角位移，绕球滚动（地图跟随手指）。
         // 地面分辨率沿用近正下视角口径：mPerPx = 2·alt·tan(fov/2)/视口高（与 zoom 换算一致）。
         // 位移方向按相机屏幕轴折算（非正东/正北）：heading 旋转/tilt 倾视后屏幕上、右不再对齐北/东，
@@ -452,8 +548,9 @@ void Navigator::clampAltitude() {
     // 本 zoom 口径含视口高/FOV 项，与 app 显示级别 log2(周长/alt) 相差 log2(vh/212)≈3~4 级，
     // 仅按 zoom 反推时到底高度随视口高漂移（显示级别随之漂移）；固定下限使任意视口下
     // 显示级别恒钳在 ≈20（与原主界面放大量对齐，MAX_LEVEL=24 仅作 zoom 硬上限兜底）。
+    // @Jin P1：下限第二项改读可调成员（默认 38.2 与旧常量一致）；第一项 zoom=MAX_LEVEL 反推值保留。
     const double altMin = std::max(k / std::pow(2.0, static_cast<double>(MAX_LEVEL)),
-                                   kMinCameraAltitudeMeters);
+                                   minCameraAltitudeMeters_);
     // 高度上限（缩小极限）：
     //  · 3D：对齐参考实现 globe 控制器 applyLimits 口径的 maxRange = distanceToViewGlobeExtents × 2，
     //    其中 distanceToViewGlobeExtents = R/sin(fov/2) − R（整球恰好竖直填满视口的高度）。×2 后整球约占

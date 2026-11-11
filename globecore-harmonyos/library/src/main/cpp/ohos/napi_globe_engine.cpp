@@ -46,7 +46,7 @@ std::unordered_map<int64_t, gcohos::XComponentBridge *> g_bridges;
 
 // ── 单击/长按拾取：渲染线程→JS 主线程的 TSFN 投递（native 手势确认后回调 ArkTS）──
 // SURFACE 型 XComponent 触摸只进 native（ArkTS .onTouch 不触发），故单击/长按事件源在渲染线程，
-// 经 threadsafe function 转投 JS 线程触发用户回调（坐标 vp，与手势通路同口径）。
+// @Jin 经 threadsafe function 转投 JS 线程触发用户回调（坐标为物理像素 px，与手势通路同口径；旧注释误标 vp，2026-11 勘误）。
 struct TapPack {
     float x;
     float y;
@@ -382,7 +382,7 @@ napi_value NativeDetach(napi_env env, napi_callback_info info) {
 }
 
 /// nativeSetTapCallback(handle, cb)：注册/更新（cb=null 反注册）单击拾取回调。
-/// 事件源：native 手势识别确认的单击（短按未移动且未触发长按），坐标 vp。
+/// @Jin 事件源：native 手势识别确认的单击（短按未移动且未触发长按），坐标为物理像素 px（旧注释误标 vp）。
 napi_value NativeSetTapCallback(napi_env env, napi_callback_info info) {
     napi_value args[2];
     gcohos::NapiGetArgs(env, info, 2, args);
@@ -412,7 +412,7 @@ napi_value NativeSetTapCallback(napi_env env, napi_callback_info info) {
 
 /// nativeSetLongPressCallback(handle, cb)：注册/更新（cb=null 反注册）长按拾取回调。
 /// 事件源：native 手势识别确认的长按（单指保持按住、未越过拖动阈值达长按时长，对齐 Android
-/// GestureDetector.onLongPress），坐标 vp；供宿主弹落点操作菜单等。口径同 nativeSetTapCallback。
+/// @Jin GestureDetector.onLongPress），坐标为物理像素 px（旧注释误标 vp）；供宿主弹落点操作菜单等。口径同 nativeSetTapCallback。
 napi_value NativeSetLongPressCallback(napi_env env, napi_callback_info info) {
     napi_value args[2];
     gcohos::NapiGetArgs(env, info, 2, args);
@@ -639,6 +639,59 @@ napi_value NativeAddTileLayerWithOptions(napi_env env, napi_callback_info info) 
     options.crs = crs;
     options.tmsY = tmsY;
     options.tileMatrixOffset = tileMatrixOffset;
+    toGlobeEngine(handle)->addTileLayer(cacheDir, url, maxLevel, overlay, options);
+    return nullptr;
+}
+
+// @Jin layer-init-options（实验/可回退）：options 对象形态入口，避免位置参数继续膨胀。
+// options 字段全部可选：crs(string)/tmsY(bool)/tileMatrixOffset(int)/serviceZoomOffset(int)，缺省与旧 8 参函数同默认值。
+napi_value NativeAddTileLayerWithLayerOptions(napi_env env, napi_callback_info info) {
+    napi_value args[6];
+    gcohos::NapiGetArgs(env, info, 6, args);
+    int64_t handle = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return nullptr;
+    const std::string cacheDir = gcohos::NapiGetString(env, args[1]);
+    if (cacheDir.empty()) return nullptr;
+    const std::string url = gcohos::NapiGetString(env, args[2]);
+    int32_t maxLevel = 0;
+    gcohos::NapiGetInt32(env, args[3], maxLevel);
+    bool overlay = false;
+    gcohos::NapiGetBool(env, args[4], overlay);
+    globecore::TileLayerOptions options; // @Jin 显式命名空间（napi TU 内无 using namespace globecore）。
+    napi_value opts = args[5];
+    napi_valuetype optsType = napi_undefined;
+    if (opts != nullptr) napi_typeof(env, opts, &optsType);
+    if (optsType == napi_object) {
+        napi_value prop = nullptr;
+        if (napi_get_named_property(env, opts, "crs", &prop) == napi_ok) {
+            napi_valuetype vt = napi_undefined;
+            napi_typeof(env, prop, &vt);
+            if (vt == napi_string) options.crs = gcohos::NapiGetString(env, prop);
+        }
+        if (napi_get_named_property(env, opts, "tmsY", &prop) == napi_ok) {
+            napi_valuetype vt = napi_undefined;
+            napi_typeof(env, prop, &vt);
+            if (vt == napi_boolean) gcohos::NapiGetBool(env, prop, options.tmsY);
+        }
+        if (napi_get_named_property(env, opts, "tileMatrixOffset", &prop) == napi_ok) {
+            napi_valuetype vt = napi_undefined;
+            napi_typeof(env, prop, &vt);
+            if (vt == napi_number) {
+                int32_t v = 0;
+                gcohos::NapiGetInt32(env, prop, v);
+                options.tileMatrixOffset = v;
+            }
+        }
+        if (napi_get_named_property(env, opts, "serviceZoomOffset", &prop) == napi_ok) {
+            napi_valuetype vt = napi_undefined;
+            napi_typeof(env, prop, &vt);
+            if (vt == napi_number) {
+                int32_t v = 0;
+                gcohos::NapiGetInt32(env, prop, v);
+                options.serviceZoomOffset = v; // C++ 建层时统一钳 [-3,2]
+            }
+        }
+    }
     toGlobeEngine(handle)->addTileLayer(cacheDir, url, maxLevel, overlay, options);
     return nullptr;
 }
@@ -1135,6 +1188,42 @@ napi_value NativeSetDisplayDensity(napi_env env, napi_callback_info info) {
     return nullptr;
 }
 
+// @Jin P1（实验性/可回退）：相机高度地板（米），默认 38.2；不调用即旧行为。
+napi_value NativeSetMinCameraAltitude(napi_env env, napi_callback_info info) {
+    napi_value args[2];
+    gcohos::NapiGetArgs(env, info, 2, args);
+    int64_t handle = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return nullptr;
+    double meters = 38.2;
+    gcohos::NapiGetDouble(env, args[1], meters);
+    toGlobeEngine(handle)->setMinCameraAltitudeMeters(meters);
+    return nullptr;
+}
+
+// @Jin P1（实验性/可回退）：地形安全净空（米），默认 150；山区调小换取低空缩放/平移空间。
+napi_value NativeSetTerrainClearance(napi_env env, napi_callback_info info) {
+    napi_value args[2];
+    gcohos::NapiGetArgs(env, info, 2, args);
+    int64_t handle = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return nullptr;
+    double meters = 150.0;
+    gcohos::NapiGetDouble(env, args[1], meters);
+    toGlobeEngine(handle)->setTerrainClearanceMeters(meters);
+    return nullptr;
+}
+
+// @Jin P2（实验性/可回退）：射线投影平移总开关，false 回退 mPerPx 线性近似。
+napi_value NativeSetRaycastPanEnabled(napi_env env, napi_callback_info info) {
+    napi_value args[2];
+    gcohos::NapiGetArgs(env, info, 2, args);
+    int64_t handle = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return nullptr;
+    bool enabled = true;
+    gcohos::NapiGetBool(env, args[1], enabled);
+    toGlobeEngine(handle)->setRaycastPanEnabled(enabled);
+    return nullptr;
+}
+
 napi_value NativeSetLocationMarker(napi_env env, napi_callback_info info) {
     napi_value args[5];
     gcohos::NapiGetArgs(env, info, 5, args);
@@ -1349,6 +1438,30 @@ napi_value NativeAddTileset3D(napi_env env, napi_callback_info info) {
     return gcohos::NapiMakeInt32(env, layerId);
 }
 
+// @Jin layer-init-options（实验/可回退）：建层即传 heightOffset，首帧带偏移，免“先建后补”跳变。
+// 入参 (handle, url, options)，options.heightOffset 缺省/非 number 时按 0 处理，与旧单参入口行为一致。
+napi_value NativeAddTileset3DWithOptions(napi_env env, napi_callback_info info) {
+    napi_value args[3];
+    gcohos::NapiGetArgs(env, info, 3, args);
+    int64_t handle = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return gcohos::NapiMakeInt32(env, -1);
+    const std::string url = gcohos::NapiGetString(env, args[1]);
+    if (url.empty()) return gcohos::NapiMakeInt32(env, -1);
+    globecore::Tileset3DOptions options;
+    napi_valuetype optsType = napi_undefined;
+    if (args[2] != nullptr) napi_typeof(env, args[2], &optsType);
+    if (optsType == napi_object) {
+        napi_value prop = nullptr;
+        if (napi_get_named_property(env, args[2], "heightOffset", &prop) == napi_ok) {
+            napi_valuetype vt = napi_undefined;
+            napi_typeof(env, prop, &vt);
+            if (vt == napi_number) gcohos::NapiGetDouble(env, prop, options.heightOffset);
+        }
+    }
+    const int layerId = toGlobeEngine(handle)->addTileset3D(url, &options);
+    return gcohos::NapiMakeInt32(env, layerId);
+}
+
 // @Jin 切换 3D Tiles 图层显隐；layerId 来自 nativeAddTileset3D 的返回值。
 napi_value NativeSetTileset3DVisible(napi_env env, napi_callback_info info) {
     napi_value args[3];
@@ -1434,6 +1547,11 @@ napi_value RegisterGlobeEngine(napi_env env, napi_value exports) {
         {"nativeScreenToGeo", nullptr, NativeScreenToGeo, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeFeatureGeometry", nullptr, NativeFeatureGeometry, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeSetDisplayDensity", nullptr, NativeSetDisplayDensity, nullptr, nullptr, nullptr, napi_default, nullptr},
+    // @Jin P1（实验性/可回退）：低空操作限制参数化 NAPI 注册
+    {"nativeSetMinCameraAltitude", nullptr, NativeSetMinCameraAltitude, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"nativeSetTerrainClearance", nullptr, NativeSetTerrainClearance, nullptr, nullptr, nullptr, napi_default, nullptr},
+    // @Jin P2（实验性/可回退）：射线平移开关 NAPI 注册
+    {"nativeSetRaycastPanEnabled", nullptr, NativeSetRaycastPanEnabled, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeSetLocationMarker", nullptr, NativeSetLocationMarker, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeSetLocationMarkerIcon", nullptr, NativeSetLocationMarkerIcon, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeSetFontPath", nullptr, NativeSetFontPath, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -1451,6 +1569,9 @@ napi_value RegisterGlobeEngine(napi_env env, napi_value exports) {
         {"nativeSetTerrainProviderEventCallback", nullptr, NativeSetTerrainProviderEventCallback, nullptr, nullptr, nullptr, napi_default, nullptr},
         // @Jin 3D Tiles/b3dm 实验性入口（feature/3dtiles-b3dm）：加载倾斜摄影 tileset 与图层显隐。
         {"nativeAddTileset3D", nullptr, NativeAddTileset3D, nullptr, nullptr, nullptr, napi_default, nullptr},
+    // @Jin layer-init-options（实验/可回退）：初始化 options 入口注册
+    {"nativeAddTileset3DWithOptions", nullptr, NativeAddTileset3DWithOptions, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"nativeAddTileLayerWithLayerOptions", nullptr, NativeAddTileLayerWithLayerOptions, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeSetTileset3DVisible", nullptr, NativeSetTileset3DVisible, nullptr, nullptr, nullptr, napi_default, nullptr},
         // @Jin 实验性 3D Tiles 高度偏移 NAPI 注册（可回退：删除本行即取消导出）。
         {"nativeSetTileset3DHeightOffset", nullptr, NativeSetTileset3DHeightOffset, nullptr, nullptr, nullptr, napi_default, nullptr},

@@ -57,14 +57,14 @@ public:
     /// 请求一帧重绘（surface 未就绪时忽略，就绪后由 host 脏标记通路驱动）。供 NAPI 层唤醒。
     void requestRender();
 
-    /// 单击确认回调（vp 坐标，渲染线程触发；NAPI 层注册 TSFN 转投 ArkTS 主线程）。
+    /// @Jin 单击确认回调（px 物理像素坐标，渲染线程触发；NAPI 层注册 TSFN 转投 ArkTS 主线程；旧注释误标 vp，2026-11 勘误）。
     /// 可在 attach 前后任意时刻调用：早于 attach 则缓存，attach 建 host 后补装。
     void setSingleTapCallback(std::function<void(float, float)> cb) {
         tapCb_ = std::move(cb);
         if (host_) host_->setSingleTapCallback(tapCb_);
     }
 
-    /// 长按确认回调（vp 坐标，渲染线程长按候选到点触发；NAPI 层注册 TSFN 转投 ArkTS 主线程）。
+    /// @Jin 长按确认回调（px 物理像素坐标，渲染线程长按候选到点触发；NAPI 层注册 TSFN 转投 ArkTS 主线程；旧注释误标 vp）。
     /// 补装时机同 setSingleTapCallback：早于 attach 则缓存，attach 建 host 后补装。
     void setLongPressCallback(std::function<void(float, float)> cb) {
         longPressCb_ = std::move(cb);
@@ -74,10 +74,10 @@ public:
 private:
     XComponentBridge(OH_NativeXComponent *component, globecore::GlobeEngine *engine);
 
-    /// 长按到点回调（渲染线程经 host 触发，坐标 vp）：本按下序列标记为长按，后续 UP 不再
+    /// @Jin 长按到点回调（渲染线程经 host 触发，坐标为 px 物理像素；旧注释误标 vp）：本按下序列标记为长按，后续 UP 不再
     /// 当惯性处理（单击不否决，口径同 Android MapGestures.handleLongPress），并透传给
     /// longPressCb_（NAPI 层 TSFN 转投 ArkTS 主线程，供宿主弹落点操作菜单等）。
-    void handleLongPress(float xVp, float yVp);
+    void handleLongPress(float xPx, float yPx); // @Jin 参数旧名 xVp/yVp 勘误为 px
 
     /// 静态 trampolines：OH_NativeXComponent 回调只给 component 指针，经组件注册表反查实例。
     static void onSurfaceCreatedCB(OH_NativeXComponent *component, void *window);
@@ -88,7 +88,7 @@ private:
     /// 本实例的手势识别（在主线程 dispatchTouchEventCB 内驱动 engine_ 相机；等价于原 ArkTS→NAPI 通路）
     void handleTouch(const OH_NativeXComponent_TouchEvent &ev);
 
-    // ── 手势识别状态（对齐 MapGestures.ets 语义，坐标单位 vp）──
+    // @Jin ── 手势识别状态（对齐 MapGestures.ets 语义，坐标单位为物理像素 px；旧注释误标 vp，2026-11 真机实测勘误）──
     bool gDown_ = false;      // 是否处于一次按下序列
     bool gDragging_ = false;  // 单指已越过 touchSlop（进入平移）
     bool gPinching_ = false;  // 双指捏合进行中
