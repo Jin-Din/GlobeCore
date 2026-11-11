@@ -5,7 +5,8 @@
       {
         "name": "default",
         "signingConfig": "default",
-        "targetSdkVersion": "26.0.0",
+        // @Jin 打包修复：API10+ 要求 主版本.次版本.修订(API) 形态，纯数字串 26.0.0 会致 hvigor 00306042 报错；对齐 demo 工程
+        "targetSdkVersion": "6.1.0(23)",
         "compatibleSdkVersion": "5.0.0(12)",
         "runtimeOS": "HarmonyOS",
         "buildOption": {

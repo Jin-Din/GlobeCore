@@ -38,9 +38,23 @@ function createVersionedHarPlugin(): any {
           }
           // 作用域名 @zys/globecore 含 '/' 不能作文件名，替换为 '-'
           const safeName = pkgName.replace(/\//g, '-');
-          const dstHar = path.join(outDir, `${safeName}-${version}.har`);
+          // @Jin 打包约定（AGENTS.md 第 3 节）：分发包文件名必须带构建形态标记 -lite/-full。
+          // 从本模块 build-profile.json5 的 externalNativeOptions.arguments 解析 GLOBECORE_LITE 取值，
+          // 解析失败按 lite 兜底（当前工程默认即 ON），避免静默产出无标记包。
+          let buildFlavor = 'lite';
+          try {
+            const libProfile = fs.readFileSync(path.join(moduleDir, 'build-profile.json5'), 'utf-8');
+            const liteMatch = libProfile.match(/-DGLOBECORE_LITE=(ON|OFF|TRUE|FALSE)/i);
+            if (liteMatch) {
+              const v = liteMatch[1].toUpperCase();
+              buildFlavor = (v === 'OFF' || v === 'FALSE') ? 'full' : 'lite';
+            }
+          } catch (e) {
+            console.warn('[createVersionedHar] 读取 build-profile.json5 失败，按 lite 命名：' + e);
+          }
+          const dstHar = path.join(outDir, `${safeName}-${version}-${buildFlavor}.har`);
           fs.copyFileSync(srcHar, dstHar);
-          console.log(`[createVersionedHar] 已生成版本化 HAR：${dstHar}`);
+          console.log(`[createVersionedHar] 已生成版本化 HAR（${buildFlavor}）：${dstHar}`);
         },
       });
     },

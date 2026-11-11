@@ -1,6 +1,7 @@
 {
   "name": "@zys/globecore",
-  "version": "0.1.3",
+  // @Jin 出包前与 dist 交付版本命名对齐（原 0.1.3 滞后）
+  "version": "0.1.5-dev",
   "description": "GlobeCore 独立实现 C++ 渲染引擎的鸿蒙（HarmonyOS NEXT）地图渲染 HAR：ArkTS 门面 + NAPI + 共享 C++ 引擎（静态链接 GDAL/PROJ/libcurl 等）",
   "main": "Index.ets",
   "author": {

@@ -53,6 +53,7 @@ OpenGL ES 2.0 绘制全部在 native 完成，并内联编译了 GDAL/OGR、PROJ
 **工程约定**
 
 - @Jin Harmony 分发包文件名强制带 `-lite`/`-full` 形态标记；打包需求未明确形态时必须先确认（完整规则见根 `AGENTS.md`）
+- @Jin Harmony 标准 .har 出包链路已打通（2026-11-11）：独立工程 `globecore-harmonyos/` 执行 `createVersionedHar`，hvigorfile 插件自动按 GLOBECORE_LITE 追加 -lite/-full 后缀；HAR 内版本号须为合法 semver（0.1.5-dev，非四段 0.1.5.0-dev）；实测记录见 `docs/design/harmony-har-packaging-plan.md` 第 6 节
 
 ## 它是干什么的
 
