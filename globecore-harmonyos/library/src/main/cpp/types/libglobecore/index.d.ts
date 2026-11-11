@@ -72,6 +72,8 @@ interface GlobeCore {
   /// @Jin 当前相机在指定图层上限下的目标瓦片 LOD（3D 四叉树仍可能按距离混入更粗瓦片）。
   nativeGetTileZoomLevel(handle: number, maxLevel: number): number;
   /// @Jin 实验性瓦片 LOD 偏移：负数更粗，0 恢复标准细节。
+  /** @Jin 单图层瓦片 LOD 偏移（实验、可回退）：index 为 addTileLayer 加入次序，offset 钳制 [-3,2]，0 恢复标准；只影响该图层 */
+  nativeSetLayerZoomOffset(handle: number, index: number, offset: number): void;
   nativeSetTileLodOffset(handle: number, offset: number): void;
   /// @Jin 实验模式：目标瓦片 LOD 与相机地图显示级别保持一致。
   nativeSetTileLodAlignDisplay(handle: number, align: boolean): void;

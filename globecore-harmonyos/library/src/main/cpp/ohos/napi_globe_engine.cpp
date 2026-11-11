@@ -656,6 +656,20 @@ napi_value NativeSetLayerVisible(napi_env env, napi_callback_info info) {
     return nullptr;
 }
 
+// @Jin 单图层瓦片 LOD 偏移（实验、可回退）：只影响 index 指定图层，offset 引擎内钳制 [-3,2]，0 恢复标准。
+napi_value NativeSetLayerZoomOffset(napi_env env, napi_callback_info info) {
+    napi_value args[3];
+    gcohos::NapiGetArgs(env, info, 3, args);
+    int64_t handle = 0;
+    int32_t index = -1;
+    int32_t offset = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return nullptr;
+    gcohos::NapiGetInt32(env, args[1], index);
+    gcohos::NapiGetInt32(env, args[2], offset);
+    toGlobeEngine(handle)->setLayerZoomOffset(index, offset);
+    return nullptr;
+}
+
 napi_value NativeAddRasterLayer(napi_env env, napi_callback_info info) {
     napi_value args[3];
     gcohos::NapiGetArgs(env, info, 3, args);
@@ -1387,6 +1401,8 @@ napi_value RegisterGlobeEngine(napi_env env, napi_value exports) {
         {"nativeAddTileLayer", nullptr, NativeAddTileLayer, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeAddTileLayerWithOptions", nullptr, NativeAddTileLayerWithOptions, nullptr, nullptr, nullptr, napi_default, nullptr}, // @Jin 4326/4490 地理在线瓦片适配
         {"nativeSetLayerVisible", nullptr, NativeSetLayerVisible, nullptr, nullptr, nullptr, napi_default, nullptr},
+    // @Jin 单图层 serviceZoomOffset 运行时调节（默认 0，不改变既有调用方行为）。
+    {"nativeSetLayerZoomOffset", nullptr, NativeSetLayerZoomOffset, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeAddRasterLayer", nullptr, NativeAddRasterLayer, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeRemoveTileLayer", nullptr, NativeRemoveTileLayer, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeGetRasterAddError", nullptr, NativeGetRasterAddError, nullptr, nullptr, nullptr, napi_default, nullptr},

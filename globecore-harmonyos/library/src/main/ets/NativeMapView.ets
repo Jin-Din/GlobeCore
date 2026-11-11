@@ -483,6 +483,16 @@ export struct NativeMapView {
     return NativeLib.nativeGetTileZoomLevel(this.nativeHandle, maxLevel);
   }
 
+  /**
+   * @Jin 单图层瓦片 LOD 偏移（实验、可回退）：只改变 index 指定图层的取瓦级别，
+   * 不影响相机与其他图层；offset 负数请求更粗父瓦（如天地图 4490 注记字号偏小），
+   * 钳制 [-3,2]，0 恢复该层标准行为。index 为 addTileLayer/addTileLayerWithOptions 的加入次序（0 起）。
+   */
+  setLayerZoomOffset(index: number, offset: number): void {
+    NativeLib.nativeSetLayerZoomOffset(this.nativeHandle, index, offset);
+    this.requestRender();
+  }
+
   /** @Jin 实验性瓦片 LOD 偏移：负数更粗、0 恢复标准细节；调用后立即请求重绘。 */
   setTileLodOffset(offset: number): void {
     NativeLib.nativeSetTileLodOffset(this.nativeHandle, offset);

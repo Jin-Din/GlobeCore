@@ -29,6 +29,15 @@ OpenGL ES 2.0 绘制全部在 native 完成，并内联编译了 GDAL/OGR、PROJ
 - @Jin qx-dyt 经验值：真机在 210 地形下目视校准 heightOffset=**-20m** 贴合最佳（离线量化预判 -9m，实测残差更大，详见 docs/design/3dtiles-b3dm-plan.md D/E 节）；Demo 已对该数据集写死 -20m（仅演示层，SDK 默认仍 0），换数据集需重新校准。
 - @Jin 待办：高斯泼溅（KHR_gaussian_splatting）GLB 点云模型不支持，四套柏树/黄帝陵数据挂起；高度偏移步进按钮快速连点可能一次跳多档，后续加节流防抖。
 
+### @Jin 单图层 serviceZoomOffset（LOD 偏移逐层可调，feature/3dtiles-b3dm，2026-11-11）
+
+- @Jin 背景：原 `setTileLodOffset` 是 Navigator 级**全局**偏移，影像与注记一起受影响；EPSG:4490 注记字号偏小等场景只需要调单个图层。本次把 LOD 偏移下沉为**每图层参数**，与全局开关正交、可叠加（最终级别 = 全局 LOD 结果 + 本层偏移）。
+- @Jin C++ 改动：`TileLayer` 新增 `int serviceZoomOffset = 0`（默认 0，行为与改造前完全一致）；`GlobeEngine::setLayerZoomOffset(index, offset)` 钳制 [-3,2] 写入图层；`Renderer` 2D 路径在 `nav_.tileLevel(maxLevel)` 结果上逐层叠加并钳制到 [MIN_LEVEL, maxLevel]，下游可见范围/请求/祖先链/绘制统一使用调整后的 level；3D 路径同步调整 targetLevel、四叉树细化帽与 SSE 因子（`ldexp(1,-offset)`，口径同 `Navigator::tileLodSseScale`），交互 LOD 迟滞记忆增加偏移维度避免不同偏移图层互相污染，surface/纹理/图层 4 处重置点同步清空。
+- @Jin Harmony 链路：NAPI `nativeSetLayerZoomOffset(handle,index,offset)` → `NativeLib.nativeSetLayerZoomOffset` → ArkTS `NativeMapView.setLayerZoomOffset(index, offset)`（index 为 addTileLayer/addTileLayerWithOptions 加入次序，0 起）。全局 `setTileLodOffset` 保留不动，旧调用方零影响。回退：删除 serviceZoomOffset 字段与上述调用链即恢复。
+- @Jin Demo 改造（GlobeCoreDemo，不在本 git 仓）：①「调试」面板原全局两按钮替换为影像层/注记层各自 标准/-1/-2 六按钮，切换图源重建图层后按当前档位自动重放；②右上角新增视角状态 HUD（地图级别、倾斜角 tilt、俯仰角 pitch=tilt-90（Cesium 口径）、航向 heading），500ms 轮询；③启动即在 3D 模式自动开启地形层（保持全球正射视角，不套 55° 倾角）；④左侧功能坞加最大高度约束（屏高-顶部 132vp-底部安全区 76vp），矮屏内部滚动，不再与左下角「快捷定位」重叠；⑤「模型」面板按钮更名「大雁塔」（数据集 qx-dyt 即西安大雁塔倾斜摄影）。
+- @Jin 真机验证（MatePad 2560×1600，DPR 2.38，BUILD_ID `v0.1.3-20261111-per-layer-lod1`）：注记层设 -2 后同视角影像层请求 z6、注记层请求 z4，日志 `GlobeEngine setLayerZoomOffset index=1 offset=-1` 生效，两层独立互不影响；HUD/自动地形/坞区不重叠/按钮更名均人工确认。
+- @Jin 注：本参数与 EPSG:4490 重采样路径中曾实验后回退的同名服务级参数不是同一处代码——本次是渲染选瓦层的通用逐层偏移，对墨卡托/地理图源均生效；4490 注记“字小+轻微拉伸”的二选一结论不变（见下文 epsg-4490 章节）。
+
 ### @Jin 实验性在线 GeoJSON Source（P0）
 
 - @Jin `NativeMapView.addVectorLayer(path, ...)` 的 `path` 在 Android 与 HarmonyOS NEXT HAR 两端除本地文件外，实验性支持公开 `http://` / `https://` GeoJSON URL。native 不依赖 GDAL `/vsicurl/`，而是在后台通过现有 `HttpClient` 下载、做基础 JSON/HTML/空响应/80MB 上限校验，并原子写入应用私有目录 `filesDir/globecore/vector-cache/url/<hash>.geojson`，随后复用现有 `buildGeometry → Renderer VBO/拾取/贴地` 管线。
@@ -52,7 +61,7 @@ OpenGL ES 2.0 绘制全部在 native 完成，并内联编译了 GDAL/OGR、PROJ
 - @Jin 真机验证（2026-10-30，设备 5KLBB25911200313，LITE 包）：日志确认 geographic source on=1 maxGeoLevel0=17 tmsY=0 matrixOffset=1，影像/注记两层均出现 geo4490 reproject（首屏 online=1、随后缓存 online=0），无服务瓦获取失败/尺寸异常/映射超限；3D 全球中国轮廓、2D 放大到中国（地图 z4/瓦片 z7）城市与道路注记、以及太白山开地形飞行后的影像地形贴合均正确。
 - @Jin 回退：不调用 addTileLayerWithOptions（或 Demo URL 改回 img_w/cia_w、缓存目录改回）即完全恢复旧墨卡托直连；地理源默认关闭。
 - @Jin 2026-10-31 修复 4490 注记上下拉伸（两个叠加原因）：①主因——早期地理源按赤道经度 1:1 选服务级 s=z-1，但地理切片像元在地面是 cosφ(宽)×1(高) 的扁矩形，垂直方向源分辨率只有需求的 cosφ 倍（34°≈0.83），输出时垂直被整体放大约 1/cosφ≈1.20 倍，且与层级无关，表现为中文注记字整体拉高（影像因是自然纹理几乎无感）；改为 s=z，每个输出像元从源约 2(宽)×2cosφ(高) 像元重采样，恰好抵消源像元扁率，地面各向同性、与 3857 原生注记同比例。②次因——瓦内 256 行纬度原按角点线性排布，中纬度低层级另含 ±1%~3% 的瓦内不均匀；已改为逐行按真实墨卡托反投影取纬度（经度本就线性），瓦内误差归零，每瓦仅增 256 次 atan·sinh。结果缓存目录升级为 tianditu-c4326-v2-* 与旧结果隔离。
-- @Jin 2026-10-31 遗留问题（暂不修，记录在案；详见 docs/design/epsg-4490-raster-tile-implementation.md §10）：天地图 4490 的中文**栅格注记 cia_c** 仍存在两个观感问题，二者同源、当前方案 A 无法同时消除——①**字偏小**：固定 s=z 时 c 套图在更细矩阵重新制图，注记更密更小（西安 z8 实测字高中位：cia_w≈12px，cia_c 经 s=z 重投影≈8.5px），全球小比例视角尤其明显；②**轻微上下拉伸**：c 瓦像元在地面是 cosφ(宽)×1(高) 的扁矩形，天地图把方块字栅格化在扁像元上，字本身在地面已被南北拉长 1/cosφ（33.7°≈1.20 倍），重投影/墨卡托保角只是如实呈现；合成实验证明无论服务级取 s=z / z-1 / z-2，结果高宽比恒约 1.20，改级差只能放大缩小字与改变模糊度，不能消除拉伸。曾实验每图层 serviceZoomOffset（对 cia_c 传 -1 取粗一级可把字调大到接近 cia_w，但纵向 1.2 倍拉伸随之更明显），经评估方案不妥，**已整体回退**为固定 s=z、接口恢复 8 参、缓存回到 c4326-v2。后续推荐方向：影像走 img_c、中文注记改用墨卡托 cia_w（每层本就支持独立方案），或注记改客户端矢量文字标注；如坚持 cia_c 只能在“字小但拉伸不明显（现状）”与“字大但拉长明显”间二选一。另有与之正交的待办：把全局瓦片 LOD 偏移改造成单图层参数（现 setTileLodOffset 为全局，影像/注记一起受影响）。影像层 img_c 无上述注记问题。
+- @Jin 2026-10-31 遗留问题（暂不修，记录在案；详见 docs/design/epsg-4490-raster-tile-implementation.md §10）：天地图 4490 的中文**栅格注记 cia_c** 仍存在两个观感问题，二者同源、当前方案 A 无法同时消除——①**字偏小**：固定 s=z 时 c 套图在更细矩阵重新制图，注记更密更小（西安 z8 实测字高中位：cia_w≈12px，cia_c 经 s=z 重投影≈8.5px），全球小比例视角尤其明显；②**轻微上下拉伸**：c 瓦像元在地面是 cosφ(宽)×1(高) 的扁矩形，天地图把方块字栅格化在扁像元上，字本身在地面已被南北拉长 1/cosφ（33.7°≈1.20 倍），重投影/墨卡托保角只是如实呈现；合成实验证明无论服务级取 s=z / z-1 / z-2，结果高宽比恒约 1.20，改级差只能放大缩小字与改变模糊度，不能消除拉伸。曾实验每图层 serviceZoomOffset（对 cia_c 传 -1 取粗一级可把字调大到接近 cia_w，但纵向 1.2 倍拉伸随之更明显），经评估方案不妥，**已整体回退**为固定 s=z、接口恢复 8 参、缓存回到 c4326-v2。后续推荐方向：影像走 img_c、中文注记改用墨卡托 cia_w（每层本就支持独立方案），或注记改客户端矢量文字标注；如坚持 cia_c 只能在“字小但拉伸不明显（现状）”与“字大但拉长明显”间二选一。原“与之正交的待办：把全局瓦片 LOD 偏移改造成单图层参数”已于 2026-11-11 完成，通用单图层 API 为 `NativeMapView.setLayerZoomOffset(index, offset)`（见上文“单图层 serviceZoomOffset”章节），但如前述，它只能整体放大/缩小 cia_c 的字并同步改变拉伸程度，不能消除 1.20 倍上下拉伸本身。影像层 img_c 无上述注记问题。
 
 ### @Jin SDK 能力查询与快捷定位峰顶标注
 
@@ -664,6 +673,7 @@ console.info(view.terrainProviderStatus());
 - 密度修正：宿主应把真实 DPR 传入 `NativeMapView.density`；Demo 现使用 `display.getDefaultDisplaySync().densityPixels`。同一全球视角下，固定 `density=1.0` 时目标瓦片为 z4，传入 2.38 后标准目标瓦片为 z3，与此前人工确认字体较正常的“LOD-1”观测一致。
 - 新增只读诊断：`GlobeEngine::currentTileLevel(maxLevel)` 返回当前图层目标瓦片 LOD；NAPI/ArkTS 门面提供 `tileZoomLevel(maxLevel)`，供宿主同屏显示“地图级别 / 瓦片级别”。3D 四叉树仍会按距离和 SSE 在目标 LOD 附近混入更粗叶。
 - 新增运行时实验：`GlobeEngine::setTileLodOffset(-3..2)` 在标准屏幕误差结果上做整数偏移；负数使用更粗父瓦，可减少请求量并增大注记视觉字号，0 恢复标准。
+- @Jin 2026-11-11 起新增**单图层**版本 `GlobeEngine::setLayerZoomOffset(index, -3..2)`（Harmony 门面 `NativeMapView.setLayerZoomOffset`），只影响指定图层、与全局偏移正交叠加；全局 API 保留，细节见上文“单图层 serviceZoomOffset”章节。
 - 新增同级实验：`GlobeEngine::setTileLodAlignDisplay(true)` 强制目标瓦片 LOD 等于仅由相机高度推导的 `displayLevel()`，用于测试“地图级=瓦片级”。该模式忽略视口高、FOV 与 DPR 的屏幕误差补偿，3D 全球大视口下会明显偏粗，仅建议作为对照，不建议直接作为默认策略。
 - Harmony 门面：`NativeMapView.tileZoomLevel()`、`NativeMapView.setTileLodOffset()`、`NativeMapView.setTileLodAlignDisplay()`；NAPI 名称为 `nativeGetTileZoomLevel`、`nativeSetTileLodOffset`、`nativeSetTileLodAlignDisplay`。
 - 缓存与限流：`TileLoader` 仍严格执行“磁盘缓存有效图像 → 未命中才联网”；HTTP 非 2xx（含天地图 429）不会写入缓存。若缓存中有历史瓦片，即使 token 被限流也应先显示缓存；卸载应用会删除沙箱缓存，冷启动后只能联网。

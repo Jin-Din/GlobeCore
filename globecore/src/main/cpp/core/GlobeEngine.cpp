@@ -265,6 +265,18 @@ void GlobeEngine::setLayerVisible(int index, bool visible) {
     if (renderCallback_) renderCallback_();
 }
 
+void GlobeEngine::setLayerZoomOffset(int index, int offset) {
+    // @Jin 单图层 LOD（实验、可回退）：与全局 setTileLodOffset 同口径钳制 [-3,2]，只写本层标志，
+    // Renderer 2D/3D 取瓦时在全局 LOD 结果上叠加本层偏移；默认 0，行为与改造前完全一致。
+    std::lock_guard<std::mutex> lock(layersMtx_);
+    if (index < 0 || static_cast<size_t>(index) >= layers_.size()) return;
+    const int clamped = std::max(-3, std::min(2, offset));
+    layers_[static_cast<size_t>(index)]->serviceZoomOffset = clamped;
+    LOGI("GlobeEngine setLayerZoomOffset index=%d offset=%d", index, clamped);
+    // 取瓦级别变化需要立即重选可见叶并重排请求，主动请求一帧（与 setLayerVisible 同口径）。
+    if (renderCallback_) renderCallback_();
+}
+
 void GlobeEngine::removeTileLayer(int index) {
     if (index < 0 || static_cast<size_t>(index) >= layers_.size()) return;
     TileLayer &layer = *layers_[static_cast<size_t>(index)];

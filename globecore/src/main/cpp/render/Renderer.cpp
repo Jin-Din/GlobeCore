@@ -28,7 +28,7 @@ namespace globecore {
 // 每次准备重建 HAR 前，把 GLOBECORE_BUILD_ID 改成一个全新的唯一串（例如末尾序号 +1，或带上你自定义的标记）。
 // 装机日志出现该串 = 跑的确实是你这次改过、并重新构建 + 重新链接的 HAR；
 // 未出现 / 仍是旧串 = app 还在用旧 HAR（引擎源码根本没进设备）。改完务必：重建 HAR → app Sync/ohpm 重新链接 → 卸载重装。
-#define GLOBECORE_BUILD_ID "v0.1.3-20261111-terrain-fallback-heightoffset3" // @Jin 构建核对：3DTiles 纹理解码修复版（补 main 入口、GLES2 NPOT 回退 LINEAR） // @Jin [诊断-临时] 3DTiles 8 相位诊断构建，定位后回退 // @Jin 构建核对：快捷定位 POI 与文字拆层、显式加载 Harmony 中文字体，并放大山顶文字。
+#define GLOBECORE_BUILD_ID "v0.1.3-20261111-per-layer-lod1" // @Jin 构建核对：单图层 serviceZoomOffset（LOD 偏移逐层可调） // @Jin 构建核对：3DTiles 纹理解码修复版（补 main 入口、GLES2 NPOT 回退 LINEAR） // @Jin [诊断-临时] 3DTiles 8 相位诊断构建，定位后回退 // @Jin 构建核对：快捷定位 POI 与文字拆层、显式加载 Harmony 中文字体，并放大山顶文字。
 
 // 祖先链请求深度帽：叶子只向上请求 4 级。更深的祖先拉伸 >16× 已无兜底价值，而链条请求数是
 // 数量倍增器；尤其无金字塔栅格源，低级别粗瓦源窗口≈整幅（单块秒级～十几秒），砍深度直接减掉
@@ -1149,6 +1149,7 @@ void Renderer::onSurfaceCreated() {
     // @Jin exp1f 的交互 LOD 迟滞只在有效纹理上下文成立；surface 重建后必须重新学习稳定层级。
     lastIdleGlobeTileLevel_ = -1;
     lastIdleGlobeTileMaxLevel_ = -1;
+    lastIdleGlobeTileZoomOffset_ = -99; // @Jin 单图层 LOD 记忆随上下文/纹理/图层重置一并失效
     vboDynamic_ = 0;
     vboUnitQuad_ = 0;
     // 字形图集 GL 纹理属旧上下文：放弃旧句柄（不 glDelete），保留 CPU 图集与字形表；
@@ -1478,6 +1479,7 @@ void Renderer::clearTileTextures() {
     // @Jin 清空全部瓦片纹理后旧 LOD 不再有对应父瓦兜底，下帧从当前视口重新记录稳定层级。
     lastIdleGlobeTileLevel_ = -1;
     lastIdleGlobeTileMaxLevel_ = -1;
+    lastIdleGlobeTileZoomOffset_ = -99; // @Jin 单图层 LOD 记忆随上下文/纹理/图层重置一并失效
 }
 
 void Renderer::discardRemovedLayerTextures() {
@@ -1494,6 +1496,7 @@ void Renderer::discardRemovedLayerTextures() {
         // @Jin 图源切换会丢弃该层全部纹理，同步清空 exp1f LOD 记忆，避免新源沿用旧源手势层级。
         lastIdleGlobeTileLevel_ = -1;
         lastIdleGlobeTileMaxLevel_ = -1;
+        lastIdleGlobeTileZoomOffset_ = -99; // @Jin 单图层 LOD 记忆随图层纹理丢弃一并失效
         LOGI("Renderer discardRemovedLayerTextures layer=%d", static_cast<int>(li));
     }
 }
@@ -1705,7 +1708,12 @@ bool Renderer::renderLayer(size_t layerIndex, double cwx, double cwy, double hw,
     TexMap &texMap = layerTextures_[layerIndex];
 
     // LOD 叶级别：按本层图源 maxLevel 逐层钳制（zoom 超过后恒为 maxLevel，由投影拉伸末级瓦片纹理）。
-    const int level = nav_.tileLevel(layer.maxLevel);
+    // @Jin 单图层 serviceZoomOffset：在全局 LOD 结果上逐层再偏移并钳制；下游可见范围/请求/祖先链/绘制
+    // @Jin 统一使用调整后的 level，整层几何与瓦片自洽；偏移 0（默认）时与改造前完全一致。
+    const int layerZoomOffset = std::max(-3, std::min(2, layer.serviceZoomOffset));
+    int level = nav_.tileLevel(layer.maxLevel) + layerZoomOffset;
+    if (level < Navigator::MIN_LEVEL) level = Navigator::MIN_LEVEL;
+    if (level > layer.maxLevel) level = layer.maxLevel;
 
     // 可见瓦片行列范围
     int txMin = 0, txMax = -1, tyMin = 0, tyMax = -1;
@@ -2123,7 +2131,11 @@ bool Renderer::renderGlobeLayer3D(size_t layerIndex, const Navigator::Camera3D &
 
     // 可见叶瓦片：目标级别与 2D LOD 同源（tileLevel(maxLevel) 保切换时地物粗细连续），
     // 更远处（地平线/背面）由 Tessellator 按屏幕空间误差自动取粗级；墨卡托 (z,x,y) 键与 2D 互通。
-    const int targetLevel = nav_.tileLevel(layer.maxLevel);
+    // @Jin 单图层 serviceZoomOffset（3D）：与 2D 同口径叠加偏移并钳制，四叉树细化帽与 SSE 同步调整。
+    const int layerZoomOffset = std::max(-3, std::min(2, layer.serviceZoomOffset));
+    int targetLevel = nav_.tileLevel(layer.maxLevel) + layerZoomOffset;
+    if (targetLevel < Navigator::MIN_LEVEL) targetLevel = Navigator::MIN_LEVEL;
+    if (targetLevel > layer.maxLevel) targetLevel = layer.maxLevel;
     const bool interacting = kExperimentalAdaptiveUploadBudget &&
                           (nav_.isInteracting() || cameraFlightBudgetActive()); // @Jin flyTo 也按手势期限流，避免程序化飞行动画批量上传/重建。
     // @Jin exp1f：交互期锁定在抬手前的稳定 LOD，不随手指追新高清叶；缩小时允许降到更粗父级，抬手后再细化。
@@ -2131,12 +2143,17 @@ bool Renderer::renderGlobeLayer3D(size_t layerIndex, const Navigator::Camera3D &
     if (!interacting) {
         lastIdleGlobeTileLevel_ = targetLevel;
         lastIdleGlobeTileMaxLevel_ = layer.maxLevel;
-    } else if (lastIdleGlobeTileLevel_ >= 0 && lastIdleGlobeTileMaxLevel_ == layer.maxLevel) {
+        lastIdleGlobeTileZoomOffset_ = layerZoomOffset; // @Jin 偏移不同的图层不复用交互迟滞 LOD。
+    } else if (lastIdleGlobeTileLevel_ >= 0 && lastIdleGlobeTileMaxLevel_ == layer.maxLevel
+               && lastIdleGlobeTileZoomOffset_ == layerZoomOffset) {
         quadtreeLevel = std::min(targetLevel, lastIdleGlobeTileLevel_);
     }
     const double tanHalf = std::tan(nav_.fieldOfViewDeg() * 0.5 * 3.14159265358979323846 / 180.0);
     // @Jin 3D 的自然叶级由 SSE 决定；LOD 偏移必须同步放宽/收紧 SSE，否则在未达到 targetLevel 上限时点击 -1 可能看起来无效。
-    const double sseDetailFactor = nav_.lodDetailFactor() * nav_.tileLodSseScale();
+    // @Jin 单图层偏移同步缩放 SSE（口径同 Navigator::tileLodSseScale：负偏移=更粗瓦，因子翻倍），
+    // @Jin 否则未达到 targetLevel 上限时，偏移在透视细分下看似无效。
+    const double layerSseScale = std::ldexp(1.0, -layerZoomOffset);
+    const double sseDetailFactor = nav_.lodDetailFactor() * nav_.tileLodSseScale() * layerSseScale;
     TessCamera tc;
     tc.eye = cam.eye;
     // @Jin 帧间缓存必须同时看到相机朝向：仅比较眼点会让 tilt/heading 后继续复用旧视锥叶集，造成周边黑区。
@@ -6047,6 +6064,7 @@ void Renderer::release() {
     // @Jin 释放渲染器时同时清掉 exp1f 的临时 LOD 状态，重新创建上下文后从首帧开始学习。
     lastIdleGlobeTileLevel_ = -1;
     lastIdleGlobeTileMaxLevel_ = -1;
+    lastIdleGlobeTileZoomOffset_ = -99; // @Jin 单图层 LOD 记忆随上下文/纹理/图层重置一并失效
     if (vboDynamic_ != 0) {
         glDeleteBuffers(1, &vboDynamic_);
         vboDynamic_ = 0;

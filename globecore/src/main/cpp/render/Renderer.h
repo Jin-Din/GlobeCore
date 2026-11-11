@@ -618,6 +618,8 @@ private:
     int lastIdleGlobeTileLevel_ = -1;
     // @Jin 仅复用于相同 maxLevel 的图层，避免底图和 overlay 的 LOD 上限不同时互相污染迟滞状态。
     int lastIdleGlobeTileMaxLevel_ = -1;
+    // @Jin 单图层 LOD 改造：记录稳定 LOD 对应的 serviceZoomOffset，偏移不同的图层不复用同一份交互迟滞层级。
+    int lastIdleGlobeTileZoomOffset_ = -99;
 
     int viewportWidth_ = 0;
     int viewportHeight_ = 0;

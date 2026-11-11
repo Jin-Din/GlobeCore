@@ -332,6 +332,13 @@ export class NativeLib {
   }
 
   // @Jin 设置实验性瓦片 LOD 偏移：负数更粗，0 恢复；应用重启后自动保持标准默认值。
+  /** @Jin 单图层 serviceZoomOffset：透传到 native GlobeEngine::setLayerZoomOffset */
+  static nativeSetLayerZoomOffset(handle: number, index: number, offset: number): void {
+    if (handle !== 0) {
+      gc.nativeSetLayerZoomOffset(handle, index, offset);
+    }
+  }
+
   static nativeSetTileLodOffset(handle: number, offset: number): void {
     if (handle !== 0) {
       gc.nativeSetTileLodOffset(handle, offset);
