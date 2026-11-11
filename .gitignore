@@ -88,3 +88,6 @@ globecore/src/main/cpp/include/zip.h
 
 # @Jin DevEco 预览器产物
 globecore-harmonyos/library/.preview/
+
+# @Jin 本地分发包（.so 二进制与门面快照，不入仓；出包方式见 docs/api/harmony-api-guide.html）
+dist/

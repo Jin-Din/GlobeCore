@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GlobeCore HarmonyOS NEXT API 开发帮助文档 0.1.5.0-dev · ArkTS / NAPI</title>
+<style>
+  :root{--bd:#e3e8ef;--fg:#1f2733;--mut:#5b6675;--brand:#1f5fbf;--jin:#b8530a;--bg:#f6f8fb;--code:#0f172a;}
+  *{box-sizing:border-box}
+  body{margin:0;font-family:"HarmonyOS Sans SC","Microsoft YaHei",system-ui,sans-serif;color:var(--fg);background:var(--bg);line-height:1.7;font-size:15px}
+  .wrap{max-width:1080px;margin:0 auto;padding:32px 40px 120px;background:#fff;min-height:100vh;box-shadow:0 0 24px rgba(20,40,80,.06)}
+  h1{font-size:26px;margin:.2em 0 .3em;border-bottom:3px solid var(--brand);padding-bottom:10px}
+  h2{font-size:21px;margin:2.2em 0 .6em;padding-left:10px;border-left:5px solid var(--brand)}
+  h3{font-size:17px;margin:1.8em 0 .5em;color:#143a73}
+  h4{font-size:15px;margin:1.2em 0 .4em;color:#33415c}
+  code{font-family:Consolas,"JetBrains Mono",monospace;background:#eef2f8;padding:1px 6px;border-radius:4px;font-size:13px;color:#0b3d91}
+  pre{background:var(--code);color:#dbe7ff;padding:16px 18px;border-radius:10px;overflow-x:auto;font-size:13px;line-height:1.55}
+  pre code{background:none;padding:0;color:inherit;font-size:13px}
+  table{border-collapse:collapse;width:100%;margin:.8em 0;font-size:13.5px}
+  th,td{border:1px solid var(--bd);padding:8px 10px;text-align:left;vertical-align:top}
+  th{background:#eef3fb}
+  .badge{display:inline-block;font-size:11px;font-weight:700;padding:1px 7px;border-radius:10px;margin-left:6px;white-space:nowrap}
+  .b-jin{background:#fff0e4;color:var(--jin);border:1px solid #f0c39a}
+  .b-base{background:#eef2f8;color:#52607a;border:1px solid #cfd9ea}
+  .b-exp{background:#fdf3d7;color:#8a6411;border:1px solid #ecd89b}
+  .sig{background:#f1f6ff;border:1px solid #d4e2fb;border-radius:8px;padding:10px 14px;font-family:Consolas,monospace;font-size:13px;overflow-x:auto;margin:.4em 0}
+  .api{border:1px solid var(--bd);border-radius:10px;padding:14px 18px;margin:14px 0;background:#fff}
+  .api h4{margin-top:0}
+  .muted{color:var(--mut);font-size:13px}
+  .note{background:#eef6ff;border-left:4px solid var(--brand);padding:10px 14px;border-radius:0 8px 8px 0;margin:1em 0}
+  .warn{background:#fff6e8;border-left:4px solid #d98a1f;padding:10px 14px;border-radius:0 8px 8px 0;margin:1em 0}
+  .toc{columns:2;font-size:14px}
+  .toc a{color:var(--brand);text-decoration:none}
+  .toc a:hover{text-decoration:underline}
+  .ret{color:#0a7a44;font-weight:600}
+  .param{color:#7a3e00;font-weight:600}
+  ul{padding-left:1.4em}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>GlobeCore HarmonyOS NEXT API 开发帮助文档 <span class="muted">0.1.5.0-dev · ArkTS / NAPI · arm64-v8a · OpenGL ES 2.0</span></h1>
+<p>面向 HarmonyOS NEXT（纯血鸿蒙）宿主开发人员与 AI 编程助手：本文覆盖分发包内全部公开 ArkTS API，
+每个 API 含签名、参数说明与可直接改写的使用示例。引擎核心为 C++ 共享库 <code>libglobecore.so</code>，
+ArkTS 门面只做转发，相机、瓦片、缓存、矢量三角剖分、GLES2 绘制全部在 native 完成。</p>
+<div class="note"><b>标注约定：</b>
+<span class="badge b-jin">@Jin 新增</span> 本库在原作者 @zys/globecore 0.1.4 基础上新增；
+<span class="badge b-jin">@Jin 改造</span> 在原有能力上改造增强；
+<span class="badge b-base">原生</span> 原作者既有能力；
+<span class="badge b-exp">实验</span> 已上线但保留回退开关，行为可能调整。
+3D Tiles(b3dm) 在 feature/3dtiles-b3dm 分支，不在本主线包内。</div>
+
+<h2 id="toc">目录</h2>
+<div class="toc">
+1. <a href="#s1">SDK 概览与能力速查</a><br>
+2. <a href="#s2">安装集成</a><br>
+3. <a href="#s3">快速开始（最小可运行示例）</a><br>
+4. <a href="#s4">生命周期与线程模型</a><br>
+5. <a href="#s5">数据类型（Camera/Position/VectorStyle…）</a><br>
+6. <a href="#s6">NativeMapView API 参考</a><br>
+7. <a href="#s7">NativeSrs 坐标转换</a><br>
+8. <a href="#s8">NativeNet 网络证书</a><br>
+9. <a href="#s9">NativeVector 矢量文件 IO</a><br>
+10. <a href="#s10">NativeLayerInfo 图层元信息</a><br>
+11. <a href="#s11">CesiumTerrainProvider 地形提供器</a><br>
+12. <a href="#s12">地形事件与状态 JSON</a><br>
+13. <a href="#s13">常见业务示例</a><br>
+14. <a href="#s14">排错指南</a><br>
+15. <a href="#s15">文档维护约定</a>
+</div>
+
+<h2 id="s1">1. SDK 概览与能力速查</h2>
+<p>GlobeCore 是独立实现的 C++ 地图渲染引擎，HarmonyOS 侧经 NAPI 暴露为 HAR 形态。宿主通常只接触
+<code>NativeMapView</code> 组件与少量静态门面类，不需要直接调用 NAPI。</p>
+<table>
+<tr><th>模块</th><th>能力</th><th>来源</th><th>主要入口</th></tr>
+<tr><td>视图</td><td>2D 墨卡托 / 3D 球体双模式、相机读写、按需渲染</td><td><span class="badge b-base">原生</span></td><td><code>setViewMode / setCamera / getCamera</code></td></tr>
+<tr><td>视图</td><td>flyTo 平滑飞行（C++ 帧循环驱动）</td><td><span class="badge b-jin">@Jin 新增</span></td><td><code>flyToCamera</code></td></tr>
+<tr><td>底图</td><td>任意 XYZ 瓦片 URL 模板、多层叠加、透明注记层</td><td><span class="badge b-base">原生</span></td><td><code>addTileLayer</code></td></tr>
+<tr><td>底图</td><td>EPSG:4326/4490 地理切片（天地图 img_c/cia_c），重投影到墨卡托球体</td><td><span class="badge b-jin">@Jin 新增</span></td><td><code>addTileLayerWithOptions</code></td></tr>
+<tr><td>缓存</td><td>目录 / MBTiles 双后端、先盘后网、原子写、2D3D 同键复用</td><td><span class="badge b-base">原生</span></td><td><code>cacheDir</code> 参数</td></tr>
+<tr><td>调度</td><td>祖先粗瓦优先、视口代际去重、LOD 迟滞、帧上传预算、地形安全高度与黑面治理</td><td><span class="badge b-jin">@Jin 改造</span></td><td>引擎内部</td></tr>
+<tr><td>本地影像</td><td>tif/img 双通路（即时切片 / 整幅贴面）</td><td><span class="badge b-base">原生</span></td><td><code>addRasterLayer / addRasterImageLayer</code></td></tr>
+<tr><td>三维地形</td><td>quantized-mesh v1.0 Provider 下沉 C++，三端统一生命周期事件</td><td><span class="badge b-jin">@Jin 新增</span></td><td><code>configureTerrainProvider</code> 等</td></tr>
+<tr><td>矢量</td><td>LITE 无 GDAL GeoJSON 读取（文件/在线 URL）、earcut 三角剖分、样式/图标/文字</td><td><span class="badge b-base">原生</span> + <span class="badge b-jin">@Jin 扩展在线</span></td><td><code>addVectorLayer</code></td></tr>
+<tr><td>矢量</td><td>3D 地形贴地（drape）、高等级视角遮挡修复</td><td><span class="badge b-jin">@Jin 改造</span></td><td>引擎内部自动生效</td></tr>
+<tr><td>叠加层</td><td>运行时点/线/面/图标覆盖式推送；文字/POI 地形锚定</td><td><span class="badge b-base">原生</span> + <span class="badge b-jin">@Jin 锚定</span></td><td><code>addOverlayLayer / updateOverlay*</code></td></tr>
+<tr><td>拾取</td><td>要素拾取、屏幕点反算经纬度、要素几何回取</td><td><span class="badge b-base">原生</span></td><td><code>pickVector / screenToGeo / featureGeometry</code></td></tr>
+<tr><td>坐标系</td><td>PROJ 任意 EPSG 互转（proj.db 随包分发）</td><td><span class="badge b-base">原生</span></td><td><code>NativeSrs</code></td></tr>
+<tr><td>手势</td><td>平移/捏合/惯性/双指旋转俯仰；多指切换防跳变</td><td><span class="badge b-base">原生</span> + <span class="badge b-jin">@Jin 防跳</span></td><td>组件内置 / <code>setOnTapListener</code></td></tr>
+<tr><td>调试</td><td>相机/瓦片级别查询、LOD 运行时偏移、密度对齐</td><td><span class="badge b-jin">@Jin 新增</span></td><td><code>cameraZoomLevel / setTileLodOffset</code></td></tr>
+</table>
+
+<h2 id="s2">2. 安装集成</h2>
+
+<h3>2.1 分发包内容</h3>
+<pre><code>globecore-harmony-next-0.1.5.0-dev/
+├── libs/arm64-v8a/libglobecore.so     # 引擎本体（release，NAPI 模块名 globecore）
+├── libs/arm64-v8a/libc++_shared.so    # C++ 运行时
+├── ets/                               # ArkTS 门面源码（Index.ets 为统一导出）
+├── types/libglobecore/index.d.ts      # NAPI 全量类型声明
+├── resources/rawfile/ca/cacert.pem    # HTTPS CA 包
+├── module.json5                       # HAR 模块声明参考
+└── docs/harmony-api-guide.html        # 本文档</code></pre>
+
+<h3>2.2 模块接入</h3>
+<ol>
+<li>把 <code>ets/</code> 与 <code>types/</code> 作为本地 HAR 模块放入工程（模块名保持 <code>globecore</code>，
+与 <code>libglobecore.so</code> 的 nm_modname 一致）；两个 .so 放入模块
+<code>src/main/cpp/libs/arm64-v8a/</code> 或 build-profile 配置的 jniLibs 目录。</li>
+<li>模块 <code>oh-package.json5</code> 声明 native 类型依赖：
+<pre><code>"dependencies": {
+  "libglobecore.so": "file:./src/main/cpp/types/libglobecore"
+}</code></pre></li>
+<li><code>cacert.pem</code> 放 <code>src/main/resources/rawfile/ca/</code>；需要 PROJ 转换时，
+把主仓 build-scripts 生成的 <code>proj/</code>（proj.db 与格网改正数）放 <code>rawfile/proj/</code>。</li>
+<li>模块 <code>module.json5</code> 声明 <code>"type": "har"</code>，宿主 entry 申请网络权限：
+<pre><code>"requestPermissions": [{ "name": "ohos.permission.INTERNET" }]</code></pre></li>
+</ol>
+
+<h3>2.3 启动初始化（EntryAbility）</h3>
+<pre><code>import { NativeNet, NativeSrs } from 'globecore';
+
+export default class EntryAbility extends UIAbility {
+  onCreate(): void {
+    // HTTPS 瓦片证书校验（首次联网前调一次，幂等）
+    NativeNet.initCaBundle(this.context);
+    // 仅当用到 PROJ 坐标转换时需要；内部把 rawfile/proj 解压到 filesDir/proj
+    NativeSrs.initProjData(this.context);
+  }
+}</code></pre>
+<div class="warn">内网 <code>http://</code> 明文地址需在宿主调试策略中放行 cleartext；生产环境优先 HTTPS。</div>
+
+<h2 id="s3">3. 快速开始（最小可运行示例）</h2>
+<p>以下页面创建 3D 地球、加载 ArcGIS 影像与天地图注记、开启地形并飞到中国上空：</p>
+<pre><code>import { NativeMapView, ViewMode, Camera, AltitudeMode } from 'globecore';
+
+@Entry
+@Component
+struct MapPage {
+  private map?: NativeMapView;
+  // 应用私有缓存目录（瓦片/地形/矢量各自分子目录，必须互相隔离）
+  private baseDir = getContext(this).filesDir + '/map-cache';
+
+  build() {
+    Column() {
+      NativeMapView({
+        onReady: (view: NativeMapView) => {
+          this.map = view;
+          // ① 影像底图（XYZ 模板，占位符 {z}/{x}/{y}，maxLevel=18）
+          view.addTileLayer(this.baseDir + '/arcgis-img',
+            'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+            18, false);
+          // ② 透明注记层：overlay=true 置顶透明混合
+          view.addTileLayer(this.baseDir + '/tdt-cia',
+            'https://t{s}.tianditu.gov.cn/DataServer?T=cia_w&x={x}&y={y}&l={z}&tk=YOUR_TOKEN',
+            18, true);
+          // ③ 三维地形（quantized-mesh 服务，目录下需有 layer.json）
+          view.configureTerrainProvider(
+            'https://your-host/terrain/cesium',
+            this.baseDir + '/terrain', 15, 4, 3, {});
+          view.setTerrainProviderEnabled(true);
+          // ④ 3D 球体并飞至中国上空
+          view.setViewMode(ViewMode.THREE_D);
+          view.flyToCamera(new Camera(34.5, 108.9, 6000000, 0, 0, 0,
+            45, AltitudeMode.ABSOLUTE), 2200);
+        }
+      })
+        .width('100%').height('100%')
+    }
+  }
+}</code></pre>
+<div class="note">组件 <code>aboutToAppear</code> 自动创建 native 实例，<code>aboutToDisappear</code>
+自动 detach+destroy，宿主无需手动管理句柄。</div>
+
+<h2 id="s4">4. 生命周期与线程模型</h2>
+<ul>
+<li><b>GL 线程：</b>XComponent(SURFACE) 提供窗口，native 侧 <code>MapRenderHost</code> 起独立 EGL 渲染线程接管 GL 生命周期。</li>
+<li><b>按需渲染：</b>默认 RENDERMODE_WHEN_DIRTY 语义，静止不重绘省电；手势、相机变化、瓦片异步到位会触发重绘，也可手动 <code>requestRender()</code>。</li>
+<li><b>后台线程池：</b>瓦片下载、磁盘缓存、图片解码在 native 后台线程；纹理上传切回 GL 线程按帧限额执行。</li>
+<li><b>线程安全：</b>ArkTS 门面方法只做状态更新与 NAPI 转发，可在任意线程调用（含 Surface 创建前）；矢量读取为异步流程，用 <code>hasVectorLoading()</code> 轮询。</li>
+<li><b>触摸：</b>SURFACE 型 XComponent 不投递 ArkTS <code>.onTouch</code>，手势在 native 识别；单击/长按经 NAPI 回调到 <code>setOnTapListener / setOnLongPressListener</code>，惯性由渲染线程自驱动。</li>
+</ul>
+
+<h2 id="s5">5. 数据类型</h2>
+
+<h3>5.1 ViewMode 视图模式</h3>
+<pre><code>export enum ViewMode { TWO_D = 0, THREE_D = 1 }  // 2D 墨卡托正交 / 3D 球体透视</code></pre>
+
+<h3>5.2 AltitudeMode 高度模式（与 native 枚举严格一致，勿改顺序）</h3>
+<table>
+<tr><th>枚举</th><th>值</th><th>含义</th></tr>
+<tr><td><code>ABSOLUTE</code></td><td>0</td><td>相对椭球面（HAE）</td></tr>
+<tr><td><code>ABOVE_SEA_LEVEL</code></td><td>1</td><td>相对海平面（ASL）</td></tr>
+<tr><td><code>CLAMP_TO_GROUND</code></td><td>2</td><td>贴地，忽略 altitude</td></tr>
+<tr><td><code>RELATIVE_TO_GROUND</code></td><td>3</td><td>相对地面（AGL）</td></tr>
+</table>
+
+<h3>5.3 Camera 相机姿态</h3>
+<div class="sig">new Camera(latitude?, longitude?, altitude?, heading?, tilt?, roll?, fieldOfView?, altitudeMode?)</div>
+<table>
+<tr><th>字段</th><th>类型</th><th>说明</th></tr>
+<tr><td>latitude / longitude</td><td>number</td><td>经纬度（度，WGS84）</td></tr>
+<tr><td>altitude</td><td>number</td><td>高度（米）</td></tr>
+<tr><td>heading</td><td>number</td><td>航向角（度，正北 0）</td></tr>
+<tr><td>tilt</td><td>number</td><td>俯仰角（度，钳制 [0,80]，仅 3D 生效）</td></tr>
+<tr><td>roll</td><td>number</td><td>翻滚角（度）</td></tr>
+<tr><td>fieldOfView</td><td>number</td><td>视场角，默认 45°</td></tr>
+<tr><td>altitudeMode</td><td>AltitudeMode</td><td>高度模式，默认 ABSOLUTE</td></tr>
+</table>
+<pre><code>// 太白山斜视角：带 45° tilt
+const taibai = new Camera(33.95, 107.75, 2500, 0, 45, 0, 45, AltitudeMode.ABSOLUTE);
+map.flyToCamera(taibai, 2200);</code></pre>
+
+<h3>5.4 Position 地理点</h3>
+<div class="sig">new Position(latitude: number, longitude: number, altitude?: number)</div>
+<p>用于定位标记入参与 <code>screenToGeo</code> 返回；经纬度为 WGS84 度，高度米。</p>
+
+<h3>5.5 VectorStyle 矢量/叠加层样式</h3>
+<p>颜色为 <code>#AARRGGBB</code> 打包数值（无符号十进制写法，如 <code>0x664A8FE3</code>）；线宽像素、点半径 dp。</p>
+<table>
+<tr><th>字段</th><th>说明</th><th>默认</th></tr>
+<tr><td>fillColor</td><td>面填充色</td><td>0x664A8FE3 半透明蓝</td></tr>
+<tr><td>outlineColor / outlineWidth</td><td>面描边色 / 线宽(px)</td><td>白 / 1</td></tr>
+<tr><td>lineColor / lineWidth</td><td>线要素色 / 线宽(px)</td><td>橙红 0xFFE56B33 / 2</td></tr>
+<tr><td>pointColor / pointRadiusDp</td><td>点要素色 / 半径(dp，屏幕固定)</td><td>橙红 / 5</td></tr>
+<tr><td>fillExplicit / lineExplicit</td><td>true=整层色覆盖 KML 逐要素原色</td><td>false</td></tr>
+<tr><td>labelField</td><td>标注字段名，空串=不标注；@Jin 标注可地形锚定不悬空</td><td>''</td></tr>
+<tr><td>labelColor / labelSize / labelOutline / labelOutlineColor</td><td>文字标注样式</td><td>白 / 1.0 / true / 黑</td></tr>
+<tr><td>featureStyleOverride</td><td>单要素样式覆盖串，<code>fid,fill,line,labelField,labelColor,labelSize,outline,outlineColor;</code> 多条分号，'-'=继承</td><td>''</td></tr>
+</table>
+
+<h3>5.6 VectorExtent 空间过滤范围</h3>
+<div class="sig">new VectorExtent(minLon, minLat, maxLon, maxLat)</div>
+<p>WGS84 经纬度矩形，native 按空间相交只加载屏内要素；传 <code>undefined</code> 表示整文件全量。</p>
+
+<h3>5.7 PickResult / FeatureGeometry 拾取结果</h3>
+<pre><code>class PickResult { layerIndex: number; fid: number }  // 命中层序号 + 源要素 ID
+class FeatureGeometry {
+  type: number;        // 0=点 1=线 2=面
+  lonlat: number[];    // 摊平 [lon0,lat0, lon1,lat1,...]
+  ringCounts: number[];// 线=每段顶点数；面=每环顶点数
+  ringsPerFeature: number[]; // 面专用环数（首环外环，余为洞）
+}</code></pre>
+
+<h2 id="s6">6. NativeMapView API 参考</h2>
+<p class="muted">以下方法均为 NativeMapView 组件的实例方法；组件构造参数 <code>{ onReady?: (view) =&gt; void }</code>，
+native 就绪后回调，未就绪时调用会被门面安全忽略。</p>
+
+<h3>6.1 相机与视图模式</h3>
+
+<div class="api"><h4>setViewMode / getViewMode <span class="badge b-base">原生</span></h4>
+<div class="sig">setViewMode(mode: ViewMode): void<br>getViewMode(): ViewMode</div>
+<p>切换 2D 墨卡托正交与 3D 球体透视，共用一套相机，切换保持视角连续。</p>
+<pre><code>map.setViewMode(ViewMode.THREE_D);</code></pre></div>
+
+<div class="api"><h4>setCamera / getCamera <span class="badge b-base">原生</span></h4>
+<div class="sig">setCamera(camera: Camera): void<br>getCamera(): Camera | undefined</div>
+<p>即时设置/读取相机姿态（无动画）。</p></div>
+
+<div class="api"><h4>flyToCamera <span class="badge b-jin">@Jin 新增</span></h4>
+<div class="sig">flyToCamera(camera: Camera, durationMs: number = 1600): void</div>
+<p>平滑飞行到目标相机；动画由 C++ GL 帧循环推进，不阻塞 ArkTS 线程。<code>durationMs &lt;= 0</code> 等价即时跳转。</p>
+<pre><code>map.flyToCamera(new Camera(34.2196, 108.9594, 700, 0, 30, 0, 45, AltitudeMode.ABSOLUTE), 2200);</code></pre></div>
+
+<div class="api"><h4>panBy / zoomBy / rotateBy / tiltBy <span class="badge b-base">原生</span></h4>
+<div class="sig">panBy(dxVp: number, dyVp: number): void<br>zoomBy(scaleFactor: number, focusX: number, focusY: number): void<br>rotateBy(deltaDeg: number): void<br>tiltBy(deltaDeg: number): void</div>
+<p>编程式相机操作：平移（vp 像素）、以 (focusX,focusY) 为焦点缩放、航向旋转、俯仰增量（仅 3D）。
+<span class="badge b-jin">@Jin 改造</span> <code>panBy</code> 在 native 侧带单帧阈值兜底，配合 ArkTS 手势识别器消除多指切换跳变。</p>
+<pre><code>map.zoomBy(1.5, x, y);  // 在 (x,y) 处放大 1.5 倍
+map.tiltBy(10);         // 倾角 +10°</code></pre></div>
+
+<div class="api"><h4>is3DMode / isReady / isNativeReady / getHandle <span class="badge b-base">原生</span></h4>
+<div class="sig">is3DMode(): boolean<br>isReady(): boolean<br>getHandle(): number</div>
+<p>状态查询；<code>getHandle()</code> 返回 native 句柄（int64），0 表示未就绪，一般业务无需使用。</p></div>
+
+<h3>6.2 手势与点击回调</h3>
+<div class="api"><h4>setOnTapListener / setOnLongPressListener <span class="badge b-base">原生</span> <span class="badge b-jin">@Jin 防跳改造</span></h4>
+<div class="sig">setOnTapListener(listener?: (x: number, y: number) =&gt; void): void<br>setOnLongPressListener(listener?: (x: number, y: number) =&gt; void): void</div>
+<p>回调坐标为组件内像素。传 <code>undefined</code> 反注册。平移/捏合/惯性/双指旋转俯仰由组件内置；
+多指→单指切换与依次抬指的跳变已在 native 与 ArkTS 双层治理。</p>
+<pre><code>map.setOnTapListener((x, y) =&gt; {
+  const pos = map.screenToGeo(x, y);   // 屏幕点反算经纬度
+  if (pos) console.info('tap geo:', pos.longitude, pos.latitude);
+});
+// 长按做逆地理编码：请求天地图 geocoder 后用叠加层弹 popup
+map.setOnLongPressListener((x, y) =&gt; this.reverseGeocode(x, y));</code></pre></div>
+
+<h3>6.3 瓦片图层</h3>
+
+<div class="api"><h4>addTileLayer <span class="badge b-base">原生</span></h4>
+<div class="sig">addTileLayer(cacheDir: string, urlTemplate: string, maxLevel: number, overlay?: boolean): void</div>
+<table>
+<tr><th>参数</th><th>说明</th></tr>
+<tr><td class="param">cacheDir</td><td>应用私有缓存目录；以 <code>.mbtiles</code> 结尾走 SQLite 单文件，否则按 z/x_y.tile 目录落盘。每层独立目录</td></tr>
+<tr><td class="param">urlTemplate</td><td>XYZ URL 模板，含 <code>{z}/{x}/{y}</code> 占位（部分服务用 {l}）；空串=纯离线读缓存</td></tr>
+<tr><td class="param">maxLevel</td><td>图源最大级别，超出后拉伸末级纹理，不出 404 占位</td></tr>
+<tr><td class="param">overlay</td><td>true=透明注记层置顶混合；false=底图</td></tr>
+</table>
+<pre><code>map.addTileLayer(this.baseDir + '/base',
+  'https://t0.tianditu.gov.cn/img_w/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0' +
+  '&LAYER=img&STYLE=default&TILEMATRIXSET=w&FORMAT=tiles&TILEMATRIX={z}&TILEROW={y}&TILECOL={x}&tk=TOKEN',
+  18, false);</code></pre></div>
+
+<div class="api"><h4>addTileLayerWithOptions <span class="badge b-jin">@Jin 新增</span> <span class="badge b-exp">实验</span></h4>
+<div class="sig">addTileLayerWithOptions(cacheDir: string, urlTemplate: string, maxLevel: number, overlay: boolean,<br>&nbsp;&nbsp;crs: string, tmsY: boolean, tileMatrixOffset: number): void</div>
+<table>
+<tr><th>参数</th><th>说明</th></tr>
+<tr><td class="param">crs</td><td><code>EPSG:3857</code>（默认，Web 墨卡托）或 <code>EPSG:4326</code> / <code>EPSG:4490</code>（地理切片，根 2x1、纬度线性，引擎相交重投影到墨卡托球体；4490 与 4326 椭球差异亚米级按同方案处理）</td></tr>
+<tr><td class="param">tmsY</td><td>true=TMS 行序（y 自南向北）；XYZ 服务传 false</td></tr>
+<tr><td class="param">tileMatrixOffset</td><td>服务 TileMatrix 与 z 的偏移；天地图 c 服务 TILEMATRIX 从 1 起，传 1</td></tr>
+</table>
+<pre><code>// 天地图 4490 影像（img_c）+ 注记（cia_c）
+map.addTileLayerWithOptions(this.baseDir + '/tdt4490-img',
+  'https://t{s}.tianditu.gov.cn/DataServer?T=img_c&x={x}&y={y}&l={z}&tk=TOKEN',
+  18, false, 'EPSG:4490', false, 1);
+map.addTileLayerWithOptions(this.baseDir + '/tdt4490-cia',
+  'https://t{s}.tianditu.gov.cn/DataServer?T=cia_c&x={x}&y={y}&l={z}&tk=TOKEN',
+  18, true, 'EPSG:4490', false, 1);</code></pre>
+<div class="warn">已知边界（见主仓 docs/design/epsg-4490-*）：4490 注记存在轻微纵向拉伸与字号偏小，
+后续计划以单图层 <code>serviceZoomOffset</code> 参数交由使用方调节，当前未开放。</div></div>
+
+<div class="api"><h4>setLayerVisible / removeTileLayer <span class="badge b-base">原生</span></h4>
+<div class="sig">setLayerVisible(index: number, visible: boolean): void<br>removeTileLayer(index: number): void</div>
+<p>index 为 addTileLayer/addRasterLayer 的加入次序（0 起）；隐藏层不绘制、不取瓦片；移除为墓碑语义。</p></div>
+
+<h3>6.4 本地栅格影像</h3>
+<div class="api"><h4>addRasterLayer / addRasterImageLayer <span class="badge b-base">原生</span></h4>
+<div class="sig">addRasterLayer(cacheDir: string, path: string): number  // 返回图层 index，-1 失败<br>addRasterImageLayer(cacheDir: string, path: string): number<br>rasterAddError(): string | null<br>setRasterImageVisible(index: number, visible: boolean): void<br>hasRasterLoading(): boolean<br>rasterImageError(index: number): string | null</div>
+<p>双通路：<code>addRasterLayer</code> native 重投影后按墨卡托即时切片并回写缓存（级别随栅格分辨率推算）；
+<code>addRasterImageLayer</code> 整幅直读单张贴图按 WGS84 四至贴面（UI 线程零 GDAL 立即返回，超限沿 overviews 降采样）。
+失败原因用对应 error 方法取中文串。Harmony LITE 无 GDAL，此能力在 LITE 包不可用。</p>
+<pre><code>const idx = map.addRasterImageLayer(this.baseDir + '/img-cache', filePath);
+if (idx &lt; 0) console.error(map.rasterImageError(0));</code></pre></div>
+
+<h3>6.5 三维地形 Provider <span class="badge b-jin">@Jin 新增</span></h3>
+<div class="api"><h4>configureTerrainProvider</h4>
+<div class="sig">configureTerrainProvider(baseUrl: string, cacheDir: string, maxZoom: number,<br>&nbsp;&nbsp;concurrency: number, tileRadius: number, headers: Record&lt;string, string&gt;): boolean</div>
+<table>
+<tr><th>参数</th><th>说明</th></tr>
+<tr><td class="param">baseUrl</td><td>quantized-mesh 服务目录（其下可访问 layer.json 与 {z}/{x}/{y}.terrain）</td></tr>
+<tr><td class="param">cacheDir</td><td>DEM 独立缓存目录，必须与影像瓦片目录隔离</td></tr>
+<tr><td class="param">maxZoom</td><td>最大地形级别（layer.json 优先）</td></tr>
+<tr><td class="param">concurrency</td><td>下载并发，真机验证建议 4</td></tr>
+<tr><td class="param">tileRadius</td><td>视口外预取半径（瓦片圈），常用 3</td></tr>
+<tr><td class="param">headers</td><td>自定义请求头（token/Referer 等），无则传 {}</td></tr>
+</table>
+<p>返回 false 表示配置失败。C++ Provider 直接读取相机视口生成 DEM 任务，含磁盘缓存、重试、去重与流式注入，仅 3D 球体生效。</p>
+<pre><code>const ok = map.configureTerrainProvider(
+  'http://210.74.129.84:8520/app-pub/web-data/terrain/cesium',
+  this.baseDir + '/terrain', 15, 4, 3, {});
+map.setTerrainProviderEnabled(true);</code></pre></div>
+
+<div class="api"><h4>地形开关 / 刷新 / 自动跟随 / 状态 / 事件</h4>
+<div class="sig">setTerrainProviderEnabled(enabled: boolean): boolean<br>refreshTerrainProvider(): void<br>setTerrainProviderAutoFollow(enabled: boolean): void<br>prefetchTerrainProviderMetadata(): void<br>terrainProviderStatus(): string<br>setOnTerrainProviderEventListener(listener?: (payload: string) =&gt; void): void</div>
+<p><code>setTerrainProviderAutoFollow(true)</code> 开启相机静止后的自动刷新（默认关，保持旧行为）；
+listener 收单行 JSON 事件，字段见 <a href="#s12">第 12 节</a>，传 undefined 反注册。</p>
+<pre><code>map.setOnTerrainProviderEventListener((payload: string) =&gt; {
+  const ev = JSON.parse(payload);
+  if (ev.event === 'first_tile') this.statusText = '首块地形就绪 ' + ev.firstTileMs + 'ms';
+  if (ev.event === 'error') this.statusText = '地形错误: ' + ev.stage;
+});
+map.prefetchTerrainProviderMetadata();</code></pre></div>
+
+<div class="api"><h4>底层注入接口（高级）</h4>
+<div class="sig">setTerrainTile(z: number, x: number, y: number, bytes: Uint8Array, bbox: number[]): void<br>clearTerrain(): void</div>
+<p>自行实现下载链路时直接注入 quantized-mesh 字节；bbox 为服务瓦片四至 [lonMin,latMin,lonMax,latMax]。
+一般业务用上面的 Provider 即可，无需调用。</p></div>
+
+<h3>6.6 矢量图层</h3>
+<div class="api"><h4>addVectorLayer <span class="badge b-base">原生</span> <span class="badge b-jin">@Jin 在线 URL</span> <span class="badge b-jin">@Jin 地形贴地</span></h4>
+<div class="sig">addVectorLayer(path: string, style: VectorStyle, iconArgb?: number[], iconW?: number, iconH?: number,<br>&nbsp;&nbsp;extent?: VectorExtent, maxFeatures?: number): number  // 返回图层 index</div>
+<table>
+<tr><th>参数</th><th>说明</th></tr>
+<tr><td class="param">path</td><td>本地 GeoJSON 文件路径；<b>@Jin 实验扩展</b>：也支持公开 http/https GeoJSON URL，native 后台下载并原子落盘到应用私有 <code>globecore/vector-cache/url/&lt;hash&gt;.geojson</code>，同 URL 二次打开命中缓存不重复下载（80MB 上限、HTML/空响应校验）</td></tr>
+<tr><td class="param">style</td><td>VectorStyle；labelField 非空时启用文字标注，@Jin 3D 下标注与图标 billboard 做地形锚定</td></tr>
+<tr><td class="param">iconArgb/iconW/iconH</td><td>自定义图标（ARGB 像素数组+宽高），不传用默认点样式</td></tr>
+<tr><td class="param">extent</td><td>初始空间过滤范围；undefined=全量</td></tr>
+<tr><td class="param">maxFeatures</td><td>单次要素预算，0=不限</td></tr>
+</table>
+<p>@Jin 3D 地形开启时矢量经 drape 管线贴地；高等级视角本地线层遮挡问题已修复。</p>
+<pre><code>// 本地文件
+const idx = map.addVectorLayer(filePath, new VectorStyle(), undefined, 0, 0,
+  new VectorExtent(105, 31, 111, 39), 5000);
+
+// @Jin 在线 GeoJSON（省级面，透明填充只看界线的样式由 style 控制）
+const onlineIdx = map.addVectorLayer(
+  'http://210.74.129.84:8520/app-pub/web-data/geojson/district/province.json',
+  new VectorStyle(0x00000000, 0xFFFFFFFF, 2.0),  // 透明填充+白描边
+  undefined, 0, 0, undefined, 0,
+);</code></pre></div>
+
+<div class="api"><h4>updateVectorExtent / hasVectorLoading / setVectorLayerVisible / setVectorMinLevel / setFontPath / removeVectorLayer</h4>
+<div class="sig">updateVectorExtent(index: number, extent?: VectorExtent, maxFeatures?: number): void<br>hasVectorLoading(): boolean<br>setVectorLayerVisible(index: number, visible: boolean): void<br>setVectorMinLevel(index: number, minLevel: number): void<br>setFontPath(path: string): void<br>removeVectorLayer(index: number): void</div>
+<p>相机静止后按当前屏幕范围增量重载（Swap-on-ready，重载期无空窗）；<code>setFontPath</code> 指定 CJK 字形图集字体（如 <code>/system/fonts/HarmonyOS_Sans_SC.ttf</code>）。</p>
+<pre><code>map.updateVectorExtent(idx, new VectorExtent(minLon, minLat, maxLon, maxLat), 2000);
+const busy = map.hasVectorLoading();  // 定时器轮询加载态</code></pre></div>
+
+<h3>6.7 动态叠加层（业务图形）</h3>
+<div class="api"><h4>addOverlayLayer / updateOverlay* / remove / clear / setOverlayNoPick</h4>
+<div class="sig">addOverlayLayer(style: VectorStyle, iconArgb?: number[], iconW?: number, iconH?: number): number<br>updateOverlayPoints(index: number, lonlat: number[], fids?: number[], labels?: string[]): void<br>updateOverlayLines(index: number, lonlat: number[], vertexCounts: number[], fids?: number[], labels?: string[]): void<br>updateOverlayPolygons(index: number, lonlat: number[], ringVertexCounts: number[], fids?: number[], labels?: string[]): void<br>removeOverlayLayer(index: number): void<br>clearOverlayLayers(): void<br>setOverlayNoPick(index: number, noPick: boolean): void</div>
+<p>运行时内存几何层，覆盖式更新（每次传该层当前应显示的完整数据）；<code>lonlat</code> 为摊平的
+[lon,lat,lon,lat…]；线用 vertexCounts 描述每段折线条数，面用 ringVertexCounts 描述每环顶点数（首环外环、余为洞）。
+高亮临时层可 <code>setOverlayNoPick(true)</code> 退出拾取竞争。@Jin labels 文字在 3D 下做地形锚定。</p>
+<pre><code>// 画一条线
+const lineId = map.addOverlayLayer(new VectorStyle(0, 0xFFFFFFFF, 1, 0xFFFF0000, 3));
+map.updateOverlayLines(lineId,
+  [108.95, 34.21, 108.97, 34.23, 109.00, 34.22], [3]);
+
+// 画一个面（1 个环 4 个顶点，首尾闭合）
+const polyId = map.addOverlayLayer(new VectorStyle(0x66FF0000, 0xFFFFFFFF, 2));
+map.updateOverlayPolygons(polyId,
+  [108.95,34.21, 109.00,34.21, 109.00,34.25, 108.95,34.25, 108.95,34.21], [5]);
+
+// 带文字标注的点
+const ptId = map.addOverlayLayer(new VectorStyle());
+map.updateOverlayPoints(ptId, [108.9594, 34.2196], undefined, ['太白山']);</code></pre></div>
+
+<h3>6.8 拾取与坐标反算</h3>
+<div class="api"><h4>pickVector / screenToGeo / featureGeometry <span class="badge b-base">原生</span></h4>
+<div class="sig">pickVector(sxPx: number, syPx: number): PickResult | undefined<br>screenToGeo(sxPx: number, syPx: number): Position | undefined<br>featureGeometry(layerIndex: number, fid: number): FeatureGeometry | undefined</div>
+<p>单击命中返回 [layerIndex, fid]；视口未就绪返回 undefined。featureGeometry 回取的几何可直接喂给 updateOverlay* 画选中高亮。</p>
+<pre><code>map.setOnTapListener((x, y) =&gt; {
+  const hit = map.pickVector(x, y);
+  if (!hit) return;
+  const geo = map.featureGeometry(hit.layerIndex, hit.fid);
+  // 用 geo.lonlat / ringCounts 建高亮 overlay…
+});</code></pre></div>
+
+<h3>6.9 定位标记与字体</h3>
+<div class="api"><h4>setLocationMarker / setLocationMarkerIcon <span class="badge b-base">原生</span></h4>
+<div class="sig">setLocationMarker(position: Position, visible: boolean, headingDeg?: number): void<br>setLocationMarkerIcon(iconArgb: number[], iconW: number, iconH: number): void</div>
+<p>蓝点/自定义图标 + 方位角箭头，屏幕固定尺寸不随缩放，可由 1Hz 定位回调驱动。</p>
+<pre><code>map.setLocationMarker(new Position(34.2196, 108.9594), true, 45);</code></pre></div>
+
+<h3>6.10 LOD 与级别调试 <span class="badge b-jin">@Jin 新增</span></h3>
+<div class="api"><h4>cameraZoomLevel / tileZoomLevel / setTileLodOffset / setTileLodAlignDisplay</h4>
+<div class="sig">cameraZoomLevel(): number<br>tileZoomLevel(maxLevel?: number): number<br>setTileLodOffset(offset: number): void<br>setTileLodAlignDisplay(align: boolean): void</div>
+<p>相机级别（视图 z）与实际请求瓦片级别分开查询；<code>setTileLodOffset(-1)</code> 让瓦片请求整体降一级
+（字体偏小/高密度屏调试用，默认 0，实验能力）；<code>setTileLodAlignDisplay(true)</code> 开启高分辨率密度对齐。</p>
+<pre><code>console.info('camera z=' + map.cameraZoomLevel() + ' tile z=' + map.tileZoomLevel(18));
+map.setTileLodOffset(-1);   // 实验：瓦片降一级，回退传 0</code></pre></div>
+
+<h3>6.11 渲染控制</h3>
+<div class="api"><h4>requestRender / viewHeightVp <span class="badge b-base">原生</span></h4>
+<div class="sig">requestRender(): void<br>viewHeightVp(): number</div>
+<p>按需渲染模式下主动请求一帧；门面写操作内部已自带请求，一般无需手动调用。</p></div>
+
+<h2 id="s7">7. NativeSrs 坐标转换 <span class="badge b-base">原生</span></h2>
+<div class="sig">static initProjData(context: common.UIAbilityContext): void<br>static initProjDataPath(projDataPath: string): void<br>static convert(x: number, y: number, srcCrs: string, tgtCrs: string): number[] | null<br>static getProjVersion(): number</div>
+<p>PROJ 管道按 "源|目标" 缓存可高频调用；proj.db 未就绪或 CRS 非法返回 null，调用方自行回退。
+getProjVersion 返回 major*10000+minor*100+patch（如 90200=9.2.0）。</p>
+<pre><code>NativeSrs.initProjData(this.context);            // EntryAbility 一次
+const xy = NativeSrs.convert(108.95, 34.21, 'EPSG:4326', 'EPSG:3857');
+if (xy) console.info('mercator:', xy[0], xy[1]);</code></pre>
+
+<h2 id="s8">8. NativeNet 网络证书 <span class="badge b-base">原生</span></h2>
+<div class="sig">static initCaBundle(context: common.UIAbilityContext): void</div>
+<p>把 rawfile/ca/cacert.pem 拷入沙箱并交给引擎 HttpClient；首次联网前调一次（幂等）。
+未配置不致命，引擎降级为不校验重试，但每块瓦片多一次 TLS 握手。</p>
+
+<h2 id="s9">9. NativeVector 矢量文件 IO <span class="badge b-base">原生</span></h2>
+<div class="sig">static readVectorFeatures(path, minLon, minLat, maxLon, maxLat, includeAllFields, labelField, simplifyGeometry, simplifyTolerance): string | null<br>static getFeatureAttributes(path: string, featureId: number): string | null<br>static queryVectorFeatures(path: string, sql: string): string | null<br>static countVectorFeatures(path: string): number<br>static updateFeatureAttributes(path: string, featureId: number, keys: string[], values: string[]): boolean</div>
+<p>统一 JSON 字符串传输；范围任一 NaN 读全部；SQL 错误返回 <code>{"error":"…"}</code>；
+属性写回就地修改源文件，只读驱动返回 false。Harmony LITE 仅支持 GeoJSON 类数据源。</p>
+<pre><code>const json = NativeVector.queryVectorFeatures(filePath, "SELECT * FROM layer WHERE name='陕西'");
+const ok = NativeVector.updateFeatureAttributes(filePath, 3, ['note'], ['已核查']);</code></pre>
+
+<h2 id="s10">10. NativeLayerInfo 图层元信息 <span class="badge b-base">原生</span></h2>
+<div class="sig">static getLayerExtent(path: string): number[] | null   // [minLon,minLat,maxLon,maxLat]<br>static getLayerSrs(path: string): string | null         // "名称\nproj4"<br>static getVectorFieldNames(path: string): string[]<br>static getGdalVersion(): string<br>static getVectorDrivers(): string</div>
+
+<h2 id="s11">11. CesiumTerrainProvider（ArkTS 地形提供器） <span class="badge b-jin">@Jin 新增</span></h2>
+<p>当宿主需要自行掌控地形下载（而非交给 C++ Provider）时使用；数据约定
+projection=EPSG:4326、scheme=tms、format=quantized-mesh-1.0，cols=2^(z+1)、rows=2^z、y 自南向北。
+通常直接用 6.5 的 <code>configureTerrainProvider</code> 即可，本类为高级/自定义链路保留。</p>
+<div class="sig">new CesiumTerrainProvider(options: TerrainSourceOptions)<br>async ensureMeta(): Promise&lt;boolean&gt;<br>isAvailable(z, x, y): boolean<br>tileUrl(z, x, y): string<br>async fetchTile(z, x, y): Promise&lt;Uint8Array | null&gt;<br>async fetchForEngineTiles(tiles: number[][]): Promise&lt;TerrainTile[]&gt;<br>async fetchForEngineTilesStream(tiles, onReady, workers?): Promise&lt;void&gt;<br>resetStats(): void / resetDeliveredTiles(): void / dispose(): void</div>
+<p>TerrainSourceOptions：<code>baseUrl / cacheDir</code> 必填，可选 <code>maxZoom / concurrency / headers</code>；
+另导出纯函数 <code>geoTileBounds / lonLatToGeoTile / mercatorTileCenter / lonLatToMercatorTile / serviceZoomForEngineZoom</code>
+与接口类型 <code>TerrainTile / GeoBounds</code>。</p>
+<pre><code>const p = new CesiumTerrainProvider({
+  baseUrl: 'https://host/terrain/cesium',
+  cacheDir: this.baseDir + '/terrain-arkts',
+  concurrency: 4,
+});
+if (await p.ensureMeta()) {
+  const bytes = await p.fetchTile(10, 843, 402);
+  if (bytes) {
+  const b = geoTileBounds(10, 843, 402);          // 服务瓦片经纬度四至
+  map.setTerrainTile(10, 843, 402, bytes, [b.minLon, b.minLat, b.maxLon, b.maxLat]);
+}
+}</code></pre>
+
+<h2 id="s12">12. 地形事件与状态 JSON <span class="badge b-jin">@Jin 新增</span></h2>
+<p><code>setOnTerrainProviderEventListener</code> 回调 payload 为单行 JSON，<code>event</code> 字段区分类型：</p>
+<table>
+<tr><th>event</th><th>时机</th><th>附加字段</th></tr>
+<tr><td>metadata_started / metadata_ready</td><td>layer.json 开始/就绪</td><td>source=disk/network</td></tr>
+<tr><td>refresh_started</td><td>开始刷新当前视口</td><td>engineZoom、engineTiles、queued</td></tr>
+<tr><td>first_tile</td><td>本轮首块 DEM 注入</td><td>firstTileMs（首块耗时）</td></tr>
+<tr><td>progress</td><td>加载进度</td><td>delivered、total、failures</td></tr>
+<tr><td>refresh_completed</td><td>本轮完成</td><td>delivered、total、failures、elapsedMs</td></tr>
+<tr><td>enabled / disabled</td><td>地形开关变化</td><td>—</td></tr>
+<tr><td>error</td><td>错误</td><td>stage（metadata / metadata_parse 等）、message</td></tr>
+</table>
+<p><code>terrainProviderStatus()</code> 返回 stats JSON，常用字段：<code>enabled / metadataLoaded / maxZoom /
+engineZoom / requestedEngineTiles / requestedServiceTiles / deliveredTiles / failures / retries /
+diskHits / networkRequests / cacheWrites / metadataDiskHits / availableSkips / duplicateSkips /
+firstTileMs / elapsedMs</code>。</p>
+
+<h2 id="s13">13. 常见业务示例</h2>
+
+<h3>13.1 影像 + 注记 + 地形 + flyTo 全链路</h3>
+<pre><code>view.addTileLayer(cache + '/img', IMG_URL, 18, false);
+view.addTileLayer(cache + '/cia', CIA_URL, 18, true);
+view.configureTerrainProvider(TERRAIN_BASE, cache + '/terrain', 15, 4, 3, {});
+view.setTerrainProviderEnabled(true);
+view.setViewMode(ViewMode.THREE_D);
+view.flyToCamera(new Camera(34.2196, 108.9594, 2500, 0, 30, 0, 45, AltitudeMode.ABSOLUTE), 2200);</code></pre>
+
+<h3>13.2 点击地图在点击处加业务点</h3>
+<pre><code>let overlayId = -1;
+const points: number[] = [];
+map.setOnTapListener((x, y) =&gt; {
+  const pos = map.screenToGeo(x, y);
+  if (!pos) return;
+  if (overlayId &lt; 0) overlayId = map.addOverlayLayer(new VectorStyle(0, 0, 0, 0xFFFF3333, 3, 0xFFFF3333, 6));
+  points.push(pos.longitude, pos.latitude);
+  map.updateOverlayPoints(overlayId, points);
+});</code></pre>
+
+<h3>13.3 点选文件矢量并高亮</h3>
+<pre><code>map.setOnTapListener((x, y) =&gt; {
+  const hit = map.pickVector(x, y);
+  if (!hit) return;
+  const geo = map.featureGeometry(hit.layerIndex, hit.fid);
+  if (!geo) return;
+  const hl = map.addOverlayLayer(new VectorStyle(0x44FFCC00, 0xFFFFAA00, 2));
+  map.setOverlayNoPick(hl, true);   // 高亮层不参与拾取竞争
+  if (geo.type === 2) map.updateOverlayPolygons(hl, geo.lonlat, geo.ringCounts);
+  else if (geo.type === 1) map.updateOverlayLines(hl, geo.lonlat, geo.ringCounts);
+  else map.updateOverlayPoints(hl, geo.lonlat);
+});</code></pre>
+
+<h3>13.4 动态轨迹线与多边形</h3>
+<pre><code>const track = map.addOverlayLayer(new VectorStyle(0, 0, 0, 0xFF00CCFF, 4));
+map.updateOverlayLines(track,
+  [108.95,34.21, 108.97,34.22, 109.00,34.21, 109.02,34.24], [4]);</code></pre>
+
+<h3>13.5 ARGB 图标（PixelMap → addOverlayLayer）</h3>
+<pre><code>async function loadIcon(path: string): Promise&lt;[number[], number, number]&gt; {
+  const buf = await fs.readFile(path);
+  const image = await image.createImageSource(buf.buffer).createPixelMap();
+  const w = image.getImageInfoSync().size.width;
+  const h = image.getImageInfoSync().size.height;
+  const px = new ArrayBuffer(w * h * 4);
+  await image.readPixelsToBuffer(px);
+  // 注意 RGBA→引擎约定的 ARGB 位模式打包
+  const u8 = new Uint8Array(px); const argb: number[] = [];
+  for (let i = 0; i &lt; u8.length; i += 4) {
+    argb.push(((u8[i+3]&lt;&lt;24) | (u8[i]&lt;&lt;16) | (u8[i+1]&lt;&lt;8) | u8[i+2]) | 0);
+  }
+  return [argb, w, h];
+}
+const [icon, w, h] = await loadIcon(iconPath);
+const poiLayer = map.addOverlayLayer(new VectorStyle(), icon, w, h);</code></pre>
+
+<h3>13.6 按范围加载在线 GeoJSON <span class="badge b-jin">@Jin</span></h3>
+<pre><code>const idx = map.addVectorLayer(
+  'http://210.74.129.84:8520/app-pub/web-data/geojson/district/province.json',
+  new VectorStyle(0x334A8FE3, 0xFFFFFFFF, 2),
+  undefined, 0, 0,
+  new VectorExtent(105, 31, 111, 39), 1000);
+// 相机移动后收窄范围：
+map.updateVectorExtent(idx, new VectorExtent(minLon, minLat, maxLon, maxLat), 1000);</code></pre>
+
+<h3>13.7 天地图 4490 图源 <span class="badge b-jin">@Jin</span></h3>
+<pre><code>const tk = 'YOUR_TIANDITU_TOKEN';
+map.addTileLayerWithOptions(cache + '/tdt-img-c',
+  'https://t{s}.tianditu.gov.cn/DataServer?T=img_c&x={x}&y={y}&l={z}&tk=' + tk,
+  18, false, 'EPSG:4490', false, 1);
+map.addTileLayerWithOptions(cache + '/tdt-cia-c',
+  'https://t{s}.tianditu.gov.cn/DataServer?T=cia_c&x={x}&y={y}&l={z}&tk=' + tk,
+  18, true, 'EPSG:4490', false, 1);</code></pre>
+
+<h3>13.8 长按逆地理编码（天地图 geocoder + popup）</h3>
+<pre><code>map.setOnLongPressListener(async (x, y) =&gt; {
+  const pos = map.screenToGeo(x, y);
+  if (!pos) return;
+  const url = 'https://api.tianditu.gov.cn/geocoder?post={' +
+    '"lon":' + pos.longitude + ',"lat":' + pos.latitude + ',"ver":"1"}&type=geocode&tk=' + TK;
+  const resp = await http.createHttp().request(url);
+  const addr = JSON.parse(resp.result as string).result?.formatted_address ?? '未知地址';
+  this.showPopup(x, y, addr);   // 宿主 ArkTS 自绘 popup，带关闭按钮
+});</code></pre>
+
+<h2 id="s14">14. 排错指南</h2>
+<table>
+<tr><th>现象</th><th>可能原因</th><th>处理</th></tr>
+<tr><td>so 加载失败 / 符号找不到</td><td>ABI 不匹配或模块名不一致</td><td>确认 arm64-v8a；so 名必须 libglobecore.so，nm_modname=globecore，import 名大小写一致</td></tr>
+<tr><td>黑屏无瓦片</td><td>无网络权限 / URL 模板错误 / HTTPS 证书未初始化</td><td>检查 INTERNET 权限、{z}{x}{y} 顺序、调 NativeNet.initCaBundle；hilog 过滤 globecore</td></tr>
+<tr><td>HTTPS 瓦片慢</td><td>未配置 CA，每块降级双握手</td><td>rawfile 放 cacert.pem 并启动时 initCaBundle</td></tr>
+<tr><td>坐标转换返回 null</td><td>proj.db 未解压或 CRS 字符串非法</td><td>先 NativeSrs.initProjData；用 'EPSG:4326' 标准写法</td></tr>
+<tr><td>地形没有起伏</td><td>仍在 2D / 地形未开 / layer.json 失败</td><td>切 THREE_D；terrainProviderStatus() 看 metadataLoaded；监听 error 事件</td></tr>
+<tr><td>在线 GeoJSON 加载失败</td><td>非 2xx、HTML 登录页、空响应、超 80MB</td><td>浏览器直连验证 URL；hilog 搜 [RemoteGeoJson]；内网 http 放行 cleartext</td></tr>
+<tr><td>大 GeoJSON 卡顿</td><td>一次顶点过多</td><td>用 extent/maxFeatures、updateVectorExtent 分视口加载、简化几何</td></tr>
+<tr><td>4490 注记字小/轻微拉伸</td><td>地理切片重投影特性（已知边界）</td><td>实验性 setTileLodOffset(-1) 对比；后续单图层 serviceZoomOffset 方案</td></tr>
+<tr><td>拾取不到 overlay</td><td>图层 noPick 或图层顺序</td><td>检查 setOverlayNoPick 与 add 顺序</td></tr>
+<tr><td>手势多指跳变</td><td>旧版本问题</td><td>确认使用含 @Jin 防跳改造的包（main 0.1.5.0-dev 起）</td></tr>
+</table>
+<div class="note"><b>hilog 常用过滤：</b><code>hdc shell hilog | grep globecore</code>；
+地形关注 <code>CesiumTerrainProvider</code>，在线矢量关注 <code>[RemoteGeoJson]/[LiteGeoJson]</code>，
+瓦片关注 <code>TileLoader/TileCache</code>。</div>
+
+<h2 id="s15">15. 文档维护约定 <span class="badge b-jin">@Jin</span></h2>
+<ul>
+<li>本文件路径：<code>docs/api/harmony-api-guide.html</code>；Android 同目录另有 <code>android-api-guide.html</code>，两端 API 变更需同步。</li>
+<li>后续新增、修改、删除任何公开 API（含 NAPI 导出、ArkTS 门面、数据类型字段），必须在同次定稿更新本文档对应条目与示例，并在主仓 README「SDK 能力速查」同步。</li>
+<li>本库改造/新增条目统一带 <span class="badge b-jin">@Jin</span> 标记，实验能力另加 <span class="badge b-exp">实验</span> 并写明回退方式。</li>
+<li>面向 AI 助手：每个 API 条目保持「签名 → 参数表 → 可运行示例」三段式，示例使用文档内统一变量名（map/view/cache），避免伪代码。</li>
+</ul>
+<p class="muted">生成基线：main 分支 37cb187（feat(tile): support EPSG 4490 raster tiles），分发包 globecore-harmony-next-0.1.5.0-dev。</p>
+</div>
+</body>
+</html>
