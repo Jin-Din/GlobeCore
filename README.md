@@ -46,7 +46,7 @@ OpenGL ES 2.0 绘制全部在 native 完成，并内联编译了 GDAL/OGR、PROJ
 
 - @Jin exp1e~exp1h 系列仍按实验提交管理，开关与回退方式见 `docs/jin-modification-records.md` 第五节
 - @Jin 天地图 4490 注记 cia_c 字偏小与轻微上下拉伸仍存在；早期 4490 重采样路径内的 serviceZoomOffset 实验已回退，通用单图层 API 现已独立提供（见新增能力），但级差只能整体缩放字号、不能消除 1.2 倍拉伸本身；推荐注记改用 cia_w 或客户端矢量文字
-- @Jin 未解决待办：陕西省级大面 3D 地形遮挡；4490 注记字小/拉伸的彻底方案；高斯泼溅 GLB 点云管线；heightOffset 步进节流防抖；政务版陕西底图（地址待核实）
+- @Jin 未解决待办：陕西省级大面 3D 地形遮挡；4490 注记字小/拉伸的彻底方案；高斯泼溅 GLB 点云管线；heightOffset 步进节流防抖；政务版陕西底图（地址待核实）；Android JNI/Kotlin 移植 addTileLayerWithLayerOptions/addTileset3DWithOptions（含 3D Tiles 系列入口，C++ 核心已双端共用）
 - @Jin 原“全局 LOD 偏移改造为单图层参数”待办已于 2026-11-11 完成（`setLayerZoomOffset`，Harmony 全链路 + API 文档）
 - @Jin 3D Tiles(b3dm) 已随 `feature/3dtiles-b3dm` 合入主线（2026-11-11），仍按实验能力管理：纹理解码已通，PBR/i3dm/pnts/cmpt、要素拾取、磁盘缓存、高斯泼溅未支持，回退方式见 `docs/jin-modification-records.md` 与 `docs/design/3dtiles-b3dm-plan.md`
 
@@ -633,7 +633,7 @@ cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build b
 
 ## 版本说明
 
-- **0.1.5.0（开发中，分支 `feature/terrain-pre`，未发版）**：三维地形、手势稳定性与瓦片调度专项——
+- **0.1.5.0（开发中，未发版；主线分支 `main`，在途分支 `fix/3d-gesture-low-altitude`）**：三维地形、手势稳定性与瓦片调度专项——
   ① **三维地形（quantized-mesh v1.0）**：新增宿主侧 DEM 注入通路 `setTerrainTile/clearTerrain`，引擎按服务瓦片真实 bbox 全局共享并采样多块 DEM（墨卡托渲染瓦片与 EPSG:4326 地理网格边界不重合，改单块粗 DEM 外推为四角/边中点收集全部相交服务瓦片）；`QuantizedMesh` 索引改按规范 **high-watermark** 解码（`index=highest-code; code==0 则 highest++`），修正此前山脊/沟谷整体错位；地形细分提升（24 分格/瓦片），DEM 解码在 GL 线程逐帧削峰（每帧 3 块、余留回队并驱动 WHEN_DIRTY 连续出帧），地形瓦片改 **静态 VBO + LRU512**、着色器以 `uRtcOffset/uTileCenter` 取代逐顶点 `uEye`，稳态浏览零顶点重建零重传；
   ② **双指缩放抬手跳变修复**：根因为多指→单指切换时残余孤立的单帧巨幅 panBy（真机实测最大约 1643px）。ArkTS 识别器层（`MapGestures`）改为 Up 只删除抬起手指 id 而不全量重建手指表、单指独立平移基准、多指转单指 4 帧宽限窗口（60vp）与常规 100vp 单步钳制、fling 速度钳 6000vp/s 与 dt 钳 32ms；native `Navigator::panByPixels` 增加单帧 >200px 静默丢弃作 2D/3D 通用兜底；
   ③ **瓦片请求与初始加载优化**：`TileLoader` 新增视口代际 `beginView(signature)`（2D 用可见范围签名、3D 用排序后可见瓦片集签名），视口集合不变的补帧保留队列、集合变化即丢弃未开工排队项与旧就绪字节，在途同 key 若仍被新视口需要则升级代际复用，`drainReady` 只接收当前代际、单帧 32 张上传预算不被旧视口抢占，`hasPendingOrReady` 计入在途任务；在线瓦片层 worker 调为 6、祖先链深度收敛为 2，并增加 cache/network/failed 聚合统计日志。**首屏粗瓦优先**：2D/3D 请求投递顺序改为先 z-2、再 z-1，最后可见叶，在线 XYZ 源 worker 出队同步采用低 z 优先（本地 GDAL 栅格仍高 z 优先，避免慢粗瓦堵死），冷启动时先以少量祖先瓦完整低清覆盖再由叶子替换变清。真机清缓存日志确认首批处理顺序为 z11 → z12 → z13；早期版本单层瓦片由约 965 块（横跨 z8~13）降至 204 块（z13 叶 + 两级祖先），二次启动全部命中磁盘缓存（network=0）；
@@ -652,6 +652,11 @@ cmake -S . -B build-linux -G Ninja -DCMAKE_BUILD_TYPE=Release && cmake --build b
   ⑯ @Jin **HarmonyOS NEXT 在线 GeoJSON P0 真机验收**：`feature/geojson-url-data` 分支在鸿蒙 HAR LITE 构建中打通 `ArkTS addVectorLayer(httpUrl) → NAPI vectorCacheDir → C++ RemoteVectorCache 原子下载缓存 → lite_geojson_reader → VectorBuilder/VBO/拾取/贴地`。真机首次下载 669,489 bytes、解析 4 个 MultiPolygon 要素；重启后二次加载 `cache hit elapsed=0ms`、read/build 共约 268ms，且不再走 ArkTS 下载或 overlay 兜底。3D 地形开启后四省边界仍可显示；能力由 `RemoteVectorCache::kExperimentalRemoteGeoJsonSource` 守卫，可一键回退。
   ⑰ @Jin **在线 GeoJSON 岛洞解析、远程大面贴地与动态 overlay 边界修正（实验性，构建核对 `v0.1.3-20261029-remote-vector-drape35`）**：在 P0 URL Source 基础上继续修复 HarmonyOS NEXT LITE GeoJSON 对 Polygon/MultiPolygon 岛洞环的解析与三角剖分回归，陕西省级 `province.json` 真机解析为 4 个 MultiPolygon 要素，其中陕西外环 2434 点、3 个洞、洞点 51 个，未再出现洞间多余连线或几何错乱；远程 GeoJSON 与内存 overlay 的 3D VBO 路径拆分，在线大面使用独立 `uploadGlobeRemoteDrapedChunks()` 实验通路，按当前 DEM 覆盖细分、逐 chunk 标记 `terrainDraped`，运动/flyTo 中延迟重烘焙，停顿后再生成贴地 VBO，避免浏览过程中为整省大面同步采高造成卡顿。内存 overlay 的面填充在 DEM 烘焙后按 `isOverlay` 整层关闭对地形的深度测试，修复太白山小面被粗地形三角面局部遮挡造成的“破碎”；面外边界新增实验性 conformal outline ribbon：不再用屏幕空间横向扩边的 stroke shader，而是将中心线沿 DEM 加密、左右边分别偏移并重新采高，生成随坡面起伏的 `GL_TRIANGLES` 地表窄三角带（10km 测试面真机日志 `outline=0、conformalOutlineRanges=1、ribbonVerts=4476、ribbonHalfM=27.3`）。该边界方案以固定世界宽度换取旋转时不“飘”，尚未做到恒定像素宽度，后续可继续优化；开关和代码均集中在 `Renderer.cpp`，可整体回退到旧 stroke。透明填充样式（fill alpha=0）已由 Demo 验证 2D/3D 仅显示省界，但当前仍会构建 fill 几何，后续需在 `fillAlpha<=0` 时跳过 earcut/fill VBO/远程贴地烘焙。
   ⑱ @Jin **本地纯线 DEM 贴地与高等级视角遮挡修复（实验性，构建核对 `v0.1.3-20261029-local-line-drape36e`）**：新增仅针对本地文件、非 overlay、非在线 GeoJSON、无 fill/outline/point/icon 的纯 `MultiLineString` 实验通路；低空等待精细 DEM 后沿线加密采高并按 ring 分 chunk，手势/flyTo 中防抖延迟重建；地形加载过渡期和 z3~z6 等高等级视角逐 chunk 临时关闭线对地形的深度测试，避免粗地形瓦片把陕西省界埋住。真机 HUD 实测 z3/z4/z5 场景品红线连续可见，用户人工确认 z4/z5/z6 通过；无地形、太白山 overlay 样例和在线省级大面加载回归正常。遗留：陕西省级 Polygon/MultiPolygon 大面在 3D 地形下仍会被遮挡且不限级别，已列入后续未解决待办。
+  ⑲ @Jin **图层初始化参数入参化 layer-init-options（实验/可回退，2026-11-11 已合入 main，提交 23f4ed7）**：3D Tiles 的 `heightOffset` 与瓦片层的 `serviceZoomOffset` 支持建层 options 一次性传入，免“先建层后补 setter”的首帧零偏移跳变。
+    - 瓦片层：`TileLayerOptions` 新增 `serviceZoomOffset`（沿用引擎 `[-3,2]` 钳制），Harmony 新增 `addTileLayerWithLayerOptions(cacheDir, url, maxLevel, overlay, options)`，options 含 `crs/tmsY/tileMatrixOffset/serviceZoomOffset` 全可选字段；
+    - 3D Tiles：C++ 新增 `Tileset3DOptions{heightOffset}` 与 `addTileset3D(url, opts)` 重载，旧单参入口以 nullptr 委托保留；Harmony 新增 `addTileset3DWithOptions(url, {heightOffset})`，建层后立即写入图层原子量、下一帧 uniform 生效；
+    - 同步修复一个启动崩溃：`addTileLayer` 在 `std::move(layer)` 后的日志仍解引用空 `unique_ptr`（SIGSEGV @0x7c），改为 move 前把偏移落本地变量；
+    - 既有 setter（`setLayerZoomOffset`/`setTileset3DHeightOffset`）全部保留并可运行时覆盖初值；options 缺省或恒为 0 时旧行为完全不变，删除 WithOptions 接线即可整体回退；真机验证见 `docs/jin-modification-records.md` 第七节。Android JNI/Kotlin 入口（含 3D Tiles 系列）待移植，已列入待办。
   > 维护约定：**每次改动定稿后同步更新本版本说明**（与代码提交同批），未发版工作累积在本条，发版时再改版本号与“当前发布”标记。
 - **0.1.4.0（当前发布）**：三项合入——
   ① **GeoPackage 工程读写**：新增 `bridge/geopackage_io.cpp`，OGR GPKG 驱动实现工程文件（七表：tracks / measures / photos / media_groups / survey_plots / project_meta / layer_refs）整体读写，Kotlin/ArkTS 侧以 JSON 跨桥传输；写入整文件 tmp+rename **原子替换**，五张要素表 **SetFID 落盘**使记录 id 持久化（重写不重编号），读侧缺列宽容回退、写侧整文件重建自动升级 schema；
