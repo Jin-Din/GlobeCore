@@ -26,6 +26,7 @@
 #include "render/Texture.h"
 #include "rhi/RHI.h"
 #include "terrain/QuantizedMesh.h"
+#include "tileset3d/Tileset3DModel.h"
 
 namespace globecore {
 
@@ -93,6 +94,9 @@ public:
     /// 供 [GlobeEngine::addRasterImageLayer] 在 UI 线程取全幅位图边长帽（非精确只影响降采样档位，无正确性风险）。
     int maxTextureSize() const { return maxTextureSize_; }
 
+
+    /// @Jin 注入 GlobeEngine 持有的 3D Tiles 图层容器；Renderer 只保留引用，不拥有图层生命周期。
+    void setTileset3DLayers(const std::vector<std::unique_ptr<Tileset3DLayer>> &layers);
     // ==================== 地形 DEM 通路（quantized-mesh 高度缓存） ====================
 
     /// 注入/更新一块 quantized-mesh 地形瓦片（解码 bytes → 存入 LRU 缓存）。
@@ -120,6 +124,12 @@ public:
     void setSunDirection(const Vec3 &dir);
 
 private:
+    /// @Jin 3D Tiles 模型 Pass：drain CPU 模型、上传 VBO/IBO，并按 ECEF RTC 口径参与深度测试。
+    bool drawTileset3D(const Navigator::Camera3D &cam, const Matrix4 &viewProjRtc);
+    /// @Jin 仅 GL 线程调用：把 Provider 已转换好的 CPU 模型上传为常驻 GPU buffer。
+    void uploadTileset3DModels();
+    /// @Jin 释放 3D Tiles 模型 GPU 资源；surface release/context 丢失时与其它 GL 资源同口径处理。
+    void releaseTileset3D();
     /// @Jin flyTo 动画结束后保留短暂低预算窗口，跨代际旧瓦片和 DEM 网格不会在动画最后一帧集中冲击 GL。
     bool cameraFlightBudgetActive() const;
     /// 日光方向（ECEF 归一向量，指向太阳）。renderGlobeLayer3D 每帧传给 uSunDir uniform。
@@ -502,6 +512,31 @@ private:
     GLint gfiMvp_ = -1;
     GLint gfiTexture_ = -1;
 
+    // @Jin 3D Tiles b3dm 最小渲染通路：独立 shader + 每个 b3dm 一组 VBO/IBO，模型顶点已在 CPU 转成 anchor RTC。
+    ShaderProgram tileset3DProgram_;
+    GLint t3APos_ = -1;
+    GLint t3ANormal_ = -1;
+    GLint t3AColor_ = -1;
+    GLint t3UMvp_ = -1;
+    GLint t3UOffset_ = -1;
+    GLint t3USunDir_ = -1;
+    GLint t3UAmbient_ = -1;
+    GLint t3AUv_ = -1;       // @Jin aUv 纹理坐标属性
+    GLint t3UTex_ = -1;      // @Jin uTex 采样器
+    GLint t3UUseTex_ = -1;   // @Jin uUseTex 纹理开关
+    GLint t3UUnlit_ = -1;    // @Jin uUnlit 无光照材质开关
+    struct Tileset3DGpuModel {
+        int layerId = -1;
+        GLuint vbo = 0;
+        GLuint ibo = 0;
+        int vertexCount = 0;
+        int indexCount = 0;
+        Vec3 anchorEcef;
+        Texture texture;     // @Jin b3dm 内嵌纹理（无效=纯色回退）
+        bool unlit = false;  // @Jin KHR_materials_unlit
+    };
+    std::unordered_map<std::string, Tileset3DGpuModel> tileset3DGpu_;
+    const std::vector<std::unique_ptr<Tileset3DLayer>> *tileset3DLayers_ = nullptr;
     GLuint vboGlobeMesh_ = 0;              // 3D 网格动态 VBO（保留：其它通路备用；瓦片已改静态缓存）
     // @Jin 【卡顿优化】瓦片静态网格 VBO 缓存：几何按 tileKey 缓存，仅当该瓦片覆盖到的 DEM 集合变化时
     // @Jin 重建；稳态浏览与其它区域地形到达时，逐瓦片只更新 uRtcOffset 等 uniform 并 draw。
@@ -583,6 +618,8 @@ private:
     int lastIdleGlobeTileLevel_ = -1;
     // @Jin 仅复用于相同 maxLevel 的图层，避免底图和 overlay 的 LOD 上限不同时互相污染迟滞状态。
     int lastIdleGlobeTileMaxLevel_ = -1;
+    // @Jin 单图层 LOD 改造：记录稳定 LOD 对应的 serviceZoomOffset，偏移不同的图层不复用同一份交互迟滞层级。
+    int lastIdleGlobeTileZoomOffset_ = -99;
 
     int viewportWidth_ = 0;
     int viewportHeight_ = 0;
@@ -669,3 +706,4 @@ private:
 } // namespace globecore
 
 #endif // GLOBECORE_RENDER_RENDERER_H
+

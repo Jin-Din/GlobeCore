@@ -28,7 +28,7 @@ namespace globecore {
 // 每次准备重建 HAR 前，把 GLOBECORE_BUILD_ID 改成一个全新的唯一串（例如末尾序号 +1，或带上你自定义的标记）。
 // 装机日志出现该串 = 跑的确实是你这次改过、并重新构建 + 重新链接的 HAR；
 // 未出现 / 仍是旧串 = app 还在用旧 HAR（引擎源码根本没进设备）。改完务必：重建 HAR → app Sync/ohpm 重新链接 → 卸载重装。
-#define GLOBECORE_BUILD_ID "v0.1.3-20261029-local-quick-summit-label04" // @Jin 构建核对：快捷定位 POI 与文字拆层、显式加载 Harmony 中文字体，并放大山顶文字。
+#define GLOBECORE_BUILD_ID "v0.1.3-20261111-per-layer-lod1" // @Jin 构建核对：单图层 serviceZoomOffset（LOD 偏移逐层可调） // @Jin 构建核对：3DTiles 纹理解码修复版（补 main 入口、GLES2 NPOT 回退 LINEAR） // @Jin [诊断-临时] 3DTiles 8 相位诊断构建，定位后回退 // @Jin 构建核对：快捷定位 POI 与文字拆层、显式加载 Harmony 中文字体，并放大山顶文字。
 
 // 祖先链请求深度帽：叶子只向上请求 4 级。更深的祖先拉伸 >16× 已无兜底价值，而链条请求数是
 // 数量倍增器；尤其无金字塔栅格源，低级别粗瓦源窗口≈整幅（单块秒级～十几秒），砍深度直接减掉
@@ -354,6 +354,56 @@ void main() {
 // uOffset=anchor−eye 补 eye 平移、uAnchor=anchor 供恢复 ecef 求法向。
 // 高度：aMode=1（高程要素）→ 已 baked 在 aPos 的真实高度，不再叠加 uVecAlt；aMode=0（贴地）→ 沿用 uVecAlt
 // 沿法向抬升（防与瓦片 z-fighting、随缩放零重建）。即 抬升 = uVecAlt*(1-aMode)。uMvp 传 viewProjRtc。
+// @Jin 3D Tiles b3dm 模型最小着色器：CPU 已把 ECEF 大数转成 anchor RTC，GPU 只做 viewProjRtc 与简单 Lambert。
+const char *const kTileset3DVertexSrc = R"GLSL(
+attribute vec3 aPos;
+attribute vec3 aNormal;
+attribute vec2 aUv;   // @Jin 3D Tiles 纹理坐标
+attribute vec4 aColor;
+uniform mat4 uMvp;
+uniform vec3 uOffset;
+varying vec4 vColor;
+varying vec3 vNormal;
+varying vec3 vViewDir;
+varying vec2 vUv;
+void main() {
+    vec3 rtc = aPos + uOffset;
+    gl_Position = uMvp * vec4(rtc, 1.0);
+    vColor = aColor;
+    vNormal = aNormal;
+    vViewDir = -rtc;
+    vUv = aUv;
+}
+)GLSL";
+
+const char *const kTileset3DFragmentSrc = R"GLSL(
+precision mediump float;
+varying vec4 vColor;
+varying vec3 vNormal;
+varying vec3 vViewDir;
+varying vec2 vUv;
+uniform vec3 uSunDir;
+uniform float uAmbient;
+uniform sampler2D uTex;    // @Jin b3dm 内嵌纹理（NPOT，CLAMP+LINEAR）
+uniform float uUseTex;    // @Jin 1=有纹理采样，0=纯色 Lambert 回退
+uniform float uUnlit;     // @Jin KHR_materials_unlit：直接输出，不做光照
+void main() { // @Jin 修复：接入纹理/unlit 改造时误删 main 入口，缺失会导致整个片元着色器编译失败、3D Tiles 程序不可用
+    vec4 base = vColor;
+    if (uUseTex > 0.5) {
+        // @Jin 倾斜摄影纹理与 baseColorFactor 相乘（数据中因子通常为 1）。
+        base = base * texture2D(uTex, vUv);
+    }
+    if (uUnlit > 0.5) {
+        gl_FragColor = base;
+    } else {
+        vec3 n = normalize(vNormal);
+        float diff = max(dot(n, uSunDir), 0.0);
+        vec3 color = base.rgb * (uAmbient + (1.0 - uAmbient) * diff);
+        gl_FragColor = vec4(color, base.a);
+    }
+}
+)GLSL";
+
 const char *const kGlobeFillVertexSrc = R"GLSL(
 attribute vec3 aPos;
 attribute vec4 aColor;
@@ -1099,6 +1149,7 @@ void Renderer::onSurfaceCreated() {
     // @Jin exp1f 的交互 LOD 迟滞只在有效纹理上下文成立；surface 重建后必须重新学习稳定层级。
     lastIdleGlobeTileLevel_ = -1;
     lastIdleGlobeTileMaxLevel_ = -1;
+    lastIdleGlobeTileZoomOffset_ = -99; // @Jin 单图层 LOD 记忆随上下文/纹理/图层重置一并失效
     vboDynamic_ = 0;
     vboUnitQuad_ = 0;
     // 字形图集 GL 纹理属旧上下文：放弃旧句柄（不 glDelete），保留 CPU 图集与字形表；
@@ -1236,6 +1287,22 @@ void Renderer::onSurfaceCreated() {
     gc3UTileCenter_ = globeColorProgram_.uniformLocation("uTileCenter");
         gc3USunDir_ = globeColorProgram_.uniformLocation("uSunDir");
         gc3UAmbient_ = globeColorProgram_.uniformLocation("uAmbient");
+    }
+    // @Jin 3D Tiles b3dm 模型纯色/简单光照 shader，初始化失败不影响地图与地形既有通路。
+    if (!tileset3DProgram_.init(kTileset3DVertexSrc, kTileset3DFragmentSrc)) {
+        LOGE("Renderer: tileset 3D shader init failed");
+    } else {
+        t3APos_ = tileset3DProgram_.attribLocation("aPos");
+        t3ANormal_ = tileset3DProgram_.attribLocation("aNormal");
+        t3AUv_ = tileset3DProgram_.attribLocation("aUv"); // @Jin 纹理坐标属性
+        t3AColor_ = tileset3DProgram_.attribLocation("aColor");
+        t3UMvp_ = tileset3DProgram_.uniformLocation("uMvp");
+        t3UOffset_ = tileset3DProgram_.uniformLocation("uOffset");
+        t3USunDir_ = tileset3DProgram_.uniformLocation("uSunDir");
+        t3UAmbient_ = tileset3DProgram_.uniformLocation("uAmbient");
+        t3UTex_ = tileset3DProgram_.uniformLocation("uTex");       // @Jin b3dm 纹理采样器
+        t3UUseTex_ = tileset3DProgram_.uniformLocation("uUseTex"); // @Jin 纹理开关
+        t3UUnlit_ = tileset3DProgram_.uniformLocation("uUnlit");   // @Jin unlit 材质开关
     }
     // P2.a 3D 矢量 fill/stroke 两程序（片元均复用 kColorFragmentSrc）
     if (!globeFillProgram_.init(kGlobeFillVertexSrc, kColorFragmentSrc)) {
@@ -1412,6 +1479,7 @@ void Renderer::clearTileTextures() {
     // @Jin 清空全部瓦片纹理后旧 LOD 不再有对应父瓦兜底，下帧从当前视口重新记录稳定层级。
     lastIdleGlobeTileLevel_ = -1;
     lastIdleGlobeTileMaxLevel_ = -1;
+    lastIdleGlobeTileZoomOffset_ = -99; // @Jin 单图层 LOD 记忆随上下文/纹理/图层重置一并失效
 }
 
 void Renderer::discardRemovedLayerTextures() {
@@ -1428,6 +1496,7 @@ void Renderer::discardRemovedLayerTextures() {
         // @Jin 图源切换会丢弃该层全部纹理，同步清空 exp1f LOD 记忆，避免新源沿用旧源手势层级。
         lastIdleGlobeTileLevel_ = -1;
         lastIdleGlobeTileMaxLevel_ = -1;
+        lastIdleGlobeTileZoomOffset_ = -99; // @Jin 单图层 LOD 记忆随图层纹理丢弃一并失效
         LOGI("Renderer discardRemovedLayerTextures layer=%d", static_cast<int>(li));
     }
 }
@@ -1639,7 +1708,12 @@ bool Renderer::renderLayer(size_t layerIndex, double cwx, double cwy, double hw,
     TexMap &texMap = layerTextures_[layerIndex];
 
     // LOD 叶级别：按本层图源 maxLevel 逐层钳制（zoom 超过后恒为 maxLevel，由投影拉伸末级瓦片纹理）。
-    const int level = nav_.tileLevel(layer.maxLevel);
+    // @Jin 单图层 serviceZoomOffset：在全局 LOD 结果上逐层再偏移并钳制；下游可见范围/请求/祖先链/绘制
+    // @Jin 统一使用调整后的 level，整层几何与瓦片自洽；偏移 0（默认）时与改造前完全一致。
+    const int layerZoomOffset = std::max(-3, std::min(2, layer.serviceZoomOffset));
+    int level = nav_.tileLevel(layer.maxLevel) + layerZoomOffset;
+    if (level < Navigator::MIN_LEVEL) level = Navigator::MIN_LEVEL;
+    if (level > layer.maxLevel) level = layer.maxLevel;
 
     // 可见瓦片行列范围
     int txMin = 0, txMax = -1, tyMin = 0, tyMax = -1;
@@ -1802,6 +1876,163 @@ bool Renderer::renderLayer(size_t layerIndex, double cwx, double cwy, double hw,
 
 // ==================== 3D 球体通路（P1） ====================
 
+// @Jin 3D Tiles b3dm 最小渲染通路：CPU Provider 只交付模型，GL 资源创建/释放均收敛在 Renderer。
+void Renderer::setTileset3DLayers(const std::vector<std::unique_ptr<Tileset3DLayer>> &layers) {
+    tileset3DLayers_ = &layers;
+}
+
+void Renderer::releaseTileset3D() {
+    for (auto &kv : tileset3DGpu_) {
+        if (kv.second.vbo != 0) glDeleteBuffers(1, &kv.second.vbo);
+        if (kv.second.ibo != 0) glDeleteBuffers(1, &kv.second.ibo);
+        kv.second.texture.release(); // @Jin 同步释放 b3dm 纹理 GL 句柄
+    }
+    tileset3DGpu_.clear();
+}
+
+void Renderer::uploadTileset3DModels() {
+    if (tileset3DLayers_ == nullptr) return;
+
+    for (const auto &layerPtr : *tileset3DLayers_) {
+        if (!layerPtr) continue;
+        Tileset3DLayer &layer = *layerPtr;
+        std::vector<Tileset3DModelCpu> pending = layer.drainPendingModels();
+        for (Tileset3DModelCpu &model : pending) {
+            if (model.id.empty() || model.vertices.empty()) continue;
+            auto existing = tileset3DGpu_.find(model.id);
+            if (existing != tileset3DGpu_.end()) continue; // @Jin 同一 b3dm URL 不重复上传，后续 LRU 再做替换淘汰。
+
+            Tileset3DGpuModel gpu;
+            gpu.layerId = layer.layerId();
+            gpu.anchorEcef = model.anchorEcef;
+            gpu.vertexCount = static_cast<int>(model.vertices.size() / 12); // @Jin 交错步长 12 float（含 UV）
+
+            glGenBuffers(1, &gpu.vbo);
+            glBindBuffer(GL_ARRAY_BUFFER, gpu.vbo);
+            glBufferData(GL_ARRAY_BUFFER,
+                         static_cast<GLsizeiptr>(model.vertices.size() * sizeof(float)),
+                         model.vertices.data(), GL_STATIC_DRAW);
+
+            if (!model.indices.empty()) {
+                // @Jin GLES2 核心只保证 unsigned short；ModelBuilder 已把超过 65535 的索引展开为非索引顶点。
+                std::vector<uint16_t> indices16;
+                indices16.reserve(model.indices.size());
+                for (uint32_t index : model.indices) indices16.push_back(static_cast<uint16_t>(index));
+                glGenBuffers(1, &gpu.ibo);
+                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpu.ibo);
+                glBufferData(GL_ELEMENT_ARRAY_BUFFER,
+                             static_cast<GLsizeiptr>(indices16.size() * sizeof(uint16_t)),
+                             indices16.data(), GL_STATIC_DRAW);
+                gpu.indexCount = static_cast<int>(indices16.size());
+            }
+            glBindBuffer(GL_ARRAY_BUFFER, 0);
+            glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+
+            // @Jin b3dm 内嵌 JPEG/PNG：GL 线程用 stb 解码为 RGBA 再上传纹理；失败不阻断几何，回退纯色。
+            gpu.unlit = model.unlit;
+            if (!model.textureBytes.empty()) {
+                int texW = 0, texH = 0;
+                std::vector<uint8_t> rgba;
+                // @Jin 倾斜摄影缩小观察时存在明显缩小混叠，统一走带 mipmap 的上传路径（三线性过滤），远景不再出现椒盐噪点。
+                if (ImageDecoder::decodeRGBA(model.textureBytes.data(), model.textureBytes.size(),
+                                             texW, texH, rgba) &&
+                    !gpu.texture.uploadRGBAWithMipmap(rgba.data(), texW, texH)) {
+                    LOGW("Tileset3D texture decode failed, fallback to flat color: %s", model.id.c_str());
+                }
+            }
+
+            // @Jin Tileset3DGpuModel 内含 move-only 的 Texture，必须移动入表，不能拷贝。
+            tileset3DGpu_.emplace(model.id, std::move(gpu));
+            LOGI("Tileset3D GPU model uploaded: layer=%d id=%s verts=%d indices=%d",
+                 gpu.layerId, model.id.c_str(), gpu.vertexCount, gpu.indexCount);
+        }
+    }
+}
+
+bool Renderer::drawTileset3D(const Navigator::Camera3D &cam, const Matrix4 &viewProjRtc) {
+    if (tileset3DLayers_ == nullptr || tileset3DProgram_.program() == 0) return false;
+
+    uploadTileset3DModels();
+    if (tileset3DGpu_.empty()) {
+        for (const auto &layerPtr : *tileset3DLayers_) {
+            if (layerPtr && layerPtr->visible && layerPtr->loading.load()) return true;
+        }
+        return false;
+    }
+
+    bool needRedraw = false;
+    tileset3DProgram_.use();
+    glUniformMatrix4fv(t3UMvp_, 1, GL_FALSE, viewProjRtc.data());
+    glUniform3f(t3USunDir_, static_cast<GLfloat>(sunDir_.x),
+                static_cast<GLfloat>(sunDir_.y), static_cast<GLfloat>(sunDir_.z));
+    glUniform1f(t3UAmbient_, kGlobeAmbient);
+    glEnable(GL_DEPTH_TEST);
+    glDepthFunc(GL_LEQUAL);
+    glDisable(GL_BLEND);
+
+    for (const auto &layerPtr : *tileset3DLayers_) {
+        if (!layerPtr || !layerPtr->visible) continue;
+        if (layerPtr->loading.load()) needRedraw = true;
+        const int layerId = layerPtr->layerId();
+        // @Jin REPLACE 语义：仅绘制 Provider 当前选择集内的模型。历史 LOD 的 GPU 资源继续缓存（快速回退视角时免重传），
+        // 但 URL 一旦掉出选择集即跳过绘制，避免父子层级同屏叠加产生重影/黑边。选择集尚未就绪（首帧）时不过滤。
+        const bool useActiveSet = layerPtr->hasActiveUrls();
+        for (const auto &kv : tileset3DGpu_) {
+            const Tileset3DGpuModel &gpu = kv.second;
+            if (gpu.layerId != layerId) continue;
+            if (useActiveSet && !layerPtr->isUrlActive(kv.first)) continue; // @Jin 跳过过期 LOD
+            // @Jin 实验性 heightOffset（米）：沿锚点 ECEF 天顶整体平移图层，校准模型与地形的垂直基准差；
+            // @Jin RTC 顶点保持不动，只改本 uniform，运行时可调且 offset=0 时与旧行为逐位一致。
+            const double layerHeightOffsetMeters = layerPtr->getHeightOffset();
+            const Vec3 offset = gpu.anchorEcef - cam.eye + gpu.anchorEcef.normalized() * layerHeightOffsetMeters;
+            glUniform3f(t3UOffset_, static_cast<GLfloat>(offset.x),
+                        static_cast<GLfloat>(offset.y), static_cast<GLfloat>(offset.z));
+
+            // @Jin 纹理：GLES2 采样器固定绑纹理单元 0；NPOT 图片用 CLAMP+LINEAR（Texture 类已设置）。
+            const bool hasTex = gpu.texture.isValid();
+            glActiveTexture(GL_TEXTURE0);
+            if (hasTex) gpu.texture.bind();
+            else glBindTexture(GL_TEXTURE_2D, 0);
+            glUniform1i(t3UTex_, 0);
+            glUniform1f(t3UUseTex_, hasTex ? 1.0f : 0.0f);
+            glUniform1f(t3UUnlit_, gpu.unlit ? 1.0f : 0.0f);
+
+            glBindBuffer(GL_ARRAY_BUFFER, gpu.vbo);
+            // @Jin 交错布局 12 float：position(3)+normal(3)+uv(2)+color(4)。
+            const GLsizei stride = 12 * static_cast<GLsizei>(sizeof(float));
+            glEnableVertexAttribArray(t3APos_);
+            glVertexAttribPointer(t3APos_, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(0));
+            glEnableVertexAttribArray(t3ANormal_);
+            glVertexAttribPointer(t3ANormal_, 3, GL_FLOAT, GL_FALSE, stride,
+                                  reinterpret_cast<const void *>(3 * sizeof(float)));
+            if (t3AUv_ >= 0) {
+                glEnableVertexAttribArray(t3AUv_);
+                glVertexAttribPointer(t3AUv_, 2, GL_FLOAT, GL_FALSE, stride,
+                                      reinterpret_cast<const void *>(6 * sizeof(float)));
+            }
+            glEnableVertexAttribArray(t3AColor_);
+            glVertexAttribPointer(t3AColor_, 4, GL_FLOAT, GL_FALSE, stride,
+                                  reinterpret_cast<const void *>(8 * sizeof(float)));
+
+            if (gpu.indexCount > 0) {
+                glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpu.ibo);
+                glDrawElements(GL_TRIANGLES, gpu.indexCount, GL_UNSIGNED_SHORT, reinterpret_cast<const void *>(0));
+            } else {
+                glDrawArrays(GL_TRIANGLES, 0, gpu.vertexCount);
+            }
+        }
+    }
+
+    glDisableVertexAttribArray(t3APos_);
+    glDisableVertexAttribArray(t3ANormal_);
+    if (t3AUv_ >= 0) glDisableVertexAttribArray(t3AUv_); // @Jin 释放纹理坐标属性槽
+    glDisableVertexAttribArray(t3AColor_);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
+    return needRedraw;
+}
+
 bool Renderer::onDrawFrame3D() {
     // 清颜色+深度（深度缓冲由 GLSurfaceView 默认 EGLConfig 提供 16bit）；背景仍为深色=太空
     // #9 RHI：经后端抽象清除颜色+深度缓冲
@@ -1860,6 +2091,8 @@ bool Renderer::onDrawFrame3D() {
     // Pass A2：全幅栅格贴图沿经纬网格贴球面（瓦片栅格之后、矢量之前，层级感与 2D 一致）。深度仍开。
     if (drawRasterImages3D(cam, viewProjRtc)) needRedraw = true;
 
+    // @Jin Pass A3：b3dm 倾斜摄影模型与地形/影像共享深度缓冲，放在矢量之前保证遮挡关系正确。
+    if (drawTileset3D(cam, viewProjRtc)) needRedraw = true;
     // Pass B：3D 矢量层（面/描边/线/点/图标），仍开深度、启 polygon offset（实现内局部开关）。
     // drainReady 接管几何，与 2D 共用 loader/glReady 口径；相机未变则绑旧 VBO 直接画。
     if (globeFillProgram_.program() != 0 && globeStrokeProgram_.program() != 0) {
@@ -1898,7 +2131,11 @@ bool Renderer::renderGlobeLayer3D(size_t layerIndex, const Navigator::Camera3D &
 
     // 可见叶瓦片：目标级别与 2D LOD 同源（tileLevel(maxLevel) 保切换时地物粗细连续），
     // 更远处（地平线/背面）由 Tessellator 按屏幕空间误差自动取粗级；墨卡托 (z,x,y) 键与 2D 互通。
-    const int targetLevel = nav_.tileLevel(layer.maxLevel);
+    // @Jin 单图层 serviceZoomOffset（3D）：与 2D 同口径叠加偏移并钳制，四叉树细化帽与 SSE 同步调整。
+    const int layerZoomOffset = std::max(-3, std::min(2, layer.serviceZoomOffset));
+    int targetLevel = nav_.tileLevel(layer.maxLevel) + layerZoomOffset;
+    if (targetLevel < Navigator::MIN_LEVEL) targetLevel = Navigator::MIN_LEVEL;
+    if (targetLevel > layer.maxLevel) targetLevel = layer.maxLevel;
     const bool interacting = kExperimentalAdaptiveUploadBudget &&
                           (nav_.isInteracting() || cameraFlightBudgetActive()); // @Jin flyTo 也按手势期限流，避免程序化飞行动画批量上传/重建。
     // @Jin exp1f：交互期锁定在抬手前的稳定 LOD，不随手指追新高清叶；缩小时允许降到更粗父级，抬手后再细化。
@@ -1906,12 +2143,17 @@ bool Renderer::renderGlobeLayer3D(size_t layerIndex, const Navigator::Camera3D &
     if (!interacting) {
         lastIdleGlobeTileLevel_ = targetLevel;
         lastIdleGlobeTileMaxLevel_ = layer.maxLevel;
-    } else if (lastIdleGlobeTileLevel_ >= 0 && lastIdleGlobeTileMaxLevel_ == layer.maxLevel) {
+        lastIdleGlobeTileZoomOffset_ = layerZoomOffset; // @Jin 偏移不同的图层不复用交互迟滞 LOD。
+    } else if (lastIdleGlobeTileLevel_ >= 0 && lastIdleGlobeTileMaxLevel_ == layer.maxLevel
+               && lastIdleGlobeTileZoomOffset_ == layerZoomOffset) {
         quadtreeLevel = std::min(targetLevel, lastIdleGlobeTileLevel_);
     }
     const double tanHalf = std::tan(nav_.fieldOfViewDeg() * 0.5 * 3.14159265358979323846 / 180.0);
     // @Jin 3D 的自然叶级由 SSE 决定；LOD 偏移必须同步放宽/收紧 SSE，否则在未达到 targetLevel 上限时点击 -1 可能看起来无效。
-    const double sseDetailFactor = nav_.lodDetailFactor() * nav_.tileLodSseScale();
+    // @Jin 单图层偏移同步缩放 SSE（口径同 Navigator::tileLodSseScale：负偏移=更粗瓦，因子翻倍），
+    // @Jin 否则未达到 targetLevel 上限时，偏移在透视细分下看似无效。
+    const double layerSseScale = std::ldexp(1.0, -layerZoomOffset);
+    const double sseDetailFactor = nav_.lodDetailFactor() * nav_.tileLodSseScale() * layerSseScale;
     TessCamera tc;
     tc.eye = cam.eye;
     // @Jin 帧间缓存必须同时看到相机朝向：仅比较眼点会让 tilt/heading 后继续复用旧视锥叶集，造成周边黑区。
@@ -5822,6 +6064,7 @@ void Renderer::release() {
     // @Jin 释放渲染器时同时清掉 exp1f 的临时 LOD 状态，重新创建上下文后从首帧开始学习。
     lastIdleGlobeTileLevel_ = -1;
     lastIdleGlobeTileMaxLevel_ = -1;
+    lastIdleGlobeTileZoomOffset_ = -99; // @Jin 单图层 LOD 记忆随上下文/纹理/图层重置一并失效
     if (vboDynamic_ != 0) {
         glDeleteBuffers(1, &vboDynamic_);
         vboDynamic_ = 0;
@@ -5849,6 +6092,7 @@ void Renderer::release() {
     texProgram_.release();
     textProgram_.release();
     iconProgram_.release();
+    releaseTileset3D();
     globeTexProgram_.release();
     globeColorProgram_.release();
     globeFillProgram_.release();

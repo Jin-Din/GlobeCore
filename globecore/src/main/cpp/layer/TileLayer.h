@@ -59,6 +59,11 @@ struct TileLayer {
     /// （GL 资源只可在 GL 线程删除）。回收后该层转入闲置：其 [loader] 排队项已清空、就绪字节已丢弃。
     std::atomic<bool> discardTextures{false};
 
+    /// @Jin 单图层服务级瓦片缩放偏移（单图层 LOD 改造，实验、可回退）：在 Navigator 全局 LOD 结果之上
+    /// 对本层请求/绘制的瓦片 z 再做整数偏移，负值取更粗父瓦（如天地图 4490 注记字号偏小场景），
+    /// 引擎内钳制到 [-3,2]，默认 0 与原行为完全一致；只影响本层，不改相机、不影响其他图层。
+    int serviceZoomOffset = 0;
+
     // @Jin: 在线影像/注记两层各 6 个 worker，在天地图限流风险和首屏批量补齐速度之间取平衡。
     TileLayer(std::string cacheDir, std::string urlTemplate, int maxLevel_, bool overlay_, int numThreads = 6)
         : maxLevel(maxLevel_), overlay(overlay_) {

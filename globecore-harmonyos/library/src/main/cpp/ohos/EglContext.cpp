@@ -49,6 +49,10 @@ bool EglContext::initialize(OHNativeWindow *window) {
         destroy();
         return false;
     }
+    // @Jin [诊断-临时] 查询驱动实际授予的深度位深（申请 16bit），用于核实近景碎裂是否为深度量化冲突，定位后删除。
+    EGLint actualDepth = 0;
+    eglGetConfigAttrib(display_, config_, EGL_DEPTH_SIZE, &actualDepth);
+    LOGI("EGL chosen config: EGL_DEPTH_SIZE=%d", actualDepth);
 
     // XComponent 缓冲默认格式对齐 RGBA8888，避免与 EGL config 通道不匹配导致黑屏/偏色
     OH_NativeWindow_NativeWindowHandleOpt(window, SET_FORMAT, NATIVEBUFFER_PIXEL_FMT_RGBA_8888);

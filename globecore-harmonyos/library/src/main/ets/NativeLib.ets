@@ -332,6 +332,13 @@ export class NativeLib {
   }
 
   // @Jin 设置实验性瓦片 LOD 偏移：负数更粗，0 恢复；应用重启后自动保持标准默认值。
+  /** @Jin 单图层 serviceZoomOffset：透传到 native GlobeEngine::setLayerZoomOffset */
+  static nativeSetLayerZoomOffset(handle: number, index: number, offset: number): void {
+    if (handle !== 0) {
+      gc.nativeSetLayerZoomOffset(handle, index, offset);
+    }
+  }
+
   static nativeSetTileLodOffset(handle: number, offset: number): void {
     if (handle !== 0) {
       gc.nativeSetTileLodOffset(handle, offset);
@@ -653,6 +660,25 @@ export class NativeLib {
     callback: ((payload: string) => void) | null): void {
     if (handle !== 0) {
       gc.nativeSetTerrainProviderEventCallback(handle, callback);
+    }
+  }
+
+  // @Jin 3D Tiles/b3dm 倾斜摄影实验入口（feature/3dtiles-b3dm）：成功返回图层 id，失败 -1。
+  static nativeAddTileset3D(handle: number, url: string): number {
+    return handle !== 0 ? gc.nativeAddTileset3D(handle, url) : -1;
+  }
+
+  /** @Jin 切换 3D Tiles 图层显隐；layerId 为 nativeAddTileset3D 返回值。 */
+  static nativeSetTileset3DVisible(handle: number, layerId: number, visible: boolean): void {
+    if (handle !== 0) {
+      gc.nativeSetTileset3DVisible(handle, layerId, visible);
+    }
+  }
+
+  // @Jin 实验性：3D Tiles 图层垂直高度偏移（米，正上负下，0 为基准），用于倾斜模型与地形高程基准校准。
+  static nativeSetTileset3DHeightOffset(handle: number, layerId: number, meters: number): void {
+    if (handle !== 0) {
+      gc.nativeSetTileset3DHeightOffset(handle, layerId, meters);
     }
   }
 

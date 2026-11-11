@@ -656,6 +656,20 @@ napi_value NativeSetLayerVisible(napi_env env, napi_callback_info info) {
     return nullptr;
 }
 
+// @Jin 单图层瓦片 LOD 偏移（实验、可回退）：只影响 index 指定图层，offset 引擎内钳制 [-3,2]，0 恢复标准。
+napi_value NativeSetLayerZoomOffset(napi_env env, napi_callback_info info) {
+    napi_value args[3];
+    gcohos::NapiGetArgs(env, info, 3, args);
+    int64_t handle = 0;
+    int32_t index = -1;
+    int32_t offset = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return nullptr;
+    gcohos::NapiGetInt32(env, args[1], index);
+    gcohos::NapiGetInt32(env, args[2], offset);
+    toGlobeEngine(handle)->setLayerZoomOffset(index, offset);
+    return nullptr;
+}
+
 napi_value NativeAddRasterLayer(napi_env env, napi_callback_info info) {
     napi_value args[3];
     gcohos::NapiGetArgs(env, info, 3, args);
@@ -1316,9 +1330,50 @@ napi_value NativeSetTerrainProviderEventCallback(napi_env env, napi_callback_inf
         std::lock_guard<std::mutex> lock(g_terrainEventMtx);
         g_terrainEventListeners[handle] = listener;
     }
+    // @Jin 恢复引擎回调注册（此前锚点替换误删）：Provider 事件经 listener 的 TSFN 跨线程投递给 ArkTS。
     toGlobeEngine(handle)->setTerrainProviderEventCallback([listener](const std::string &json) {
         listener->emit(json);
     });
+    return nullptr;
+}
+
+// @Jin 3D Tiles（b3dm 倾斜摄影）实验入口（feature/3dtiles-b3dm）：加载根 tileset.json，返回图层 id；失败返回 -1。
+napi_value NativeAddTileset3D(napi_env env, napi_callback_info info) {
+    napi_value args[2];
+    gcohos::NapiGetArgs(env, info, 2, args);
+    int64_t handle = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return gcohos::NapiMakeInt32(env, -1);
+    const std::string url = gcohos::NapiGetString(env, args[1]);
+    if (url.empty()) return gcohos::NapiMakeInt32(env, -1); // @Jin 空 URL 不创建 Provider，与 C++ 层防护保持一致。
+    const int layerId = toGlobeEngine(handle)->addTileset3D(url);
+    return gcohos::NapiMakeInt32(env, layerId);
+}
+
+// @Jin 切换 3D Tiles 图层显隐；layerId 来自 nativeAddTileset3D 的返回值。
+napi_value NativeSetTileset3DVisible(napi_env env, napi_callback_info info) {
+    napi_value args[3];
+    gcohos::NapiGetArgs(env, info, 3, args);
+    int64_t handle = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return nullptr;
+    int32_t layerId = -1;
+    bool visible = false;
+    gcohos::NapiGetInt32(env, args[1], layerId);
+    gcohos::NapiGetBool(env, args[2], visible);
+    toGlobeEngine(handle)->setTileset3DVisible(layerId, visible);
+    return nullptr;
+}
+
+// @Jin 实验性：3D Tiles 图层垂直高度偏移（米）；layerId 来自 nativeAddTileset3D，正上负下，0 恢复基准位置。
+napi_value NativeSetTileset3DHeightOffset(napi_env env, napi_callback_info info) {
+    napi_value args[3];
+    gcohos::NapiGetArgs(env, info, 3, args);
+    int64_t handle = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return nullptr;
+    int32_t layerId = -1;
+    double meters = 0.0;
+    gcohos::NapiGetInt32(env, args[1], layerId);
+    gcohos::NapiGetDouble(env, args[2], meters);
+    toGlobeEngine(handle)->setTileset3DHeightOffset(layerId, meters);
     return nullptr;
 }
 
@@ -1346,6 +1401,8 @@ napi_value RegisterGlobeEngine(napi_env env, napi_value exports) {
         {"nativeAddTileLayer", nullptr, NativeAddTileLayer, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeAddTileLayerWithOptions", nullptr, NativeAddTileLayerWithOptions, nullptr, nullptr, nullptr, napi_default, nullptr}, // @Jin 4326/4490 地理在线瓦片适配
         {"nativeSetLayerVisible", nullptr, NativeSetLayerVisible, nullptr, nullptr, nullptr, napi_default, nullptr},
+    // @Jin 单图层 serviceZoomOffset 运行时调节（默认 0，不改变既有调用方行为）。
+    {"nativeSetLayerZoomOffset", nullptr, NativeSetLayerZoomOffset, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeAddRasterLayer", nullptr, NativeAddRasterLayer, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeRemoveTileLayer", nullptr, NativeRemoveTileLayer, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeGetRasterAddError", nullptr, NativeGetRasterAddError, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -1392,6 +1449,11 @@ napi_value RegisterGlobeEngine(napi_env env, napi_value exports) {
         {"nativePrefetchTerrainProviderMetadata", nullptr, NativePrefetchTerrainProviderMetadata, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeTerrainProviderStatus", nullptr, NativeTerrainProviderStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeSetTerrainProviderEventCallback", nullptr, NativeSetTerrainProviderEventCallback, nullptr, nullptr, nullptr, napi_default, nullptr},
+        // @Jin 3D Tiles/b3dm 实验性入口（feature/3dtiles-b3dm）：加载倾斜摄影 tileset 与图层显隐。
+        {"nativeAddTileset3D", nullptr, NativeAddTileset3D, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"nativeSetTileset3DVisible", nullptr, NativeSetTileset3DVisible, nullptr, nullptr, nullptr, napi_default, nullptr},
+        // @Jin 实验性 3D Tiles 高度偏移 NAPI 注册（可回退：删除本行即取消导出）。
+        {"nativeSetTileset3DHeightOffset", nullptr, NativeSetTileset3DHeightOffset, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;

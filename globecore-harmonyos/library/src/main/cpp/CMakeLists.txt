@@ -187,6 +187,14 @@ add_library(${CMAKE_PROJECT_NAME} SHARED
         ${GLOBECORE_ENGINE_ROOT}/gltf/GltfDecoder.cpp
         # 3D Tiles tileset.json 解析器
         ${GLOBECORE_ENGINE_ROOT}/layer/TilesetJson.cpp
+        # @Jin P0 b3dm 容器解包、3D Tiles URL 解析与同步数据加载器（暂不接入渲染，可独立回退）
+        ${GLOBECORE_ENGINE_ROOT}/tileset3d/B3dmDecoder.cpp
+        ${GLOBECORE_ENGINE_ROOT}/tileset3d/Tileset3DUrl.cpp
+        ${GLOBECORE_ENGINE_ROOT}/tileset3d/Tileset3DLoader.cpp
+        ${GLOBECORE_ENGINE_ROOT}/tileset3d/Tileset3DTransform.cpp
+        ${GLOBECORE_ENGINE_ROOT}/tileset3d/Tileset3DGraph.cpp
+        ${GLOBECORE_ENGINE_ROOT}/tileset3d/Tileset3DModel.cpp
+        ${GLOBECORE_ENGINE_ROOT}/tileset3d/Tileset3DProvider.cpp
         # 瓦片缓存/加载器 + 矢量加载器
         ${GLOBECORE_ENGINE_ROOT}/layer/TileCache.cpp
         ${GLOBECORE_ENGINE_ROOT}/layer/TileLoader.cpp

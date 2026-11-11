@@ -9,6 +9,7 @@
 | 2026-10-29 | 地形夸张 / 垂直缩放 | 暂不支持公开 API，仅有内部固定系数 `1.0` | 后续产品化为 `setTerrainExaggeration()` |
 | 2026-10-29 | Overlay / 矢量文字标注 | 支持 `labels` 数据通路；Harmony 宿主应显式 `setFontPath()` 加载中文字体 | 已验证 native 几何含 `labels=1`，无字体时不绘制文字 |
 | 2026-10-29 | 绕点旋转 | 支持绕当前相机目标点（屏幕中心）旋转；尚无任意经纬度/屏幕焦点旋转 API | 双指旋转可用；需要扩展 `rotateHeading(delta, focusX, focusY, lon, lat)` |
+| 2026-11-10 | 3D Tiles / 倾斜摄影模型加载 | 实验分支 feature/3dtiles-b3dm 已打通 C++ 内核 P0-P2（b3dm 解码、SSE 调度、Renderer 纯色渲染），对外 API 尚未导出 | LRU/纹理/PBR/平台 API 待 P3/P4 |
 
 ## 2026-10-29：地形夸张 / 垂直缩放参数
 
@@ -80,3 +81,22 @@ fun rotateAroundPosition(longitude: Double, latitude: Double, altitude: Double?,
 ```
 
 - @Jin 实现要点：旋转前把焦点屏幕点反算为地理目标；旋转 heading 后保持该地理目标在同一屏幕位置，并维持 altitude/tilt；对地形模式应使用当前 DEM 表面高度或允许调用方传入目标高度。
+
+## 2026-11-10：3D Tiles / 倾斜摄影三维模型加载
+
+- @Jin 查询问题：当前 GlobeCore 是否具备加载 3D Tiles 格式倾斜摄影三维模型（典型内容为 `tileset.json` + `.b3dm`）的能力。
+- @Jin 当前结论：**当前 SDK 不具备开箱可用的完整 3D Tiles/倾斜摄影加载能力**；仓库中已经存在两个“预备型”基础模块，但尚未形成数据调度、坐标转换、GPU 渲染和平台 API 的闭环。
+- @Jin 已有基础一：`globecore/src/main/cpp/layer/TilesetJson.*` 可解析 3D Tiles 1.0 `tileset.json` 的部分字段，包括 `boundingVolume` 的 `box/region/sphere`、`geometricError`、`refine`、`content.uri` 和 `children`；但当前没有解析节点 `transform`，也未被 `GlobeEngine`、Renderer 或 Harmony/Android 门面调用。
+- @Jin 已有基础二：`globecore/src/main/cpp/gltf/GltfDecoder.*` 可解码 binary glTF（`.glb` v2）的 `POSITION/NORMAL/indices` 和 `baseColorFactor`；但头文件明确说明暂不支持外部 `.gltf`、纹理、动画、骨骼、Morph target，且 glTF 到引擎 ECEF 坐标的变换需要调用方负责。
+- @Jin 关键缺口：没有 `.b3dm` 容器解析（magic/header/feature table/batch table/内嵌 GLB 提取/RTC_CENTER），没有 `i3dm/pnts/cmpt` 解析，没有基于相机视锥和屏幕空间误差（SSE）的 Tileset LOD 遍历，没有 ADD/REPLACE 细化调度、异步加载/卸载/缓存策略，也没有 ECEF transform、RTC 坐标、深度融合和模型 VBO/纹理上传的 Renderer 通路。
+- @Jin API 核查：Harmony NAPI/ArkTS、Android JNI/Kotlin 与 Demo 层均未发现 `addTileset3D`、`load3DTiles`、`b3dm`、模型图层等公开接口；当前公开能力仍集中在栅格瓦片、地形、矢量、Overlay 和标注。
+- @Jin 可行性判断：项目已具备 OpenGL ES 渲染线程、相机/视锥/矩阵、WGS84/ECEF 转换、HTTP 下载、磁盘缓存、地形 LOD 调度和 GLB 雏形，因此**可以在现有 C++ core 上扩展实现**；但这是中等偏大的底层能力建设，不是 Demo 层接入即可完成。
+- @Jin 建议路线：第一阶段只实现最常见的 `b3dm + 内嵌 GLB` 最小闭环，新增 `Tileset3DLayer/Provider`，先支持 `tileset.json` 的 `transform/content/boundingVolume/geometricError/refine/children`、b3dm 解包、RTC_CENTER、SSE LOD、REPLACE/ADD 和纯色/简单材质渲染；第二阶段补齐 glTF 纹理、外部资源、`i3dm/pnts/cmpt`、要素拾取、批量表属性、透明/高亮/剖切等高级能力。
+- @Jin 2026-11-10 分支 `feature/3dtiles-b3dm` 进展：已完成 P0/P1 数据层实验，包括 b3dm 解包、内嵌 GLB 提取、RTC_CENTER 保留、`transform/gltfUpAxis/content.url` 解析、相对 URL、双精度世界变换和基础 SSE 选择器；真实数据可解出 GLB 并选中 b3dm，但尚未接入 `GlobeEngine`、Renderer 或 Harmony/Android API，因此对外能力结论仍为“暂不支持完整加载”。
+
+- @Jin 2026-11-10 P2 进展（C++ 内核渲染闭环，仍未导出平台 API）：
+  - @Jin 新增 `tileset3d/Tileset3DModel.*`（b3dm/GLB 转 anchor-RTC 交错顶点，处理 `gltfUpAxis=Z` 换轴、`RTC_CENTER`、GLES2 超 65535 索引展开）与 `Tileset3DProvider.*`（后台线程异步调度）。
+  - @Jin `GlobeEngine` 新增内部 API `addTileset3D(url)/setTileset3DVisible(id,visible)`；`Renderer` 新增独立 3D Tiles shader 与 VBO/IBO 上传、深度测试通路，栅格之后矢量之前绘制。
+  - @Jin Provider 调度加固：外部 tileset 改为工作清单递归展开，支持 root→external→external→b3dm 任意深度（实测数据深度 2：65 个 JSON、92 个 b3dm 全部可达）；修复 `lock_guard` 内手动 unlock 的未定义行为；接入 `Camera3D` double 精度视锥 6 平面做保守裁剪；单帧最多处理 8 个 b3dm 限制冲击。
+  - @Jin 验证：鸿蒙 NDK clang 全量语法核查通过；`.cxx` ninja 完整编译链接产出 `libglobecore.so`（14/14 目标零 error）；Node 对真实服务模拟递归确认全部叶子 b3dm URL 可解析下载。
+  - @Jin 当前边界：仅纯色/Lambert，无纹理与 PBR；无磁盘缓存、LRU 卸载、失败重试、ADD refine；无 NAPI/JNI/ArkTS/Demo 入口；移除 `tileset3d/` 源清单与 `GlobeEngine/Renderer` 接线即可整体回退。

@@ -99,6 +99,26 @@ NativeMapView({
 
 
 
+### @Jin 3D Tiles(b3dm) 倾斜摄影实验闭环（feature/3dtiles-b3dm，2026-11-11 合入主线）
+
+- @Jin 新增独立 `globecore/src/main/cpp/tileset3d/` 模块：TilesetJson 解析 3D Tiles 1.0（transform/boundingVolume box·sphere·region/geometricError/refine/content.uri 兼容旧 url/asset.gltfUpAxis）；B3dmDecoder 解 b3dm header、Feature/Batch Table、RTC_CENTER 并提取内嵌 GLB；Tileset3DUrl 解析相对 URL；Tileset3DLoader 复用 HttpClient 下载。
+- @Jin Provider 后台调度：外部 tileset 工作清单递归展开、SSE 屏幕误差 + 视锥 6 平面裁剪、量化眼点签名去重、锁内只遍历内存结构网络 IO 全部锁外、单帧最多 8 个 b3dm；ModelBuilder 完成 Z-up 换轴、RTC_CENTER 与 tile ECEF transform 的 CPU 转换，超 65535 索引自动展开非索引三角形兼容 GLES2；Renderer 独立 3D Tiles shader（Lambert + 深度测试，栅格之后矢量之前）。
+- @Jin 真机阻断修复：① Tileset3DRuntimeNode::source 裸指针悬空（TilesetResult 析构/move 后 root 指针失效），改为 `unique_ptr<TilesetResult>` 堆托管，图 move 不搬动节点树；② b3dm 无 NORMAL 时按三角形叉积做面积加权自动平滑法向（genNormal=1），消除灰板；③ mars3d osgb2tiles3 产物 tile 局部帧本身是 Z-up ENU，套 Cesium 标准换轴反而 90° 立起，该类数据换轴取 identity；④ 纹理解码补齐 main 入口与 GLES2 NPOT 回退 LINEAR。
+- @Jin 平台链路：`GlobeEngine::addTileset3D/setTileset3DVisible/setTileset3DHeightOffset` → Harmony NAPI → ArkTS NativeMapView；高度偏移按 layerId 逐层独立（atomic 存于 Tileset3DLayer，绘制期 uniform 平移、零重建）。qx-dyt（西安大雁塔）真机目视校准 heightOffset=-20m，仅 Demo 写死，SDK 默认 0。
+- @Jin 边界：仅 b3dm 三角网；i3dm/pnts/cmpt、PBR、要素拾取、磁盘缓存、LRU 卸载、失败重试、ADD refine、高斯泼溅 GLB 不支持。方案细节见 `docs/design/3dtiles-b3dm-plan.md`。
+
+### @Jin 地形父级回退与 3D Tiles 高度偏移（2026-11-11）
+
+- @Jin 父级回退根因：210 地形服务（Mars3D 12.5m 镜像，quantized-mesh、EPSG:4326 地理网格 cols=2^(z+1)/rows=2^z、y 南起）layer.json 声称 z15 覆盖但瓦片实际全 404，z14 及以下正常；旧引擎无回退时整轮失败、地形不显示（真机 182 块全 404）。
+- @Jin `CesiumTerrainProvider` 新增 fetchTileWithFallback：请求失败按地理网格逐级回退最近可用祖先（父索引=子 x/y 整除 2），按祖先真实 bounds 注入 tileSink；缺失负缓存 missingServiceTiles_ 上限 4096，resetDeliveredTiles 时清空；stats 增加 parentFallbacks。真机两轮验证 182/182、0 失败，第二轮父级全磁盘命中。
+
+### @Jin 单图层 serviceZoomOffset（全局 LOD 偏移下沉，2026-11-11）
+
+- @Jin 背景：原 `setTileLodOffset` 是 Navigator 级全局偏移，影像与注记一起受影响；本改造把 LOD 偏移下沉为每图层参数，与全局开关正交可叠加（最终级别 = 全局 LOD 结果 + 本层偏移）。
+- @Jin C++：`TileLayer.serviceZoomOffset`（默认 0，钳制 [-3,2]）；`GlobeEngine::setLayerZoomOffset(index, offset)`；Renderer 2D 在 tileLevel() 结果上逐层叠加并钳制 [MIN_LEVEL, maxLevel]，下游可见范围/请求/祖先链/绘制统一使用调整后级别；3D 同步调整 targetLevel、四叉树细化帽与 SSE 因子（ldexp(1,-offset)）；交互 LOD 迟滞记忆增加偏移维度（lastIdleGlobeTileZoomOffset_），surface/纹理/图层 4 处重置点同步清空。
+- @Jin Harmony 全链路：NAPI nativeSetLayerZoomOffset → NativeLib → `NativeMapView.setLayerZoomOffset(index, offset)`；index.d.ts 同步声明。默认 0 零行为变化，不持久化，切图源重建图层后由宿主重放。真机验证（BUILD_ID v0.1.3-20261111-per-layer-lod1）：注记层 -2 时同视角影像请求 z6、注记请求 z4，两层独立。
+- @Jin 与 4490 回退实验的区别：2026-10-31 在 EPSG:4490 重采样路径内实验的同名参数已回退；本次是渲染选瓦层的通用逐层偏移，对墨卡托/地理图源均生效，但不能消除 cia_c 固有的 1.2 倍上下拉伸。
+
 ### @Jin SDK 能力查询与快捷定位峰顶标注
 
 - @Jin 新增 `docs/sdk-capability-queries.md`，专门记录“SDK 是否支持某能力”的查询结论、代码依据、边界与建议 API；2026-10-29 已记录“地形夸张 / 垂直缩放”当前仅有 C++ 内部固定系数 `1.0`，尚未向 Harmony/Android/Qt 公开配置接口。后续每次回答类似能力查询后都要追加到该文档。
@@ -223,9 +243,10 @@ NativeMapView({
 
 - @Jin 陕西省级 Polygon/MultiPolygon「大面」在 3D 地形下仍可能被地形遮挡（不限于 z4/z5/z6），与已修复的本地纯 MultiLineString 省界线不是同一条路径；详见三、drape36e 节末。
 - @Jin 天地图 4490 栅格注记 cia_c 存在「字偏小」与「轻微上下拉伸」两个观感问题；每图层 `serviceZoomOffset` 方案经评估会加剧拉伸，已整体回退（固定 s=z、接口恢复 8 参、缓存回到 c4326-v2）；推荐方向：影像走 img_c、注记改用墨卡托 cia_w 或客户端矢量文字。详见一、EPSG 节 2026-10-31 记录。
-- @Jin 全局 `setTileLodOffset` 待改造为单图层参数（当前影像/注记一起受影响），与未实施的 serviceZoomOffset 属同一类诉求。
+- @Jin ~~全局 LOD 偏移改造为单图层参数~~ 已完成（2026-11-11）：`setLayerZoomOffset(index, offset)` 全链路落地，详见一、单图层 serviceZoomOffset 节。
 - @Jin 地形 Provider 选块仍为中心 7×7 固定窗口，未升级为按 tilt/heading/FOV 的非对称视锥选块；大倾角极近景边缘可能缺 DEM。详见一、自动跟随节「已知边界」。
-- @Jin 3D Tiles(b3dm) 倾斜摄影仍在 `feature/3dtiles-b3dm` 分支实验（白模已显示、纹理解码修复中、模型朝向/贴地待排查），未进入主线。
+- @Jin 3D Tiles(b3dm) 已合入主线（2026-11-11，仍按实验能力管理）：纹理已通、朝向已修正、heightOffset=-20m 校准贴地；高斯泼溅 GLB、PBR、拾取、磁盘缓存为后续待办。
+- @Jin 新增待办：heightOffset 步进按钮快速连点可能一次跳多档，需节流防抖；政务版陕西底图接入（服务地址与 xyz 规则待核实）。
 
 ### 实验开关 / 回退方式索引
 
@@ -241,3 +262,6 @@ NativeMapView({
 | exp1h 安全剔除/安全高度 | 整体 `git revert` 实验提交 | 二 |
 | 本地纯线 DEM 贴地 | `Renderer::kExperimentalLocalVectorLineTerrainDrape = false` | 三、drape36e |
 | 叠加层 DEM 贴地/深度豁免 | 回退 Renderer 中 overlay 分支（文件矢量仍走原深度测试） | 三、flyTo/overlay 节 |
+| 单图层 serviceZoomOffset | 移除 TileLayer.serviceZoomOffset 字段与 setLayerZoomOffset 调用链（默认 0 即原行为） | 一、单图层 serviceZoomOffset |
+| 地形父级回退 | 删除 CesiumTerrainProvider fetchTileWithFallback 与 missingServiceTiles_ 负缓存 | 一、地形父级回退 |
+| 3D Tiles(b3dm) | CMakeLists 移除 tileset3d/ 源清单及 GlobeEngine/Renderer 相关代码 | 一、3D Tiles 节 + docs/design/3dtiles-b3dm-plan.md |

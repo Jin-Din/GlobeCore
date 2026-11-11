@@ -319,6 +319,25 @@ export struct NativeMapView {
     NativeLib.nativeSetTerrainProviderEventCallback(this.nativeHandle, listener ?? null);
   }
 
+  // @Jin 3D Tiles/b3dm 倾斜摄影实验入口（feature/3dtiles-b3dm）：加载根 tileset.json，返回图层 id（失败 -1）。
+  addTileset3D(url: string): number {
+    const layerId: number = NativeLib.nativeAddTileset3D(this.nativeHandle, url);
+    this.requestRender();
+    return layerId;
+  }
+
+  /** @Jin 切换 3D Tiles 图层显隐；layerId 为 addTileset3D 的返回值。 */
+  /** @Jin 实验性：设置 3D Tiles 图层垂直高度偏移（米，正上负下，默认 0）；只改绘制 uniform 不重建模型，可运行时连续调节。 */
+  setTileset3DHeightOffset(layerId: number, meters: number): void {
+    NativeLib.nativeSetTileset3DHeightOffset(this.nativeHandle, layerId, meters);
+    this.requestRender();
+  }
+
+  setTileset3DVisible(layerId: number, visible: boolean): void {
+    NativeLib.nativeSetTileset3DVisible(this.nativeHandle, layerId, visible);
+    this.requestRender();
+  }
+
   /**
    * 移除一个瓦片图源图层（index 为 addTileLayer / addRasterLayer 的加入次序，0 起）：墓碑—native
    * 置 removed + 隐藏，不 erase 底层容器，其它层 index 保持稳定；其瓦片纹理由 GL 线程下一帧释放
@@ -462,6 +481,16 @@ export struct NativeMapView {
   /** @Jin 当前相机在指定图源上限下的目标瓦片 LOD；用于诊断“界面级别”和“实际瓦片级别”的差异。 */
   tileZoomLevel(maxLevel: number = 18): number {
     return NativeLib.nativeGetTileZoomLevel(this.nativeHandle, maxLevel);
+  }
+
+  /**
+   * @Jin 单图层瓦片 LOD 偏移（实验、可回退）：只改变 index 指定图层的取瓦级别，
+   * 不影响相机与其他图层；offset 负数请求更粗父瓦（如天地图 4490 注记字号偏小），
+   * 钳制 [-3,2]，0 恢复该层标准行为。index 为 addTileLayer/addTileLayerWithOptions 的加入次序（0 起）。
+   */
+  setLayerZoomOffset(index: number, offset: number): void {
+    NativeLib.nativeSetLayerZoomOffset(this.nativeHandle, index, offset);
+    this.requestRender();
   }
 
   /** @Jin 实验性瓦片 LOD 偏移：负数更粗、0 恢复标准细节；调用后立即请求重绘。 */

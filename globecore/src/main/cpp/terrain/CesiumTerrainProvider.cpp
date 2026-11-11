@@ -201,8 +201,76 @@ void CesiumTerrainProvider::resetDeliveredTiles() {
     std::lock_guard<std::mutex> lock(deliveredMtx_);
     delivered_.clear();
     deliveredOrder_.clear();
+    // @Jin 手动刷新/切换地形源时一并清空缺失负缓存，让被判定 404 的瓦片有重新探测的机会。
+    clearMissingTiles();
 }
 
+// @Jin 实验性父级回退（2026-11-11）：210 地形服务 layer.json 的 available 声明 z15 有覆盖，但实际 z15 瓦片整体 404、z14 及以下正常，
+// @Jin 属于“元数据夸大覆盖”。没有回退时近距离（displayZoom 被钳到 maxZoom=15）会整轮 182 块全失败、地形完全不显示。
+// @Jin 回退仅在请求失败后触发，成功路径零开销；完整回退方式：删除本文件标注 @Jin 的父级回退/负缓存代码块即可恢复旧行为。
+TerrainServiceTile CesiumTerrainProvider::nearestAvailableAncestor(const TerrainServiceTile &tile) const {
+    CesiumTerrainMeta meta;
+    {
+        std::lock_guard<std::mutex> lock(metaMtx_);
+        meta = meta_;
+    }
+    TerrainServiceTile cur = tile;
+    // @Jin EPSG:4326 地理网格每降一级，父瓦片索引为子级 x/y 整除 2（一个父级覆盖 2×2 子级）。
+    while (cur.z > 0) {
+        const TerrainServiceTile parent{cur.z - 1, cur.x / 2, cur.y / 2};
+        if (isCesiumTerrainTileAvailable(meta, parent.z, parent.x, parent.y)) return parent;
+        cur = parent;
+    }
+    return tile; // @Jin 已到 z0 仍无可用声明，返回入参，调用方据此停止回退。
+}
+
+bool CesiumTerrainProvider::isMissingTile(const std::string &key) const {
+    std::lock_guard<std::mutex> lock(missingMtx_);
+    return missingServiceTiles_.find(key) != missingServiceTiles_.end();
+}
+
+void CesiumTerrainProvider::markMissingTile(const std::string &key) {
+    std::lock_guard<std::mutex> lock(missingMtx_);
+    // @Jin 负缓存只保存服务瓦片 key，体量有界；超过上限整体清空让后续刷新重新探测，避免异常服务下无限增长。
+    if (missingServiceTiles_.size() >= 4096) missingServiceTiles_.clear();
+    missingServiceTiles_.insert(key);
+}
+
+void CesiumTerrainProvider::clearMissingTiles() {
+    std::lock_guard<std::mutex> lock(missingMtx_);
+    missingServiceTiles_.clear();
+}
+
+bool CesiumTerrainProvider::fetchTileWithFallback(const TerrainServiceTile &requested,
+                                                  const std::shared_ptr<std::atomic<bool>> &abort,
+                                                  std::vector<uint8_t> &bytes,
+                                                  TerrainServiceTile &fetchedOut) {
+    fetchedOut = requested;
+    // @Jin 先走原有通路（磁盘缓存 → 网络重试），成功则与旧行为完全一致。
+    if (fetchTile(requested, abort, bytes)) return true;
+    if (abort->load()) return false;
+
+    // @Jin 子级失败后逐级回退祖先瓦片；祖先成功才把子级判为“确实缺失”，网络整体故障（祖先也失败）不写负缓存。
+    TerrainServiceTile ancestor = requested;
+    for (int guard = 0; guard < 16; ++guard) {
+        const TerrainServiceTile next = nearestAvailableAncestor(ancestor);
+        if (next.z >= ancestor.z) break; // @Jin 已无更粗的可用祖先。
+        ancestor = next;
+        if (abort->load()) return false;
+        std::vector<uint8_t> parentBytes;
+        if (fetchTile(ancestor, abort, parentBytes)) {
+            markMissingTile(tileKey(requested));
+            statParentFallbacks_++;
+            LOGI("CesiumTerrainProvider: parent fallback %d/%d/%d -> %d/%d/%d",
+                 requested.z, requested.x, requested.y, ancestor.z, ancestor.x, ancestor.y);
+            bytes = std::move(parentBytes);
+            fetchedOut = ancestor;
+            return true;
+        }
+        if (abort->load()) return false;
+    }
+    return false;
+}
 void CesiumTerrainProvider::dispatcherLoop() {
     while (!stopping_.load()) {
         bool doPrefetch = false;
@@ -331,7 +399,17 @@ std::vector<CesiumTerrainProvider::Task> CesiumTerrainProvider::buildTasks(
                     cesiumServiceTilesForEngineTile(meta, engineZoom, engineX, engineY);
                 if (serviceTiles.empty()) statAvailableSkips_++;
                 for (const TerrainServiceTile &service : serviceTiles) {
-                    const std::string key = tileKey(service);
+                    // @Jin 实验性：已知缺失（历史 404 且祖先可取）的服务瓦片直接换祖先，避免每轮刷新重复无效请求。
+                    TerrainServiceTile effective = service;
+                    if (isMissingTile(tileKey(service))) {
+                        const TerrainServiceTile ancestor = nearestAvailableAncestor(service);
+                        if (ancestor.z >= service.z) {
+                            statAvailableSkips_++;
+                            continue;
+                        }
+                        effective = ancestor;
+                    }
+                    const std::string key = tileKey(effective); // @Jin 负缓存命中后按祖先瓦片身份去重
                     if (wanted.find(key) != wanted.end() || isDelivered(key)) {
                         statDuplicateSkips_++;
                         continue;
@@ -341,8 +419,8 @@ std::vector<CesiumTerrainProvider::Task> CesiumTerrainProvider::buildTasks(
                     task.engineZ = engineZoom;
                     task.engineX = engineX;
                     task.engineY = engineY;
-                    task.service = service;
-                    task.bounds = cesiumGeoTileBounds(service.z, service.x, service.y);
+                    task.service = effective; // @Jin 可能为回退后的祖先瓦片
+                    task.bounds = cesiumGeoTileBounds(effective.z, effective.x, effective.y); // @Jin bounds 与实际请求瓦片保持一致
                     tasks.push_back(task);
                 }
             }
@@ -451,7 +529,8 @@ void CesiumTerrainProvider::runRefresh(const TerrainViewportSnapshot &viewport, 
                 if (index >= tasks.size()) break;
                 const Task &task = tasks[index];
                 std::vector<uint8_t> bytes;
-                if (!fetchTile(task.service, abort, bytes)) {
+                TerrainServiceTile fetched; // @Jin 实验性父级回退后实际交付的瓦片身份（未回退时等于 task.service）
+                if (!fetchTileWithFallback(task.service, abort, bytes, fetched)) {
                     if (!abort->load()) {
                         runFailures++;
                         statFailures_++;
@@ -462,7 +541,11 @@ void CesiumTerrainProvider::runRefresh(const TerrainViewportSnapshot &viewport, 
                 bool sinkOk = true;
                 if (tileSink_) {
                     try {
-                        tileSink_(task.engineZ, task.engineX, task.engineY, bytes, task.bounds);
+                        // @Jin 发生父级回退时 bounds 用祖先瓦片的真实地理范围，Renderer 才能把粗 DEM 采高映射到正确区域。
+                        const TerrainGeoBounds sinkBounds =
+                            (fetched.z == task.service.z && fetched.x == task.service.x && fetched.y == task.service.y)
+                            ? task.bounds : cesiumGeoTileBounds(fetched.z, fetched.x, fetched.y);
+                        tileSink_(task.engineZ, task.engineX, task.engineY, bytes, sinkBounds);
                     } catch (...) {
                         // @Jin 平台注入回调异常不得终止 C++ worker；失败不写交付 LRU，后续刷新可重试。
                         sinkOk = false;
@@ -471,7 +554,7 @@ void CesiumTerrainProvider::runRefresh(const TerrainViewportSnapshot &viewport, 
                     }
                 }
                 if (!sinkOk) continue;
-                markDelivered(tileKey(task.service));
+                markDelivered(tileKey(fetched)); // @Jin 按实际交付瓦片（可能为祖先）登记 LRU
                 const int deliveredNow = runDelivered.fetch_add(1) + 1;
                 statDeliveredTiles_++;
                 if (deliveredNow == 1) {
@@ -605,6 +688,7 @@ TerrainProviderStats CesiumTerrainProvider::stats() const {
     out.availableSkips = statAvailableSkips_.load();
     out.duplicateSkips = statDuplicateSkips_.load();
     out.failures = statFailures_.load();
+    out.parentFallbacks = statParentFallbacks_.load(); // @Jin 实验性父级回退计数
     out.firstTileMs = lastFirstTileMs_.load();
     out.elapsedMs = lastElapsedMs_.load();
     {
@@ -634,6 +718,7 @@ std::string CesiumTerrainProvider::statsJson() const {
          << ",\"availableSkips\":" << s.availableSkips
          << ",\"duplicateSkips\":" << s.duplicateSkips
          << ",\"failures\":" << s.failures
+         << ",\"parentFallbacks\":" << s.parentFallbacks // @Jin 实验性父级回退诊断字段
          << ",\"firstTileMs\":" << s.firstTileMs
          << ",\"elapsedMs\":" << s.elapsedMs
          << "}";

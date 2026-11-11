@@ -72,6 +72,8 @@ interface GlobeCore {
   /// @Jin 当前相机在指定图层上限下的目标瓦片 LOD（3D 四叉树仍可能按距离混入更粗瓦片）。
   nativeGetTileZoomLevel(handle: number, maxLevel: number): number;
   /// @Jin 实验性瓦片 LOD 偏移：负数更粗，0 恢复标准细节。
+  /** @Jin 单图层瓦片 LOD 偏移（实验、可回退）：index 为 addTileLayer 加入次序，offset 钳制 [-3,2]，0 恢复标准；只影响该图层 */
+  nativeSetLayerZoomOffset(handle: number, index: number, offset: number): void;
   nativeSetTileLodOffset(handle: number, offset: number): void;
   /// @Jin 实验模式：目标瓦片 LOD 与相机地图显示级别保持一致。
   nativeSetTileLodAlignDisplay(handle: number, align: boolean): void;
@@ -158,6 +160,12 @@ interface GlobeCore {
   nativeTerrainProviderStatus(handle: number): string;
   /// @Jin 统一地形事件回调；payload 为含 event 与 stats 的单行 JSON，null 反注册。
   nativeSetTerrainProviderEventCallback(handle: number, callback: ((payload: string) => void) | null): void;
+
+  // @Jin 3D Tiles/b3dm 实验入口（feature/3dtiles-b3dm）：返回图层 id，失败 -1
+  nativeAddTileset3D(handle: number, url: string): number;
+  nativeSetTileset3DVisible(handle: number, layerId: number, visible: boolean): void;
+  // @Jin 实验性：3D Tiles 图层垂直高度偏移（米，正上负下，0 为基准），用于倾斜模型与地形高程基准校准。
+  nativeSetTileset3DHeightOffset(handle: number, layerId: number, meters: number): void;
 
   // ── GDAL / 图层元信息（bridge/gdal_info、layer_info）──
   nativeGetGdalVersion(): string;

@@ -41,10 +41,14 @@ GlobeEngine::GlobeEngine() : renderer_(navigator_, layers_, vectorLayers_, raste
     // GDAL/OGR 全进程一次引导（幂等）：注册全部矢量驱动并打印版本自检，同时作为链接期强制
     // 拉入 GDAL 符号的锚点——若依赖链未正确链接，加载 .so 时即暴露未定义符号而非等到首次读矢量。
     ensureGdalRegistered();
+    renderer_.setTileset3DLayers(tileset3dLayers_); // @Jin 注入 3D Tiles 图层引用，Renderer 不拥有容器生命周期。
     LOGI("GlobeEngine created");
 }
 
 GlobeEngine::~GlobeEngine() {
+    // @Jin 先停 3D Tiles worker，避免 Renderer/图层析构期间迟到模型回调。
+    std::lock_guard<std::mutex> tilesetLock(layersMtx_);
+    tileset3dProviders_.clear();
     // @Jin 先停 Provider 并等待下载线程退出，确保迟到回调不会再访问即将析构的 Navigator/Renderer。
     std::lock_guard<std::mutex> terrainLock(terrainProviderMtx_);
     if (terrainProvider_) {
@@ -73,6 +77,24 @@ void GlobeEngine::drawFrame() {
     // 全程持 layersMtx_：整帧对 layers_/vectorLayers_/rasterImageLayers_ 及其对齐缓存 layerTextures_
     // 做下标遍历，须与 UI 线程 add* 的 push_back（可能重分配内部数组）互斥（见 GlobeEngine.h 注释）。
     // renderCallback_（requestRender）非阻塞，锁内调用安全；不嵌套取锁，无死锁路径。
+    // @Jin 将当前 3D 眼点投递给 3D Tiles Provider；内部按量化签名去重，静态画面不会反复唤醒 worker。
+    if (navigator_.viewMode() == Navigator::ViewMode::MODE_3D) {
+        const Navigator::Camera3D cam3d = navigator_.camera3D();
+        if (cam3d.valid) {
+            Tileset3DViewport viewport;
+            viewport.valid = true;
+            viewport.eyeEcef = cam3d.eye;
+            viewport.viewportHeightPx = std::max(1, navigator_.viewportHeight());
+            viewport.fovYRad = navigator_.fieldOfViewDeg() * 3.14159265358979323846 / 180.0;
+            // @Jin 传入 Navigator 以 double 精度预算的视锥 6 平面，Provider 选择器据此做保守剔除。
+            viewport.hasFrustum = true;
+            viewport.frustumPlanes = cam3d.frustumPlanes;
+            std::lock_guard<std::mutex> tilesetLock(layersMtx_);
+            for (auto &provider : tileset3dProviders_) {
+                if (provider) provider->updateViewport(viewport);
+            }
+        }
+    }
     renderer_.setCameraFlightActive(cameraFlightWantsFrame); // @Jin flyTo 动画帧使用与手势相同的保守 GL 预算。
     std::lock_guard<std::mutex> lock(layersMtx_);
     bool needRedraw = renderer_.onDrawFrame();
@@ -240,6 +262,18 @@ void GlobeEngine::setLayerVisible(int index, bool visible) {
     layers_[static_cast<size_t>(index)]->visible = visible;
     LOGI("GlobeEngine setLayerVisible index=%d visible=%d", index, visible ? 1 : 0);
     // 只改了可见性标志（不涉及 GL），省电模式下主动请求一帧使变更立即生效。
+    if (renderCallback_) renderCallback_();
+}
+
+void GlobeEngine::setLayerZoomOffset(int index, int offset) {
+    // @Jin 单图层 LOD（实验、可回退）：与全局 setTileLodOffset 同口径钳制 [-3,2]，只写本层标志，
+    // Renderer 2D/3D 取瓦时在全局 LOD 结果上叠加本层偏移；默认 0，行为与改造前完全一致。
+    std::lock_guard<std::mutex> lock(layersMtx_);
+    if (index < 0 || static_cast<size_t>(index) >= layers_.size()) return;
+    const int clamped = std::max(-3, std::min(2, offset));
+    layers_[static_cast<size_t>(index)]->serviceZoomOffset = clamped;
+    LOGI("GlobeEngine setLayerZoomOffset index=%d offset=%d", index, clamped);
+    // 取瓦级别变化需要立即重选可见叶并重排请求，主动请求一帧（与 setLayerVisible 同口径）。
     if (renderCallback_) renderCallback_();
 }
 
@@ -1127,6 +1161,69 @@ void GlobeEngine::setFontPath(const std::string &path) {
 
 void GlobeEngine::setDisplayDensity(double density) {
     navigator_.setDisplayDensity(density); // LOD densityFactor（对齐 参考实现 displayMetrics.density）
+}
+
+int GlobeEngine::addTileset3D(const std::string &url) {
+    if (url.empty()) return -1; // @Jin 空地址不创建图层，避免 Provider 空转。
+    auto layer = std::make_unique<Tileset3DLayer>(static_cast<int>(tileset3dLayers_.size()));
+    layer->loading = true;
+    Tileset3DLayer *layerRaw = layer.get();
+    int layerId = -1;
+    {
+        std::lock_guard<std::mutex> lock(layersMtx_);
+        tileset3dLayers_.push_back(std::move(layer));
+        layerId = static_cast<int>(tileset3dLayers_.size()) - 1;
+        auto provider = std::make_unique<Tileset3DProvider>(
+            layerId, url,
+            [this] {
+                Tileset3DViewport viewport;
+                if (navigator_.viewMode() != Navigator::ViewMode::MODE_3D) return viewport;
+                const Navigator::Camera3D cam = navigator_.camera3D();
+                if (!cam.valid) return viewport;
+                viewport.valid = true;
+                viewport.eyeEcef = cam.eye;
+                viewport.viewportHeightPx = std::max(1, navigator_.viewportHeight());
+                viewport.fovYRad = navigator_.fieldOfViewDeg() * 3.14159265358979323846 / 180.0;
+                // @Jin Provider 首次刷新可能早于首帧投递，这里同样补齐视锥平面，保证首轮即可裁剪。
+                viewport.hasFrustum = true;
+                viewport.frustumPlanes = cam.frustumPlanes;
+                return viewport;
+            },
+            [layerRaw](Tileset3DModelCpu &&model) {
+                layerRaw->enqueueModel(std::move(model));
+                layerRaw->loading = false; // @Jin 首个模型到达后退出加载态，后续 LRU/加载状态再精细化。
+            },
+            [this] { if (renderCallback_) renderCallback_(); },
+            // @Jin REPLACE 选择集回传：Provider 每轮把应显示的 b3dm URL 集合发布给图层，Renderer 据此跳过过期 LOD。
+            [layerRaw](std::unordered_set<std::string> urls) {
+                layerRaw->setActiveUrls(std::move(urls));
+            }
+        );
+        provider->start();
+        tileset3dProviders_.push_back(std::move(provider));
+    }
+    LOGI("GlobeEngine addTileset3D layer=%d url=%s", layerId, url.c_str());
+    if (renderCallback_) renderCallback_();
+    return layerId;
+}
+
+void GlobeEngine::setTileset3DVisible(int layerId, bool visible) {
+    std::lock_guard<std::mutex> lock(layersMtx_);
+    if (layerId < 0 || layerId >= static_cast<int>(tileset3dLayers_.size())) return;
+    if (tileset3dLayers_[static_cast<size_t>(layerId)]) {
+        tileset3dLayers_[static_cast<size_t>(layerId)]->visible = visible;
+    }
+    if (renderCallback_) renderCallback_();
+}
+
+void GlobeEngine::setTileset3DHeightOffset(int layerId, double meters) {
+    // @Jin 实验性高度偏移：只写图层原子量，Renderer 下一帧绘制时生效；不触发模型重建，可运行时连续调节。
+    std::lock_guard<std::mutex> lock(layersMtx_);
+    if (layerId < 0 || layerId >= static_cast<int>(tileset3dLayers_.size())) return; // @Jin 越界忽略
+    if (tileset3dLayers_[static_cast<size_t>(layerId)]) {
+        tileset3dLayers_[static_cast<size_t>(layerId)]->setHeightOffset(meters);
+    }
+    if (renderCallback_) renderCallback_(); // @Jin 请求重绘让偏移即时上屏
 }
 
 void GlobeEngine::setRenderCallback(std::function<void()> cb) {

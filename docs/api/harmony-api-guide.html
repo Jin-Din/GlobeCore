@@ -55,7 +55,7 @@ ArkTS 门面只做转发，相机、瓦片、缓存、矢量三角剖分、GLES2
 LITE 裁掉 GDAL/PROJ/libkml 依赖链：<b>在线 XYZ 瓦片（含 EPSG:4490）、三维地形、在线/本地 GeoJSON、叠加层、拾取、手势等全部可用</b>；
 不可用的是本地 shp/kml/dwg/tif 等 GDAL 系文件直读、PROJ 坐标转换、NativeVector 文件 IO/SQL/属性写回——这些 API 保留签名但走桩（返回 false/null/空串/中文错误），不会崩溃。
 需要全量能力时须先用 build-scripts 交叉编译 GDAL/PROJ 静态库，再以 <code>-DGLOBECORE_LITE=OFF</code> 重新构建，包名不带 lite。</div>
-<div class="note">3D Tiles(b3dm) 在 feature/3dtiles-b3dm 分支，不在本主线包内。</div>
+<div class="note">3D Tiles(b3dm) 倾斜摄影已随 feature/3dtiles-b3dm 合入主线（实验能力，见 6.12）。 <!-- @Jin 2026-11-11 合并后更新 --></div>
 
 <h2 id="toc">目录</h2>
 <div class="toc">
@@ -378,6 +378,12 @@ map.prefetchTerrainProviderMetadata();</code></pre></div>
 <div class="sig">setTerrainTile(z: number, x: number, y: number, bytes: Uint8Array, bbox: number[]): void<br>clearTerrain(): void</div>
 <p>自行实现下载链路时直接注入 quantized-mesh 字节；bbox 为服务瓦片四至 [lonMin,latMin,lonMax,latMax]。
 一般业务用上面的 Provider 即可，无需调用。</p></div>
+<!-- @Jin 2026-11-11 地形父级回退（feature/3dtiles-b3dm 合入） -->
+<div class="api"><h4>地形瓦片父级回退 <span class="badge b-jin">@Jin 新增·实验</span></h4>
+<p>服务 layer.json 声明覆盖但高层级瓦片实际 404 时（实测 210 镜像 z15 整体缺数据、z14 及以下正常），
+C++ Provider 自动按 EPSG:4326 地理网格逐级回退最近可用祖先瓦片（父索引=子 x/y 整除 2），按祖先真实 bounds 注入；
+缺失负缓存上限 4096，手动刷新或切图源时清空重探，stats 以 <code>parentFallbacks</code> 计数。回退：删除
+CesiumTerrainProvider 的 fetchTileWithFallback 与负缓存代码块。</p></div>
 
 <h3>6.6 矢量图层 <span class="badge b-lite">部分 LITE 受限</span></h3>
 <div class="lite-box"><b>@Jin LITE 状态：</b>lite 包内置无 GDAL 依赖的原生 GeoJSON reader，
@@ -455,11 +461,37 @@ map.updateOverlayPoints(ptId, [108.9594, 34.2196], undefined, ['太白山']);</c
 （字体偏小/高密度屏调试用，默认 0，实验能力）；<code>setTileLodAlignDisplay(true)</code> 开启高分辨率密度对齐。</p>
 <pre><code>console.info('camera z=' + map.cameraZoomLevel() + ' tile z=' + map.tileZoomLevel(18));
 map.setTileLodOffset(-1);   // 实验：瓦片降一级，回退传 0</code></pre></div>
+<!-- @Jin 2026-11-11 单图层 serviceZoomOffset（feature/3dtiles-b3dm 合入） -->
+<div class="api"><h4>setLayerZoomOffset（单图层 LOD 偏移） <span class="badge b-jin">@Jin 新增·实验·可回退</span></h4>
+<div class="sig">setLayerZoomOffset(index: number, offset: number): void</div>
+<p>只改变 <code>index</code> 指定瓦片图层的取瓦级别（index 为 addTileLayer/addTileLayerWithOptions 加入次序，0 起），
+不影响相机与其他图层；offset 引擎内钳制 [-3,2]，<b>0=标准（默认，零行为变化）</b>，负数请求更粗父瓦。
+2D 网格与 3D 四叉树/SSE 同步生效，交互 LOD 迟滞按偏移维度隔离；与全局 setTileLodOffset 正交可叠加
+（最终级别 = 全局 LOD 结果 + 本层偏移）。不持久化，重启恢复 0；切图源重建图层后需对新 index 重新设置。
+典型用途：高 DPR 屏仅把注记层设 -1 增大字号、限流时仅降低个别图层请求量。
+回退：移除 TileLayer.serviceZoomOffset 字段与本方法调用链。</p>
+<pre><code>// 影像层 index=0 保持标准，仅注记层 index=1 取粗一级
+map.setLayerZoomOffset(0, 0);
+map.setLayerZoomOffset(1, -1);</code></pre></div>
 
 <h3>6.11 渲染控制</h3>
 <div class="api"><h4>requestRender / viewHeightVp <span class="badge b-base">原生</span></h4>
 <div class="sig">requestRender(): void<br>viewHeightVp(): number</div>
 <p>按需渲染模式下主动请求一帧；门面写操作内部已自带请求，一般无需手动调用。</p></div>
+
+<!-- @Jin 2026-11-11 3D Tiles b3dm（feature/3dtiles-b3dm 合入，实验能力） -->
+<h3>6.12 3D Tiles 倾斜摄影（b3dm） <span class="badge b-jin">@Jin 新增·实验·可回退</span></h3>
+<div class="api"><h4>addTileset3D / setTileset3DVisible / setTileset3DHeightOffset</h4>
+<div class="sig">addTileset3D(url: string): number<br>setTileset3DVisible(layerId: number, visible: boolean): void<br>setTileset3DHeightOffset(layerId: number, meters: number): void</div>
+<p>加载 3D Tiles 1.0 tileset.json（当前支持 b3dm 三角网：transform/boundingVolume box·sphere·region、RTC_CENTER、
+嵌套 tileset、相对 URL、纹理解码），返回 layerId；仅 3D 模式渲染（纯色 Lambert + 纹理，深度测试）。
+<b>高度偏移按图层独立</b>：setTileset3DHeightOffset 只作用于指定 layerId，沿该图层锚点 ECEF 天顶整体平移，
+只改绘制 uniform、不重建 RTC 顶点，默认 0；用于校准模型与地形的高程基准差（椭球高/正高、DEM 综合误差），
+引擎不内置数据集常数，换数据集需重新目视校准（Demo 对 qx-dyt 大雁塔写死 -20m）。
+不支持 i3dm/pnts/cmpt、PBR、要素拾取、磁盘缓存与高斯泼溅 GLB。回退：从 CMakeLists 移除 tileset3d/ 源清单及 GlobeEngine/Renderer 相关代码。</p>
+<pre><code>const id = map.addTileset3D('http://host/3dtiles/qx-dyt/tileset.json');
+map.setTileset3DVisible(id, true);
+map.setTileset3DHeightOffset(id, -20);   // 仅影响该模型图层</code></pre></div>
 
 <h2 id="s7">7. NativeSrs 坐标转换 <span class="badge b-base">原生</span> <span class="badge b-lite">LITE 受限</span></h2>
 <div class="lite-box"><b>@Jin LITE 状态：</b>lite 包为桩实现：<code>initProjData/initProjDataPath</code> 空操作，

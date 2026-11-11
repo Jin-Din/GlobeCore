@@ -12,6 +12,7 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set> // @Jin 地形缺失瓦片负缓存容器
 #include <utility>
 #include <vector>
 
@@ -63,6 +64,8 @@ struct TerrainProviderStats {
     int availableSkips = 0;
     int duplicateSkips = 0;
     int failures = 0;
+    // @Jin 实验性父级回退：子级瓦片 404/缺失后改用祖先瓦片成功交付的次数（回退方式见 .cpp 注释）。
+    int parentFallbacks = 0;
     // @Jin 本轮首块 DEM 注入耗时；用于区分“首块出现慢”和“外围补齐慢”。
     long long firstTileMs = -1;
     long long elapsedMs = 0;
@@ -135,6 +138,17 @@ private:
                       const std::shared_ptr<std::atomic<bool>> &abort,
                       std::vector<uint8_t> &bytes);
     void runRefresh(const TerrainViewportSnapshot &viewport, uint64_t generation);
+    // @Jin 实验性：请求瓦片缺失（HTTP 404 等）时逐级回退到最近的可用祖先瓦片，fetchedOut 返回实际下载的瓦片身份。
+    // @Jin 仅当祖先成功而子级失败时才把该子级写入缺失负缓存，网络整体故障不污染缓存。回退方式：删除本方法与 buildTasks 的负缓存分支即恢复旧行为。
+    bool fetchTileWithFallback(const TerrainServiceTile &requested,
+                               const std::shared_ptr<std::atomic<bool>> &abort,
+                               std::vector<uint8_t> &bytes,
+                               TerrainServiceTile &fetchedOut);
+    // @Jin 返回 tile 最近的、layer.json 声明可用的祖先瓦片（z 逐级 -1，x/y 整除 2）；无可用祖先时返回入参本身。
+    TerrainServiceTile nearestAvailableAncestor(const TerrainServiceTile &tile) const;
+    bool isMissingTile(const std::string &key) const;
+    void markMissingTile(const std::string &key);
+    void clearMissingTiles();
     std::vector<Task> buildTasks(const TerrainViewportSnapshot &viewport, int &engineZoom);
     std::string tileUrl(const TerrainServiceTile &tile) const;
     std::string cachePath(const TerrainServiceTile &tile) const;
@@ -176,6 +190,10 @@ private:
     std::list<std::string> deliveredOrder_;
     std::unordered_map<std::string, std::list<std::string>::iterator> delivered_;
 
+    // @Jin 缺失负缓存：服务元数据声明可用但实际 404 的服务瓦片 key（如本数据集 z15 整体缺数据），后续刷新直接换祖先，避免重复无效请求。
+    mutable std::mutex missingMtx_;
+    std::unordered_set<std::string> missingServiceTiles_;
+
     std::atomic<int> statRequestedEngineTiles_{0};
     std::atomic<int> statRequestedServiceTiles_{0};
     std::atomic<int> statDeliveredTiles_{0};
@@ -188,6 +206,8 @@ private:
     std::atomic<int> statAvailableSkips_{0};
     std::atomic<int> statDuplicateSkips_{0};
     std::atomic<int> statFailures_{0};
+    // @Jin 父级回退成功交付次数（实验性诊断计数）。
+    std::atomic<int> statParentFallbacks_{0};
 
     int effectiveConcurrency_ = 4;
 };
