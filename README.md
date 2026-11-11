@@ -29,6 +29,7 @@ OpenGL ES 2.0 绘制全部在 native 完成，并内联编译了 GDAL/OGR、PROJ
 - @Jin 3D Tiles(b3dm) 倾斜摄影加载渲染：tileset 解析/SSE 调度/换轴/纹理解码全链路，仅 b3dm 三角网，实验可回退（2026-11-11 合入主线）
 - @Jin 3D Tiles 图层级高度偏移 `setTileset3DHeightOffset(layerId, meters)`（仅作用于指定模型图层）；地形服务高层级瓦片 404 时自动父级回退 + 缺失负缓存
 - @Jin 快捷定位峰顶 POI 文字标注；SDK 能力查询结论文档 `docs/sdk-capability-queries.md`；Android/Harmony 双 API HTML 帮助文档 `docs/api/`
+- @Jin 图层初始化参数入参化（layer-init-options，实验可回退）：`addTileLayerWithLayerOptions(..., options)` 建层即传 `serviceZoomOffset`（options 另含 crs/tmsY/tileMatrixOffset），`addTileset3DWithOptions(url, { heightOffset })` 建层即带高度偏移；既有 setter 全保留、运行时覆盖初值，options 缺省/为 0 时旧行为完全不变
 
 **增强/改造**
 

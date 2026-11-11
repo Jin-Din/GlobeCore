@@ -35,6 +35,8 @@ interface GlobeCore {
   nativeAddTileLayer(handle: number, cacheDir: string, urlTemplate: string, maxLevel: number, overlay: boolean): void;
   // @Jin EPSG:4326/4490 地理在线瓦片适配（实验）：crs 传 EPSG:4326/EPSG:4490 启用，tileMatrixOffset 天地图 c 传 1
   nativeAddTileLayerWithOptions(handle: number, cacheDir: string, urlTemplate: string, maxLevel: number, overlay: boolean, crs: string, tmsY: boolean, tileMatrixOffset: number): void;
+  // @Jin layer-init-options（实验/可回退）：options 对象形态，serviceZoomOffset 建层即生效，缺省 0 行为不变
+  nativeAddTileLayerWithLayerOptions(handle: number, cacheDir: string, urlTemplate: string, maxLevel: number, overlay: boolean, options: { crs?: string; tmsY?: boolean; tileMatrixOffset?: number; serviceZoomOffset?: number }): void;
   nativeSetLayerVisible(handle: number, index: number, visible: boolean): void;
   nativeAddRasterLayer(handle: number, cacheDir: string, path: string): number;
   /// 移除瓦片图源图层（含栅格层，墓碑；index 为 addTileLayer/addRasterLayer 加入次序）
@@ -163,6 +165,8 @@ interface GlobeCore {
 
   // @Jin 3D Tiles/b3dm 实验入口（feature/3dtiles-b3dm）：返回图层 id，失败 -1
   nativeAddTileset3D(handle: number, url: string): number;
+  // @Jin layer-init-options（实验/可回退）：建层即传 heightOffset，免先建后补，首帧带偏移
+  nativeAddTileset3DWithOptions(handle: number, url: string, options: { heightOffset?: number }): number;
   nativeSetTileset3DVisible(handle: number, layerId: number, visible: boolean): void;
   // @Jin 实验性：3D Tiles 图层垂直高度偏移（米，正上负下，0 为基准），用于倾斜模型与地形高程基准校准。
   nativeSetTileset3DHeightOffset(handle: number, layerId: number, meters: number): void;

@@ -32,6 +32,9 @@ struct TileLayerOptions {
     std::string crs;               ///< @Jin ""/"EPSG:3857"=墨卡托；"EPSG:4326"/"EPSG:4490"=地理切片。
     bool tmsY = false;             ///< @Jin 服务行序：true=TMS（y=0 在南），false=XYZ（y=0 在北）。
     int tileMatrixOffset = 0;      ///< @Jin 服务 TILEMATRIX 相对 0 基层级的偏移（天地图 c 根 2×1 记 1，传 1）。
+    // @Jin 图层初始化 LOD 偏移（layer-init-options，实验/可回退）：建层即写入 serviceZoomOffset，
+    // 与建后 setLayerZoomOffset 同口径钳制 [-3,2]，默认 0 行为不变；setter 保留用于运行时调节并覆盖此初值。
+    int serviceZoomOffset = 0;
 };
 
 struct TileLayer {

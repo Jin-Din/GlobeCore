@@ -643,6 +643,57 @@ napi_value NativeAddTileLayerWithOptions(napi_env env, napi_callback_info info) 
     return nullptr;
 }
 
+napi_value NativeAddTileLayerWithLayerOptions(napi_env env, napi_callback_info info) {
+    napi_value args[6];
+    gcohos::NapiGetArgs(env, info, 6, args);
+    int64_t handle = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return nullptr;
+    const std::string cacheDir = gcohos::NapiGetString(env, args[1]);
+    if (cacheDir.empty()) return nullptr;
+    const std::string url = gcohos::NapiGetString(env, args[2]);
+    int32_t maxLevel = 0;
+    gcohos::NapiGetInt32(env, args[3], maxLevel);
+    bool overlay = false;
+    gcohos::NapiGetBool(env, args[4], overlay);
+    globecore::TileLayerOptions options; // @Jin 显式命名空间（napi TU 内无 using namespace globecore）。
+    napi_value opts = args[5];
+    napi_valuetype optsType = napi_undefined;
+    if (opts != nullptr) napi_typeof(env, opts, &optsType);
+    if (optsType == napi_object) {
+        napi_value prop = nullptr;
+        if (napi_get_named_property(env, opts, "crs", &prop) == napi_ok) {
+            napi_valuetype vt = napi_undefined;
+            napi_typeof(env, prop, &vt);
+            if (vt == napi_string) options.crs = gcohos::NapiGetString(env, prop);
+        }
+        if (napi_get_named_property(env, opts, "tmsY", &prop) == napi_ok) {
+            napi_valuetype vt = napi_undefined;
+            napi_typeof(env, prop, &vt);
+            if (vt == napi_boolean) gcohos::NapiGetBool(env, prop, options.tmsY);
+        }
+        if (napi_get_named_property(env, opts, "tileMatrixOffset", &prop) == napi_ok) {
+            napi_valuetype vt = napi_undefined;
+            napi_typeof(env, prop, &vt);
+            if (vt == napi_number) {
+                int32_t v = 0;
+                gcohos::NapiGetInt32(env, prop, v);
+                options.tileMatrixOffset = v;
+            }
+        }
+        if (napi_get_named_property(env, opts, "serviceZoomOffset", &prop) == napi_ok) {
+            napi_valuetype vt = napi_undefined;
+            napi_typeof(env, prop, &vt);
+            if (vt == napi_number) {
+                int32_t v = 0;
+                gcohos::NapiGetInt32(env, prop, v);
+                options.serviceZoomOffset = v; // C++ 建层时统一钳 [-3,2]
+            }
+        }
+    }
+    toGlobeEngine(handle)->addTileLayer(cacheDir, url, maxLevel, overlay, options);
+    return nullptr;
+}
+
 napi_value NativeSetLayerVisible(napi_env env, napi_callback_info info) {
     napi_value args[3];
     gcohos::NapiGetArgs(env, info, 3, args);
@@ -1349,6 +1400,28 @@ napi_value NativeAddTileset3D(napi_env env, napi_callback_info info) {
     return gcohos::NapiMakeInt32(env, layerId);
 }
 
+napi_value NativeAddTileset3DWithOptions(napi_env env, napi_callback_info info) {
+    napi_value args[3];
+    gcohos::NapiGetArgs(env, info, 3, args);
+    int64_t handle = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return gcohos::NapiMakeInt32(env, -1);
+    const std::string url = gcohos::NapiGetString(env, args[1]);
+    if (url.empty()) return gcohos::NapiMakeInt32(env, -1);
+    globecore::Tileset3DOptions options;
+    napi_valuetype optsType = napi_undefined;
+    if (args[2] != nullptr) napi_typeof(env, args[2], &optsType);
+    if (optsType == napi_object) {
+        napi_value prop = nullptr;
+        if (napi_get_named_property(env, args[2], "heightOffset", &prop) == napi_ok) {
+            napi_valuetype vt = napi_undefined;
+            napi_typeof(env, prop, &vt);
+            if (vt == napi_number) gcohos::NapiGetDouble(env, prop, options.heightOffset);
+        }
+    }
+    const int layerId = toGlobeEngine(handle)->addTileset3D(url, &options);
+    return gcohos::NapiMakeInt32(env, layerId);
+}
+
 // @Jin 切换 3D Tiles 图层显隐；layerId 来自 nativeAddTileset3D 的返回值。
 napi_value NativeSetTileset3DVisible(napi_env env, napi_callback_info info) {
     napi_value args[3];
@@ -1399,7 +1472,8 @@ napi_value RegisterGlobeEngine(napi_env env, napi_value exports) {
         {"nativeRotateHeading", nullptr, NativeRotateHeading, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeRotateTilt", nullptr, NativeRotateTilt, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeAddTileLayer", nullptr, NativeAddTileLayer, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"nativeAddTileLayerWithOptions", nullptr, NativeAddTileLayerWithOptions, nullptr, nullptr, nullptr, napi_default, nullptr}, // @Jin 4326/4490 地理在线瓦片适配
+        {"nativeAddTileLayerWithOptions", nullptr, NativeAddTileLayerWithOptions, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"nativeAddTileLayerWithLayerOptions", nullptr, NativeAddTileLayerWithLayerOptions, nullptr, nullptr, nullptr, napi_default, nullptr}, // @Jin 4326/4490 地理在线瓦片适配
         {"nativeSetLayerVisible", nullptr, NativeSetLayerVisible, nullptr, nullptr, nullptr, napi_default, nullptr},
     // @Jin 单图层 serviceZoomOffset 运行时调节（默认 0，不改变既有调用方行为）。
     {"nativeSetLayerZoomOffset", nullptr, NativeSetLayerZoomOffset, nullptr, nullptr, nullptr, napi_default, nullptr},
@@ -1451,6 +1525,7 @@ napi_value RegisterGlobeEngine(napi_env env, napi_value exports) {
         {"nativeSetTerrainProviderEventCallback", nullptr, NativeSetTerrainProviderEventCallback, nullptr, nullptr, nullptr, napi_default, nullptr},
         // @Jin 3D Tiles/b3dm 实验性入口（feature/3dtiles-b3dm）：加载倾斜摄影 tileset 与图层显隐。
         {"nativeAddTileset3D", nullptr, NativeAddTileset3D, nullptr, nullptr, nullptr, napi_default, nullptr},
+    {"nativeAddTileset3DWithOptions", nullptr, NativeAddTileset3DWithOptions, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeSetTileset3DVisible", nullptr, NativeSetTileset3DVisible, nullptr, nullptr, nullptr, napi_default, nullptr},
         // @Jin 实验性 3D Tiles 高度偏移 NAPI 注册（可回退：删除本行即取消导出）。
         {"nativeSetTileset3DHeightOffset", nullptr, NativeSetTileset3DHeightOffset, nullptr, nullptr, nullptr, napi_default, nullptr},

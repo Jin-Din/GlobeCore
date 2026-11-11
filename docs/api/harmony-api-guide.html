@@ -329,6 +329,23 @@ map.addTileLayerWithOptions(this.baseDir + '/tdt4490-cia',
 <div class="warn">已知边界（见主仓 docs/design/epsg-4490-*）：4490 注记存在轻微纵向拉伸与字号偏小，
 后续计划以单图层 <code>serviceZoomOffset</code> 参数交由使用方调节，当前未开放。</div></div>
 
+<div class="api"><h4>addTileLayerWithLayerOptions <span class="badge b-jin">@Jin 新增</span> <span class="badge b-exp">实验</span></h4>
+<div class="sig">addTileLayerWithLayerOptions(cacheDir: string, urlTemplate: string, maxLevel: number, overlay: boolean,<br>&nbsp;&nbsp;options: TileLayerInitOptions): void</div>
+<p>@Jin layer-init-options：以 options 对象一次性传入建层参数，字段全部可选，缺省与 <code>addTileLayerWithOptions</code> 旧默认值一致；
+其中 <code>serviceZoomOffset</code> 建层即写入（首帧选瓦即带偏移），无需建后补调 <code>setLayerZoomOffset</code>。运行时 setter 仍可覆盖初值。</p>
+<table>
+<tr><th>options 字段</th><th>说明</th></tr>
+<tr><td class="param">crs?: string</td><td>同旧位置参数：<code>EPSG:3857</code>（默认）/ <code>EPSG:4326</code> / <code>EPSG:4490</code></td></tr>
+<tr><td class="param">tmsY?: boolean</td><td>true=TMS 行序；XYZ 服务缺省 false</td></tr>
+<tr><td class="param">tileMatrixOffset?: number</td><td>服务 TileMatrix 与 z 的偏移（天地图 c 服务传 1）</td></tr>
+<tr><td class="param">serviceZoomOffset?: number</td><td>单图层取瓦级别偏移，引擎钳制 <code>[-3,2]</code>，缺省 0 与旧行为一致；负值请求更粗一级瓦片（观感放大注记字号）</td></tr>
+</table>
+<pre><code>// 天地图 4490 注记层建层即带 -1 偏移（影像/注记可各自独立取值）
+map.addTileLayerWithLayerOptions(this.baseDir + &#x27;/tdt4490-cia&#x27;,
+  &#x27;https://t{s}.tianditu.gov.cn/DataServer?T=cia_c&amp;x={x}&amp;y={y}&amp;l={z}&amp;tk=TOKEN&#x27;,
+  18, true, { crs: &#x27;EPSG:4490&#x27;, tmsY: false, tileMatrixOffset: 1, serviceZoomOffset: -1 });
+// 运行时仍可覆盖：map.setLayerZoomOffset(labelIndex, 0);</code></pre>
+<div class="warn">回退：不传 options 或 serviceZoomOffset 恒为 0 即恢复旧行为；旧 <code>addTileLayer/addTileLayerWithOptions</code> 签名保留不变。</div></div>
 <div class="api"><h4>setLayerVisible / removeTileLayer <span class="badge b-base">原生</span></h4>
 <div class="sig">setLayerVisible(index: number, visible: boolean): void<br>removeTileLayer(index: number): void</div>
 <p>index 为 addTileLayer/addRasterLayer 的加入次序（0 起）；隐藏层不绘制、不取瓦片；移除为墓碑语义。</p></div>
@@ -482,13 +499,17 @@ map.setLayerZoomOffset(1, -1);</code></pre></div>
 <!-- @Jin 2026-11-11 3D Tiles b3dm（feature/3dtiles-b3dm 合入，实验能力） -->
 <h3>6.12 3D Tiles 倾斜摄影（b3dm） <span class="badge b-jin">@Jin 新增·实验·可回退</span></h3>
 <div class="api"><h4>addTileset3D / setTileset3DVisible / setTileset3DHeightOffset</h4>
-<div class="sig">addTileset3D(url: string): number<br>setTileset3DVisible(layerId: number, visible: boolean): void<br>setTileset3DHeightOffset(layerId: number, meters: number): void</div>
+<div class="sig">addTileset3D(url: string): number<br>addTileset3DWithOptions(url: string, options: Tileset3DInitOptions): number <span class="badge b-jin">@Jin</span> <span class="badge b-exp">实验</span><br>setTileset3DVisible(layerId: number, visible: boolean): void<br>setTileset3DHeightOffset(layerId: number, meters: number): void</div>
 <p>加载 3D Tiles 1.0 tileset.json（当前支持 b3dm 三角网：transform/boundingVolume box·sphere·region、RTC_CENTER、
 嵌套 tileset、相对 URL、纹理解码），返回 layerId；仅 3D 模式渲染（纯色 Lambert + 纹理，深度测试）。
 <b>高度偏移按图层独立</b>：setTileset3DHeightOffset 只作用于指定 layerId，沿该图层锚点 ECEF 天顶整体平移，
 只改绘制 uniform、不重建 RTC 顶点，默认 0；用于校准模型与地形的高程基准差（椭球高/正高、DEM 综合误差），
 引擎不内置数据集常数，换数据集需重新目视校准（Demo 对 qx-dyt 大雁塔写死 -20m）。
 不支持 i3dm/pnts/cmpt、PBR、要素拾取、磁盘缓存与高斯泼溅 GLB。回退：从 CMakeLists 移除 tileset3d/ 源清单及 GlobeEngine/Renderer 相关代码。</p>
+<p><b>@Jin 建层即带高度偏移（推荐）：</b><code>Tileset3DInitOptions = { heightOffset?: number }</code>，
+米、正上负下，建层写入后首帧 uniform 即生效，免去“先按 0 渲染一帧再跳变”；不传或传 0 与旧单参入口一致，运行时仍可用 setTileset3DHeightOffset 覆盖。</p>
+<pre><code>// 建层即校准 -20m（qx-dyt 经验值，由使用方传入，引擎不内置数据集常数）
+const id2 = map.addTileset3DWithOptions('http://host/3dtiles/qx-dyt/tileset.json', { heightOffset: -20 });</code></pre>
 <pre><code>const id = map.addTileset3D('http://host/3dtiles/qx-dyt/tileset.json');
 map.setTileset3DVisible(id, true);
 map.setTileset3DHeightOffset(id, -20);   // 仅影响该模型图层</code></pre></div>

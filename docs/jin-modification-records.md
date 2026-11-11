@@ -11,7 +11,39 @@
 - 三、飞行相机与矢量地形贴地（drape 系列）
 - 四、API 文档与工程约定
 - 五、未解决待办与实验开关/回退索引
+- 七、图层初始化参数入参化 layer-init-options（2026-11-11）：serviceZoomOffset/heightOffset 建层 options 一次性传入（第六节低空手势随 fix/3d-gesture-low-altitude 分支后续合入）
 
+## 七、图层初始化参数入参化 layer-init-options（2026-11-11）
+
+> 背景：3D Tiles 的 `heightOffset` 与瓦片层的 `serviceZoomOffset` 引擎内部早已是逐层独立状态，但公开 API 只有“先建层、后补调 setter”一条路径，宿主首帧先按 0 渲染再跳变。方案存档：`docs/design/layer-init-options-proposal.md`。实验性、可回退，注释统一 @Jin。
+
+### 1. 改造内容（双端共用 C++ 核心，Harmony 全链路已通，Android 待移植入口）
+
+- C++ 核心：`TileLayerOptions` 新增 `int serviceZoomOffset = 0`，`GlobeEngine::addTileLayer` 建层即写入并沿用 `[-3,2]` 钳制；新增 `struct Tileset3DOptions { double heightOffset = 0.0; }` 与重载 `addTileset3D(url, const Tileset3DOptions*)`，旧单参签名保留并以 nullptr 委托，建层后立即 `setHeightOffset`（Renderer 下一帧 uniform 生效，无模型重建）。
+- Harmony NAPI：新增 `nativeAddTileLayerWithLayerOptions(handle, cacheDir, url, maxLevel, overlay, options)` 与 `nativeAddTileset3DWithOptions(handle, url, options)`，options 为 JS 对象、字段全可选，缺省即旧默认值；旧 NAPI 函数全部保留。
+- ArkTS：具名接口 `TileLayerInitOptions`/`Tileset3DInitOptions` 定义在 NativeLib.ets（ArkTS 禁止对象字面量作类型），NativeMapView 再导出保持 HAR 根出口不变；门面 `addTileLayerWithLayerOptions(...)`、`addTileset3DWithOptions(url, options)`。
+- 语义：初始化值负责开箱即适配，运行时 setter（`setLayerZoomOffset`/`setTileset3DHeightOffset`）覆盖初值；默认 0/不传 options 时与改造前行为完全一致。
+- Demo：四个建层点（4326/墨卡托各影像+注记）改用 options 一次性携带 `serviceZoomOffset`，删除建后 setter 重放块；qx-dyt 改 `addTileset3DWithOptions(url, {heightOffset:-20})`，步进面板仍走 setter。
+
+### 2. 调试中发现并修复的空指针崩溃
+
+- 首版真机启动即 SIGSEGV（SEGV_MAPERR @0x7c），符号化定位到 `GlobeEngine::addTileLayer`（GlobeEngine.cpp:259）：`layers_.push_back(std::move(layer))` 后 unique_ptr 已置空，新 LOGI 仍解引用 `layer->serviceZoomOffset`，0x7c 即该成员相对对象基址的偏移。
+- 修复：move 前先把钳制结果落到本地 `appliedZoomOffset`，日志改读本地变量；`addTileset3D` 路径使用 move 前缓存的裸指针 `layerRaw`，无此问题。
+
+### 3. 真机验证（MatePad HarmonyOS NEXT，BUILD_ID v0.1.5-20261111-layer-init-options-fix1）
+
+- 默认档位切图源：hilog 两层均为 `addTileLayer ... zoomOffset=0`，且无 `setLayerZoomOffset` 重放日志。
+- 调试坞影像/注记均置 -1 后切天地图 4490：两层建层日志 `crs=EPSG:4326 geo=1 zoomOffset=-1`，中文注记渲染正常；切 ArcGIS 后同态保留 `crs=EPSG:3857 zoomOffset=-1`。
+- 恢复标准后天地图 3857/ArcGIS 建层日志回到 `zoomOffset=0`。
+- 大雁塔（qx-dyt）建层日志 `addTileset3D ... initHeightOffset=-20.000`，面板初值即 -20m；步进 +5/复位经 setter 正常覆盖，无崩溃。
+
+### 4. 回退方式
+
+- 宿主不传 options 或恒传 0 即恢复旧行为；删除 NAPI/ArkTS 两个 WithOptions 接线与 C++ 重载即可完全回退，旧签名与 setter 全保留。
+
+### 5. 遗留
+
+- Android JNI/Kotlin 尚未提供 tileset3d 与 WithOptions 入口（C++ 核心已双端共用），列入待办；heightOffset 步进节流防抖待办不变。
 ## 一、新增能力
 
 ### @Jin 实验性在线 GeoJSON Source（P0）

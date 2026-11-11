@@ -14,6 +14,22 @@ import gc from 'libglobecore.so';
 import common from '@ohos.app.ability.common';
 import fs from '@ohos.file.fs';
 
+
+
+// @Jin layer-init-options（实验/可回退）：具名初始化选项，ArkTS 禁止对象字面量作类型，故在底层门面定义、上层再导出。
+/** 瓦片图层初始化选项：crs/tmsY/tileMatrixOffset 同旧位置参数；serviceZoomOffset 为建层即生效的单图层 LOD 偏移（引擎钳 [-3,2]）。 */
+export interface TileLayerInitOptions {
+  crs?: string;
+  tmsY?: boolean;
+  tileMatrixOffset?: number;
+  serviceZoomOffset?: number;
+}
+
+/** 3D Tiles 图层初始化选项：heightOffset 垂直高度偏移（米，正上负下），建层即写入、首帧生效。 */
+export interface Tileset3DInitOptions {
+  heightOffset?: number;
+}
+
 const TAG: string = 'globecore';
 
 /// 颜色/像素等 #AARRGGBB 大值（>2^31-1）折算 int32 位模式（napi_get_value_int32 截断语义同 Kotlin Int）
@@ -198,6 +214,15 @@ export class NativeLib {
     maxLevel: number, overlay: boolean, crs: string, tmsY: boolean, tileMatrixOffset: number): void {
     if (handle !== 0) {
       gc.nativeAddTileLayerWithOptions(handle, cacheDir, urlTemplate, maxLevel, overlay, crs, tmsY, tileMatrixOffset);
+    }
+  }
+
+  // @Jin layer-init-options（实验/可回退）：options 对象形态，字段全可选，缺省与旧 8 参入口同默认值。
+  static nativeAddTileLayerWithLayerOptions(handle: number, cacheDir: string, urlTemplate: string,
+    maxLevel: number, overlay: boolean,
+    options: TileLayerInitOptions): void {
+    if (handle !== 0) {
+      gc.nativeAddTileLayerWithLayerOptions(handle, cacheDir, urlTemplate, maxLevel, overlay, options);
     }
   }
 
@@ -666,6 +691,12 @@ export class NativeLib {
   // @Jin 3D Tiles/b3dm 倾斜摄影实验入口（feature/3dtiles-b3dm）：成功返回图层 id，失败 -1。
   static nativeAddTileset3D(handle: number, url: string): number {
     return handle !== 0 ? gc.nativeAddTileset3D(handle, url) : -1;
+  }
+
+  // @Jin layer-init-options（实验/可回退）：建层即传 heightOffset，首帧带偏移；options.heightOffset 缺省按 0。
+  static nativeAddTileset3DWithOptions(handle: number, url: string,
+    options: Tileset3DInitOptions): number {
+    return handle !== 0 ? gc.nativeAddTileset3DWithOptions(handle, url, options) : -1;
   }
 
   /** @Jin 切换 3D Tiles 图层显隐；layerId 为 nativeAddTileset3D 返回值。 */

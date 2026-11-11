@@ -252,9 +252,14 @@ void GlobeEngine::addTileLayer(const std::string &cacheDir, const std::string &u
         layer->loader->setGeographicSource(cacheDir + "-geo-raw", urlTemplate,
                                            maxGeoLevel0, options.tmsY, options.tileMatrixOffset);
     }
+    // @Jin layer-init-options：建层即写入 serviceZoomOffset 初值（与 setLayerZoomOffset 同口径钳 [-3,2]），
+    // 首帧选瓦即带偏移；默认 0 时与旧行为完全一致，运行时 setLayerZoomOffset 可覆盖。
+    // @Jin 修复：std::move 入 layers_ 后 unique_ptr 已置空，偏移值必须先落本地变量，日志不得再解引用 layer。
+    const int appliedZoomOffset = std::max(-3, std::min(2, options.serviceZoomOffset));
+    layer->serviceZoomOffset = appliedZoomOffset;
     layers_.push_back(std::move(layer));
-    LOGI("GlobeEngine addTileLayer maxLevel=%d overlay=%d crs=%s geo=%d", maxLevel, overlay ? 1 : 0,
-         options.crs.empty() ? "EPSG:3857" : options.crs.c_str(), geographic ? 1 : 0);
+    LOGI("GlobeEngine addTileLayer maxLevel=%d overlay=%d crs=%s geo=%d zoomOffset=%d", maxLevel, overlay ? 1 : 0,
+         options.crs.empty() ? "EPSG:3857" : options.crs.c_str(), geographic ? 1 : 0, appliedZoomOffset);
 }
 
 void GlobeEngine::setLayerVisible(int index, bool visible) {
@@ -1164,6 +1169,11 @@ void GlobeEngine::setDisplayDensity(double density) {
 }
 
 int GlobeEngine::addTileset3D(const std::string &url) {
+    // @Jin layer-init-options：旧单参入口保留，委托带选项实现（nullptr=默认参数，行为不变）。
+    return addTileset3D(url, nullptr);
+}
+
+int GlobeEngine::addTileset3D(const std::string &url, const Tileset3DOptions *opts) {
     if (url.empty()) return -1; // @Jin 空地址不创建图层，避免 Provider 空转。
     auto layer = std::make_unique<Tileset3DLayer>(static_cast<int>(tileset3dLayers_.size()));
     layer->loading = true;
@@ -1202,7 +1212,13 @@ int GlobeEngine::addTileset3D(const std::string &url) {
         provider->start();
         tileset3dProviders_.push_back(std::move(provider));
     }
-    LOGI("GlobeEngine addTileset3D layer=%d url=%s", layerId, url.c_str());
+    // @Jin layer-init-options：建层后立即应用初始化高度偏移（图层原子量，Renderer 下一帧 uniform 生效），
+    // 免宿主“先建后补”两步调用与首帧零偏移跳变；opts 为空或 0 时与旧行为一致。
+    const double initHeightOffset = (opts != nullptr) ? opts->heightOffset : 0.0;
+    if (initHeightOffset != 0.0 && layerRaw) {
+        layerRaw->setHeightOffset(initHeightOffset);
+    }
+    LOGI("GlobeEngine addTileset3D layer=%d url=%s initHeightOffset=%.3f", layerId, url.c_str(), initHeightOffset);
     if (renderCallback_) renderCallback_();
     return layerId;
 }
