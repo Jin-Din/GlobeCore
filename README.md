@@ -54,6 +54,12 @@ OpenGL ES 2.0 绘制全部在 native 完成，并内联编译了 GDAL/OGR、PROJ
 - @Jin 新增 `docs/api/harmony-api-guide.html`（main 0.1.5.0-dev）：面向 HarmonyOS NEXT/ArkTS 宿主开发人员与 AI 编程助手，覆盖分发包内全部公开 API（NativeMapView、NativeSrs、NativeNet、NativeVector、NativeLayerInfo、CesiumTerrainProvider 及全部值对象），每个 API 按「签名→参数表→可运行示例」三段式组织，含 @Jin 改造标注、地形事件 JSON、业务示例与排错指南；分发包 .so 与门面快照位于仓库外 `dist/globecore-harmony-next-*`（二进制不入仓）。
 - @Jin 维护约定补充：Harmony 侧 NAPI/ArkTS 公开 API 变更时同次定稿更新 harmony-api-guide.html，两端保持同步。
 
+### @Jin Harmony 分发包命名与 LITE 约定（2026-11-11）
+
+- 分发包（目录与 zip）文件名强制带构建形态：lite 构建（GLOBECORE_LITE=ON）为 `globecore-harmony-next-<version>-lite`，全量构建为 `globecore-harmony-next-<version>-full`；包内 README-integration.md 须声明形态与能力边界。
+- 打包需求未明确 lite/full 时，必须先向使用者确认，不得自行选择；完整规则见仓库根 `AGENTS.md` 第 3 节。
+- LITE 边界：在线瓦片（含 EPSG:4490）、三维地形、GeoJSON（本地/在线）、叠加层、拾取可用；GDAL/PROJ 系能力（shp/kml/tif 直读、PROJ 转换、NativeVector 文件 IO、NativeLayerInfo）为桩。
+
 ## 它是干什么的
 
 一句话：**给手机 App 和桌面应用一个能显示 2D 地图 / 3D 地球、能直接读 shp·tif·kml、能离线用的地图渲染内核**。
@@ -64,6 +70,7 @@ SDK**。
 ### SDK 能力速查（@Jin = 本库在原作者 0.1.4 基础上改造/新增）
 
 > @Jin 基线：上游 @zys/globecore 0.1.4（提交 7eb0e4a）。标 **@Jin** 的条目为本库改造或新增，未标注者为原作者既有能力；3D Tiles(b3dm) 仍在 feature/3dtiles-b3dm 分支实验，未进入主线，不在此表。
+> @Jin HarmonyOS NEXT 分发包默认 **GLOBECORE_LITE=ON**（文件名带 `-lite`）：在线瓦片（含 4490）、三维地形、GeoJSON（本地/在线）、叠加层、拾取均可用；GDAL/PROJ 系能力（本地 shp/kml/tif 直读、PROJ 转换、NativeVector 文件 IO、图层元信息）为桩，需 GLOBECORE_LITE=OFF 全量包。详见 `docs/api/harmony-api-guide.html` 顶部「构建形态声明」。
 
 | # | 模块 | 能力（简述） | 来源 | 主要入口（Harmony/Android 同名门面） |
 |---|---|---|---|---|
@@ -73,10 +80,10 @@ SDK**。
 | 4 | 底图 | EPSG:4326/4490 地理切片（天地图 img_c/cia_c 等），相交地理瓦重投影到墨卡托球体 | **@Jin 新增** | `addTileLayerWithOptions(crs, tileMatrixOffset)` |
 | 5 | 缓存 | 目录 / MBTiles 双后端、先盘后网、原子写、2D 与 3D 同键复用 | 原生 | `cacheDir` 参数 |
 | 6 | 调度 | 祖先粗瓦优先、视口代际去重、LOD 迟滞、每帧上传预算、地形安全高度与近景黑面治理（压低请求量与黑块观感） | **@Jin 改造** | 引擎内部（调试入口见第 20 行） |
-| 7 | 本地影像 | tif/img 双通路：即时切片回写缓存 / 整幅贴面 | 原生 | `addRasterLayer` / `addRasterImageLayer` |
+| 7 | 本地影像 | tif/img 双通路：即时切片回写缓存 / 整幅贴面（**LITE 包为桩不可用，需全量包**） | 原生 | `addRasterLayer` / `addRasterImageLayer` |
 | 8 | 三维地形 | quantized-mesh v1.0 Provider 下沉 C++：视口调度、磁盘缓存、并发/重试/去重，Android/Harmony/Qt 统一生命周期事件 | **@Jin 新增** | `configureTerrainProvider` / `setTerrainProviderEnabled` / `setOnTerrainProviderEventListener` |
 | 9 | 三维地形 | 相机静止后自动跟随刷新、地形安全高程防穿山体 | **@Jin 新增** | `setTerrainProviderAutoFollow` |
-| 10 | 矢量 | 文件矢量（Android：shp/kml/dxf 等 OGR；Harmony LITE：GeoJSON），earcut 三角剖分、样式/图标/文字 | 原生 | `addVectorLayer` / `VectorStyle` / `setFontPath` |
+| 10 | 矢量 | 文件矢量（Android：shp/kml/dxf 等 OGR；Harmony LITE：**仅 GeoJSON，含在线 URL**），earcut 三角剖分、样式/图标/文字 | 原生 | `addVectorLayer` / `VectorStyle` / `setFontPath` |
 | 11 | 矢量 | 在线 GeoJSON URL：后台下载落缓存、LITE 无 GDAL 原生 reader、二次打开命中缓存不重复下载 | **@Jin 新增** | `addVectorLayer(url, …, vectorCacheDir)` |
 | 12 | 矢量 | 3D 地形贴地（drape）、高等级视角本地线层地形遮挡修复 | **@Jin 改造** | 引擎内部（矢量层自动生效） |
 | 13 | 矢量 | 按屏幕范围增量重载、按级别隐藏、样式就地更换不闪图 | 原生 | `updateVectorExtent` / `setVectorMinLevel` |
@@ -84,10 +91,10 @@ SDK**。
 | 15 | 叠加层 | 文字标注 / POI billboard 地形锚定，随地形起伏不悬空 | **@Jin 新增** | `VectorStyle.labelField` + 引擎贴地 |
 | 16 | 拾取 | 要素拾取、屏幕点反算经纬度、要素几何回取 | 原生 | `pickVector` / `screenToGeo` / `featureGeometry` |
 | 17 | 定位 | 蓝点/自定义图标定位标记、方位角箭头 | 原生 | `setLocationMarker` / `setLocationMarkerIcon` |
-| 18 | 坐标系 | PROJ 任意 EPSG / PROJ 文本互转，proj.db 随包分发 | 原生 | `NativeSrs.initProjData` / `convert` |
+| 18 | 坐标系 | PROJ 任意 EPSG / PROJ 文本互转，proj.db 随包分发（**Harmony LITE 包为桩，convert 恒 null，需全量包**） | 原生 | `NativeSrs.initProjData` / `convert` |
 | 19 | 手势 | 平移/捏合/惯性/双指旋转俯仰；多指切换与依次抬指防跳变 | 原生 + **@Jin 改造**（防跳） | `MapGestures` / `setOnTapListener` |
 | 20 | 调试 | 相机级别/瓦片级别查询、瓦片 LOD 运行时偏移、高分辨率密度对齐 | **@Jin 新增** | `cameraZoomLevel` / `tileZoomLevel` / `setTileLodOffset` / `setTileLodAlignDisplay` |
-| 21 | 矢量 IO | 属性 SQL 查询、要素计数、按 FID 读写回源、几何简化读取 | 原生 | `NativeVector` |
+| 21 | 矢量 IO | 属性 SQL 查询、要素计数、按 FID 读写回源、几何简化读取（**Harmony LITE 包为桩**） | 原生 | `NativeVector` |
 | 22 | 元信息 | 文件四至/SRS/字段清单/GDAL 驱动清单 | 原生 | `NativeLayerInfo` |
 | 23 | 网络 | 自定义 CA 证书包（HTTPS 校验） | 原生 | `NativeNet.setCaBundle` |
 | 24 | 多平台 | 同一套 C++ 内核四侧共用：Android AAR、HarmonyOS NEXT HAR、Windows/Linux Qt 可执行 | 原生 | — |
