@@ -18,10 +18,17 @@ OpenGL ES 2.0 绘制全部在 native 完成，并内联编译了 GDAL/OGR、PROJ
 
 - @Jin 新增独立 `globecore/src/main/cpp/tileset3d/` 模块：`TilesetJson` 解析 3D Tiles 1.0 tileset.json（transform/boundingVolume box·sphere·region/geometricError/refine/content.uri 兼容旧 `url` 字段/asset.gltfUpAxis）；`B3dmDecoder` 解 b3dm header、Feature/Batch Table、`RTC_CENTER` 并提取内嵌 GLB；`Tileset3DUrl` 解析 `./`、`../`、站点绝对路径等相对 URL；`Tileset3DLoader` 复用 `HttpClient` 下载 JSON/b3dm。
 - @Jin `Tileset3DProvider` 后台线程调度：外部 tileset 工作清单递归展开（任意深度嵌套）、SSE 屏幕空间误差 + 视锥 6 平面保守裁剪选择可见 tile、量化眼点签名去重避免静态画面空转、锁内只遍历内存结构而网络 IO 全部锁外、单帧最多处理 8 个 b3dm；`Tileset3DModelBuilder` 完成 Z-up 换轴、RTC_CENTER 与 tile ECEF transform 的 CPU 转换，超 65535 索引自动展开非索引三角形兼容 GLES2；`Renderer` 新增独立 3D Tiles shader（纯色 + Lambert，深度测试，栅格之后矢量之前绘制）。
-- @Jin 平台链路：C++ `GlobeEngine::addTileset3D/setTileset3DVisible` → Harmony NAPI → ArkTS `NativeMapView.addTileset3D/setTileset3DVisible`；Harmony Demo「数据与样例」面板提供「倾斜摄影 3D Tiles」开关，点击自动切 3D 并 flyTo 数据区域。当前仅纯色渲染，glTF 纹理/PBR、i3dm/pnts/cmpt、要素拾取、磁盘缓存、LRU 卸载、失败重试、ADD refine 留待后续阶段。
+- @Jin 平台链路：C++ `GlobeEngine::addTileset3D/setTileset3DVisible` → Harmony NAPI → ArkTS `NativeMapView.addTileset3D/setTileset3DVisible`；Harmony Demo 左侧功能坞「模型」面板（原「数据与样例」入口已迁出）提供「倾斜摄影 3D Tiles」开关，点击自动切 3D 并 flyTo 数据区域。当前仅纯色渲染，glTF 纹理/PBR、i3dm/pnts/cmpt、要素拾取、磁盘缓存、LRU 卸载、失败重试、ADD refine 留待后续阶段。
 - @Jin P3 真机阻断缺陷修复（runtime 节点悬空指针，症状：真机 `item diag` 打印乱码 URL、b3dm 全部无法下载）：根因是 `Tileset3DRuntimeNode::source` 裸指针先指向 `build()` 入参 `TilesetResult`（函数返回即销毁）；即便改指图内拷贝，`TilesetResult::root` 仍是值类型内嵌成员，Provider `*graph = build(...)` move 赋值后 root 随对象搬迁，根节点指针照样悬空（vector 内子节点因堆缓冲随 move 转移而幸免）。治本修复：`Tileset3DGraph::tileset` 改为 `std::unique_ptr<TilesetResult>` 堆托管，图的任何 move 都不搬动节点树，全部 `source` 在图生命周期内地址恒定。
 - @Jin P3 真机朝向与明暗修复（2026-11-10）：① 该数据 b3dm 无 NORMAL 属性，旧逻辑统一赋默认法向导致 Lambert 光照均匀、模型退化为灰板，现按三角形叉积做面积加权自动生成平滑顶点法向，`model built` 日志带 `genNormal=1` 标识；② 换轴朝向问题经根 transform 的 ENU 数学验证定论——mars3d osgb2tiles3 虽声明 `gltfUpAxis:"Z"`，但其 tile 局部帧本身就是 Z-up 的 ENU 帧（localX→东、localY→北、localZ→天），内容同为 Z-up，套用 Cesium 标准 Z-up→Y-up 换轴反而把建筑高度转到水平方向（真机 90° 立起），故换轴矩阵改为 identity；未来接入 Y-up 局部帧的标准 Cesium 数据需先做帧上轴检测再决定是否换轴。
 - @Jin 真机验证（2026-11-10，设备 `5KLBB25911200313`，数据 `http://210.74.129.84:8520/app-pub/web-data/3dtiles/qx-dyt/tileset.json`）：根图 3 节点、外部 `0/root.json` 93 节点构建成功，选中 URL 全部完整无乱码；放大 3 级累计 18 个不同 b3dm 完成「下载→解码→GPU 上传」全链路，b3dm/glb/JSON 失败计数均为 0，模型在目标地理位置正确出现。分阶段方案与排查细节见 `docs/design/3dtiles-b3dm-plan.md`；回退方式：从 CMakeLists 移除 `tileset3d/` 源清单并移除 GlobeEngine/Renderer 中标注 @Jin 的 3D Tiles 接线，不影响栅格、地形、矢量通路。
+### @Jin 实验性：地形瓦片父级回退 + 3D Tiles 高度偏移（feature/3dtiles-b3dm，2026-11-11）
+
+- @Jin 修复：地形服务 layer.json 声明覆盖但高层级瓦片实际 404（210 服务 z15 整体缺数据、z14 及以下正常）时，旧逻辑整轮失败、地形不显示（真机实测 182 块全 404）。`CesiumTerrainProvider` 新增父级回退：请求失败后按 EPSG:4326 地理网格逐级回退最近可用祖先瓦片（父索引=子 x/y 整除 2），按祖先真实 bounds 注入；新增缺失负缓存（上限 4096，手动刷新/切图源清空重探）避免重复无效请求；stats 增加 `parentFallbacks` 计数。真机验证两轮均 182/182、0 失败，第二轮父级全磁盘命中。实验性可回退（删除 fetchTileWithFallback/负缓存代码块即恢复）。
+- @Jin 新增：3D Tiles 图层运行时垂直高度偏移 `heightOffset`（米，默认 0），沿锚点 ECEF 天顶整体平移模型，只改绘制 uniform、不重建 RTC 模型。链路：C++ `GlobeEngine::setTileset3DHeightOffset` → Harmony NAPI `nativeSetTileset3DHeightOffset` → ArkTS `NativeMapView.setTileset3DHeightOffset` → Demo「三维模型」面板 -5/+5/复位步进（±100m）。用途：校准倾斜模型与地形的高程基准差（椭球高/正高、DEM 综合误差），引擎不内置数据集常数。
+- @Jin qx-dyt 经验值：真机在 210 地形下目视校准 heightOffset=**-20m** 贴合最佳（离线量化预判 -9m，实测残差更大，详见 docs/design/3dtiles-b3dm-plan.md D/E 节）；Demo 已对该数据集写死 -20m（仅演示层，SDK 默认仍 0），换数据集需重新校准。
+- @Jin 待办：高斯泼溅（KHR_gaussian_splatting）GLB 点云模型不支持，四套柏树/黄帝陵数据挂起；高度偏移步进按钮快速连点可能一次跳多档，后续加节流防抖。
+
 ### @Jin 实验性在线 GeoJSON Source（P0）
 
 - @Jin `NativeMapView.addVectorLayer(path, ...)` 的 `path` 在 Android 与 HarmonyOS NEXT HAR 两端除本地文件外，实验性支持公开 `http://` / `https://` GeoJSON URL。native 不依赖 GDAL `/vsicurl/`，而是在后台通过现有 `HttpClient` 下载、做基础 JSON/HTML/空响应/80MB 上限校验，并原子写入应用私有目录 `filesDir/globecore/vector-cache/url/<hash>.geojson`，随后复用现有 `buildGeometry → Renderer VBO/拾取/贴地` 管线。
@@ -696,6 +703,7 @@ console.info(view.terrainProviderStatus());
 - @Jin 已知边界：高空方案优先保证线条可见，不在全球视角对全省每个顶点做真实地表贴合；若以后接近地平线旋转时观察到穿透、背面可见或浮线，需要继续做视口范围深度策略或真实地表 ribbon。
 - @Jin **未解决待办**：
   - [ ] @Jin 陕西省级 Polygon/MultiPolygon“大面”在 3D 地形下仍存在被地形遮挡的问题，且不只发生在 z4/z5/z6；该问题与本轮已修复的“本地纯 MultiLineString 省界线”不是同一条路径，后续需单独优化大面 fill/outline 的 DEM 覆盖判定、分 chunk 深度策略、透明填充零几何构建以及边界 ribbon 贴合。
+  - [ ] @Jin 高斯泼溅（Gaussian Splatting）三维模型支持：大古柏/保生柏/黄帝陵/老君柏四个数据集为 KHR_gaussian_splatting + spz_2 压缩 GLB 点云原语（非 b3dm 三角网），当前 GLES2 三角网管线无法加载，需新增高斯泼溅解码与点云/泼溅渲染管线；详见 docs/design/3dtiles-b3dm-plan.md「P4 不贴地排查」节。
 
 ### 演示工程 globecore-harmonyos
 

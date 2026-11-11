@@ -28,7 +28,7 @@ namespace globecore {
 // 每次准备重建 HAR 前，把 GLOBECORE_BUILD_ID 改成一个全新的唯一串（例如末尾序号 +1，或带上你自定义的标记）。
 // 装机日志出现该串 = 跑的确实是你这次改过、并重新构建 + 重新链接的 HAR；
 // 未出现 / 仍是旧串 = app 还在用旧 HAR（引擎源码根本没进设备）。改完务必：重建 HAR → app Sync/ohpm 重新链接 → 卸载重装。
-#define GLOBECORE_BUILD_ID "v0.1.3-20261029-local-quick-summit-label04" // @Jin 构建核对：快捷定位 POI 与文字拆层、显式加载 Harmony 中文字体，并放大山顶文字。
+#define GLOBECORE_BUILD_ID "v0.1.3-20261111-terrain-fallback-heightoffset3" // @Jin 构建核对：3DTiles 纹理解码修复版（补 main 入口、GLES2 NPOT 回退 LINEAR） // @Jin [诊断-临时] 3DTiles 8 相位诊断构建，定位后回退 // @Jin 构建核对：快捷定位 POI 与文字拆层、显式加载 Harmony 中文字体，并放大山顶文字。
 
 // 祖先链请求深度帽：叶子只向上请求 4 级。更深的祖先拉伸 >16× 已无兜底价值，而链条请求数是
 // 数量倍增器；尤其无金字塔栅格源，低级别粗瓦源窗口≈整幅（单块秒级～十几秒），砍深度直接减掉
@@ -358,18 +358,21 @@ void main() {
 const char *const kTileset3DVertexSrc = R"GLSL(
 attribute vec3 aPos;
 attribute vec3 aNormal;
+attribute vec2 aUv;   // @Jin 3D Tiles 纹理坐标
 attribute vec4 aColor;
 uniform mat4 uMvp;
 uniform vec3 uOffset;
 varying vec4 vColor;
 varying vec3 vNormal;
 varying vec3 vViewDir;
+varying vec2 vUv;
 void main() {
     vec3 rtc = aPos + uOffset;
     gl_Position = uMvp * vec4(rtc, 1.0);
     vColor = aColor;
     vNormal = aNormal;
     vViewDir = -rtc;
+    vUv = aUv;
 }
 )GLSL";
 
@@ -378,14 +381,26 @@ precision mediump float;
 varying vec4 vColor;
 varying vec3 vNormal;
 varying vec3 vViewDir;
+varying vec2 vUv;
 uniform vec3 uSunDir;
 uniform float uAmbient;
-void main() {
-    vec3 n = normalize(vNormal);
-    vec3 v = normalize(vViewDir);
-    float diff = max(dot(n, uSunDir), 0.0);
-    vec3 color = vColor.rgb * (uAmbient + (1.0 - uAmbient) * diff);
-    gl_FragColor = vec4(color, vColor.a);
+uniform sampler2D uTex;    // @Jin b3dm 内嵌纹理（NPOT，CLAMP+LINEAR）
+uniform float uUseTex;    // @Jin 1=有纹理采样，0=纯色 Lambert 回退
+uniform float uUnlit;     // @Jin KHR_materials_unlit：直接输出，不做光照
+void main() { // @Jin 修复：接入纹理/unlit 改造时误删 main 入口，缺失会导致整个片元着色器编译失败、3D Tiles 程序不可用
+    vec4 base = vColor;
+    if (uUseTex > 0.5) {
+        // @Jin 倾斜摄影纹理与 baseColorFactor 相乘（数据中因子通常为 1）。
+        base = base * texture2D(uTex, vUv);
+    }
+    if (uUnlit > 0.5) {
+        gl_FragColor = base;
+    } else {
+        vec3 n = normalize(vNormal);
+        float diff = max(dot(n, uSunDir), 0.0);
+        vec3 color = base.rgb * (uAmbient + (1.0 - uAmbient) * diff);
+        gl_FragColor = vec4(color, base.a);
+    }
 }
 )GLSL";
 
@@ -1278,11 +1293,15 @@ void Renderer::onSurfaceCreated() {
     } else {
         t3APos_ = tileset3DProgram_.attribLocation("aPos");
         t3ANormal_ = tileset3DProgram_.attribLocation("aNormal");
+        t3AUv_ = tileset3DProgram_.attribLocation("aUv"); // @Jin 纹理坐标属性
         t3AColor_ = tileset3DProgram_.attribLocation("aColor");
         t3UMvp_ = tileset3DProgram_.uniformLocation("uMvp");
         t3UOffset_ = tileset3DProgram_.uniformLocation("uOffset");
         t3USunDir_ = tileset3DProgram_.uniformLocation("uSunDir");
         t3UAmbient_ = tileset3DProgram_.uniformLocation("uAmbient");
+        t3UTex_ = tileset3DProgram_.uniformLocation("uTex");       // @Jin b3dm 纹理采样器
+        t3UUseTex_ = tileset3DProgram_.uniformLocation("uUseTex"); // @Jin 纹理开关
+        t3UUnlit_ = tileset3DProgram_.uniformLocation("uUnlit");   // @Jin unlit 材质开关
     }
     // P2.a 3D 矢量 fill/stroke 两程序（片元均复用 kColorFragmentSrc）
     if (!globeFillProgram_.init(kGlobeFillVertexSrc, kColorFragmentSrc)) {
@@ -1858,6 +1877,7 @@ void Renderer::releaseTileset3D() {
     for (auto &kv : tileset3DGpu_) {
         if (kv.second.vbo != 0) glDeleteBuffers(1, &kv.second.vbo);
         if (kv.second.ibo != 0) glDeleteBuffers(1, &kv.second.ibo);
+        kv.second.texture.release(); // @Jin 同步释放 b3dm 纹理 GL 句柄
     }
     tileset3DGpu_.clear();
 }
@@ -1877,7 +1897,7 @@ void Renderer::uploadTileset3DModels() {
             Tileset3DGpuModel gpu;
             gpu.layerId = layer.layerId();
             gpu.anchorEcef = model.anchorEcef;
-            gpu.vertexCount = static_cast<int>(model.vertices.size() / 10);
+            gpu.vertexCount = static_cast<int>(model.vertices.size() / 12); // @Jin 交错步长 12 float（含 UV）
 
             glGenBuffers(1, &gpu.vbo);
             glBindBuffer(GL_ARRAY_BUFFER, gpu.vbo);
@@ -1899,7 +1919,22 @@ void Renderer::uploadTileset3DModels() {
             }
             glBindBuffer(GL_ARRAY_BUFFER, 0);
             glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
-            tileset3DGpu_.emplace(model.id, gpu);
+
+            // @Jin b3dm 内嵌 JPEG/PNG：GL 线程用 stb 解码为 RGBA 再上传纹理；失败不阻断几何，回退纯色。
+            gpu.unlit = model.unlit;
+            if (!model.textureBytes.empty()) {
+                int texW = 0, texH = 0;
+                std::vector<uint8_t> rgba;
+                // @Jin 倾斜摄影缩小观察时存在明显缩小混叠，统一走带 mipmap 的上传路径（三线性过滤），远景不再出现椒盐噪点。
+                if (ImageDecoder::decodeRGBA(model.textureBytes.data(), model.textureBytes.size(),
+                                             texW, texH, rgba) &&
+                    !gpu.texture.uploadRGBAWithMipmap(rgba.data(), texW, texH)) {
+                    LOGW("Tileset3D texture decode failed, fallback to flat color: %s", model.id.c_str());
+                }
+            }
+
+            // @Jin Tileset3DGpuModel 内含 move-only 的 Texture，必须移动入表，不能拷贝。
+            tileset3DGpu_.emplace(model.id, std::move(gpu));
             LOGI("Tileset3D GPU model uploaded: layer=%d id=%s verts=%d indices=%d",
                  gpu.layerId, model.id.c_str(), gpu.vertexCount, gpu.indexCount);
         }
@@ -1931,23 +1966,45 @@ bool Renderer::drawTileset3D(const Navigator::Camera3D &cam, const Matrix4 &view
         if (!layerPtr || !layerPtr->visible) continue;
         if (layerPtr->loading.load()) needRedraw = true;
         const int layerId = layerPtr->layerId();
+        // @Jin REPLACE 语义：仅绘制 Provider 当前选择集内的模型。历史 LOD 的 GPU 资源继续缓存（快速回退视角时免重传），
+        // 但 URL 一旦掉出选择集即跳过绘制，避免父子层级同屏叠加产生重影/黑边。选择集尚未就绪（首帧）时不过滤。
+        const bool useActiveSet = layerPtr->hasActiveUrls();
         for (const auto &kv : tileset3DGpu_) {
             const Tileset3DGpuModel &gpu = kv.second;
             if (gpu.layerId != layerId) continue;
-
-            const Vec3 offset = gpu.anchorEcef - cam.eye;
+            if (useActiveSet && !layerPtr->isUrlActive(kv.first)) continue; // @Jin 跳过过期 LOD
+            // @Jin 实验性 heightOffset（米）：沿锚点 ECEF 天顶整体平移图层，校准模型与地形的垂直基准差；
+            // @Jin RTC 顶点保持不动，只改本 uniform，运行时可调且 offset=0 时与旧行为逐位一致。
+            const double layerHeightOffsetMeters = layerPtr->getHeightOffset();
+            const Vec3 offset = gpu.anchorEcef - cam.eye + gpu.anchorEcef.normalized() * layerHeightOffsetMeters;
             glUniform3f(t3UOffset_, static_cast<GLfloat>(offset.x),
                         static_cast<GLfloat>(offset.y), static_cast<GLfloat>(offset.z));
+
+            // @Jin 纹理：GLES2 采样器固定绑纹理单元 0；NPOT 图片用 CLAMP+LINEAR（Texture 类已设置）。
+            const bool hasTex = gpu.texture.isValid();
+            glActiveTexture(GL_TEXTURE0);
+            if (hasTex) gpu.texture.bind();
+            else glBindTexture(GL_TEXTURE_2D, 0);
+            glUniform1i(t3UTex_, 0);
+            glUniform1f(t3UUseTex_, hasTex ? 1.0f : 0.0f);
+            glUniform1f(t3UUnlit_, gpu.unlit ? 1.0f : 0.0f);
+
             glBindBuffer(GL_ARRAY_BUFFER, gpu.vbo);
-            const GLsizei stride = 10 * static_cast<GLsizei>(sizeof(float));
+            // @Jin 交错布局 12 float：position(3)+normal(3)+uv(2)+color(4)。
+            const GLsizei stride = 12 * static_cast<GLsizei>(sizeof(float));
             glEnableVertexAttribArray(t3APos_);
             glVertexAttribPointer(t3APos_, 3, GL_FLOAT, GL_FALSE, stride, reinterpret_cast<const void *>(0));
             glEnableVertexAttribArray(t3ANormal_);
             glVertexAttribPointer(t3ANormal_, 3, GL_FLOAT, GL_FALSE, stride,
                                   reinterpret_cast<const void *>(3 * sizeof(float)));
+            if (t3AUv_ >= 0) {
+                glEnableVertexAttribArray(t3AUv_);
+                glVertexAttribPointer(t3AUv_, 2, GL_FLOAT, GL_FALSE, stride,
+                                      reinterpret_cast<const void *>(6 * sizeof(float)));
+            }
             glEnableVertexAttribArray(t3AColor_);
             glVertexAttribPointer(t3AColor_, 4, GL_FLOAT, GL_FALSE, stride,
-                                  reinterpret_cast<const void *>(6 * sizeof(float)));
+                                  reinterpret_cast<const void *>(8 * sizeof(float)));
 
             if (gpu.indexCount > 0) {
                 glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, gpu.ibo);
@@ -1960,9 +2017,11 @@ bool Renderer::drawTileset3D(const Navigator::Camera3D &cam, const Matrix4 &view
 
     glDisableVertexAttribArray(t3APos_);
     glDisableVertexAttribArray(t3ANormal_);
+    if (t3AUv_ >= 0) glDisableVertexAttribArray(t3AUv_); // @Jin 释放纹理坐标属性槽
     glDisableVertexAttribArray(t3AColor_);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
     glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+    glBindTexture(GL_TEXTURE_2D, 0);
     return needRedraw;
 }
 

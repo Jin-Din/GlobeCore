@@ -521,6 +521,10 @@ private:
     GLint t3UOffset_ = -1;
     GLint t3USunDir_ = -1;
     GLint t3UAmbient_ = -1;
+    GLint t3AUv_ = -1;       // @Jin aUv 纹理坐标属性
+    GLint t3UTex_ = -1;      // @Jin uTex 采样器
+    GLint t3UUseTex_ = -1;   // @Jin uUseTex 纹理开关
+    GLint t3UUnlit_ = -1;    // @Jin uUnlit 无光照材质开关
     struct Tileset3DGpuModel {
         int layerId = -1;
         GLuint vbo = 0;
@@ -528,6 +532,8 @@ private:
         int vertexCount = 0;
         int indexCount = 0;
         Vec3 anchorEcef;
+        Texture texture;     // @Jin b3dm 内嵌纹理（无效=纯色回退）
+        bool unlit = false;  // @Jin KHR_materials_unlit
     };
     std::unordered_map<std::string, Tileset3DGpuModel> tileset3DGpu_;
     const std::vector<std::unique_ptr<Tileset3DLayer>> *tileset3DLayers_ = nullptr;

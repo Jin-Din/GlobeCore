@@ -90,3 +90,71 @@
 - @Jin 根因二（朝向，关键）：先怀疑 Z-up→Y-up 换轴矩阵的列主序符号，两次修改（`(x,y,z)→(x,-z,y)` 与 `→(x,z,-y)`）真机都表现为模型相对地表旋转 90°、垂直立起。最终用根 tileset.json 的真实 transform 做确定性 ENU 验证：该 tile 局部帧本身就是 **Z-up 的 ENU 帧**（localX→东、localY→北、localZ→天，三组点积均为 ±1.0000），而 b3dm 内容同样是 Z-up，内容 +z（建筑高度）经 identity 后恰好指向 ENU Up；两种换轴都把高度轴转到局部 ±Y=南北水平方向，故必错。
 - @Jin 修复二：mars3d osgb2tiles3 这类数据 `gltfUpAxis="Z"` 但局部帧已按 Z-up 烘焙，**换轴矩阵取 identity（不换轴）**，代码注释完整记录 ENU 推导。后续若接入局部帧为 Y-up 的标准 Cesium 数据，应先检测帧上轴（包围盒/帧基向量与 ENU 的点积）再决定是否换轴，不能无条件 identity，也不能无条件套 Cesium 换轴。
 - @Jin 真机复测（2026-11-10，设备 `5KLBB25911200313`）：identity + 自动法向后，低角度可见建筑、树木与塔状结构垂直立起、地面水平贴合影像，三角面片明暗层次正常；单次进入视角最多 37 个 b3dm 上 GPU，下载/解码/上传零失败。仍为无纹理纯色（glTF 纹理/PBR 属 P4）。
+### P4 待排查问题记录（2026-11-10 人工真机反馈）
+
+- @Jin 问题：3D Tiles 模型**未贴地**——无论是否开启三维地形，模型与地表之间都存在高度偏差（疑似整体悬空或高程基准不一致）。下一步纹理解码任务并行/之后排查。
+- @Jin 初步怀疑方向（待验证）：① b3dm 顶点高度基准与 tile transform 平移/锚点的关系，RTC_CENTER 与 ECEF anchor 组合是否引入垂直偏移；② 数据自身的高程基准（椭球高 vs 正高）或 osgb2tiles3 烘焙时的高度处理；③ 椭球定位经纬度与数据实际位置（根 transform 反算锚点 108.9594E/34.0409N，与文档预期 34.2196N 存在纬度差，需核对）；④ 地形开关均异常说明问题更可能在模型自身 ECEF 定位而非地形贴合环节。
+
+### P4 纹理解码真机验证通过（2026-11-11，设备 5KLBB25911200313）
+
+- @Jin 装机版本核对：启动 hilog 实测 `globecore build id = v0.1.3-20261110-t3tex-phase16-npot`，与当前 WIP 源码 Renderer.cpp 顶部 GLOBECORE_BUILD_ID 一致；HAP 内 stripped libglobecore.so（5,026,760 字节）同样检出该 ID，排除旧 HAR 缓存误判。
+- @Jin 全链路日志（两轮加载/隐藏/恢复）：b3dm 解码（`b3dm decoded`，含 ftJson/btJson 长度）→ `Tileset3D model built`（vertices/indices、zUp=1）→ `delivered` → `Tileset3D GPU model uploaded`，累计 49 次 GPU 上传、21 条 `Texture NPOT fallback to LINEAR`（实测尺寸 553x1000、532x1024、407x1024、347x421 等），零 globecore GL/纹理解码错误；日志中出现的 ERROR 均为华为 analyticsservice 系统服务，与本引擎无关。
+- @Jin 关键修复点验证：测试数据纹理为非 2 幂（NPOT）尺寸，GLES2 下 NPOT 纹理不允许 mipmap 与 repeat wrap；Texture.cpp 的 `isPowerOfTwo` 分流生效，NPOT 自动回退 GL_LINEAR（无 mipmap），模型不再全黑/全白；GltfDecoder 内嵌 JPEG/PNG 提取、TEXCOORD_0、KHR_materials_unlit 通路工作正常，V 不翻转后贴图方向正确。
+- @Jin 视觉 A/B 验证：同视角点击「隐藏倾斜摄影 3D Tiles」后只剩 ArcGIS 平面影像（无立体几何），恢复显示后近距离斜视可见带真实纹理的低多边形摄影测量建筑（深色瓦顶、院落、八角亭、树木），证明纹理确实附着在 b3dm 模型而非底图；朝向（identity 不换轴）保持正确，建筑垂直立起、地面水平。
+- @Jin 显隐切换：`setTileset3DVisible(false/true)` 生效，恢复显示后模型与纹理重新上传成功，图层复用不重复创建 Provider。
+- @Jin 结论：白模→纹理阶段目标达成，纹理解码修复真机验证通过。
+- @Jin 遗留与下一步：① 模型不贴地（见上节 P4 四个怀疑方向：RTC_CENTER/椭球高 vs 正高/锚点纬度 34.0409N vs 预期 34.2196N）仍未排查；② Demo 中 TILESET3D_FLY_ALT=700 与 flyTo tilt=30 带 `[diag-temp]` 标记，属近距离纹理核查临时值，定稿前恢复 2500m/默认倾角；③ NPOT 回退 LINEAR 后远距离无 mipmap 可能轻微闪烁/闪烁感，后续可评估纹理重采样到 POT 或运行时生成 mipmap 的扩展方案。
+
+### P4 不贴地排查：高程基准量化核实（2026-11-11，离线确定性计算）
+
+- @Jin 锚点纠偏（推翻旧怀疑）：对根 tileset.json 的 transform 平移 ECEF(-1715331.32, 4993175.00, 3566614.93) 做 WGS84 标准迭代反算，结果为 lon=108.959400°E、lat=34.219600°N、椭球高 h=0.00m（精确）。与 Demo flyTo 目标点完全一致，**旧记录中“锚点纬度 34.0409N 偏差”的怀疑不成立**，水平定位无问题，差异只在垂直方向。整棵树仅根节点一个 transform，中间 0/root.json 与全部叶子均无 transform，叶子 b3dm 顶点 local z 即沿根 ENU Up 轴的世界高度。
+- @Jin 模型侧高度（世界=局部，因锚点 h=0）：根包围盒 box 中心 z=445.02、半高 41.11，z 区间约 403.9~486.1m；6 个直连 b3dm 顶点实测 local zmin≈404.4~405.4m；0/root.json 深度 5 子块 box 底面（cz-hz）约 404~434m。模型底面整体在 **405m 量级**，且随地形起伏烘焙，属绝对高程而非建筑相对高度。
+- @Jin 地形服务寻址澄清（排查中纠正了三处离线解码错误）：210 服务即 Mars3D《中国地形12.5米》镜像，quantized-mesh-1.0、scheme=tms、EPSG:4326 地理网格；服务瓦片索引为 cols=2^(z+1)、rows=2^z、y 自南向北（与引擎 `CesiumTerrain.cpp::intersectingGeoTileRange/cesiumServiceTilesForEngineTile` 口径一致），并非墨卡托 XYZ。quantized-mesh 头部为 **88 字节**（60 基础头 + 24 字节 HorizonOcclusionPoint），u/v/h 为 zigzag 差分（引擎 `QuantizedMesh.cpp` 实现正确），u/v 按**瓦片边界**（非全球）映射经纬度。
+- @Jin 地形侧实测高程（Node 解码真实 .terrain，目标点 108.9594E/34.2196N）：z12≈403m（9 顶点，粗）；z13 IDW≈390.6m（46 顶点）；**z14 IDW≈395.8m、最近顶点 396.5m（相距约 30m），瓦片高度区间 385.0~405.8m（54 顶点）**；z15 服务无覆盖（HTTP 404），即该区域最细 DEM 网格间距约 150m，无法分辨 300m 厂区内部起伏。
+- @Jin 大地水准面佐证：GeographicLib GeoidEval 查得该点 EGM2008 大地水准面差 **N=-34.64m**（EGM96 -34.88m），即 h椭球 = H正高 - 34.64。
+- @Jin 结论：模型底面 ~405m 对锚点处 DEM 地表 ~396m，模型整体偏高约 **+9m（厂区各子块因 DEM 精度与真实坡度，离散到约 +10~+25m）**，方向为悬空，与人工真机观感一致。离线无法 100% 区分“椭球高/正高混用”与“DEM 综合误差”各占多少：若两侧同为正高口径，残差主要来自 12.5m DEM 栅格综合与测绘控制差；若模型为 GNSS 椭球高而 DEM 未做 geoid 改正（mars3d 转换链常见做法），则属垂直基准混用。EGM2008 的 -34.6m 是本区域基准差异的理论上限参考。
+- @Jin 修复方案（实验性、可回退）：给 3D Tiles 图层增加用户可配的 `heightOffset`（米，沿 ENU Up 平移，默认 0 不改旧行为），链路 C++ `addTileset3D` 选项 → Harmony NAPI → ArkTS → Demo 调试步进控件；先在真机以 -10m 为起点目视 dial-in，记录该数据集的经验偏移。不把 geoid 常数硬编码进引擎，保持数据集无关的通用性。回退方式：heightOffset 恒传 0 即恢复当前行为，删除参数接线即完全回退。
+- @Jin 高斯泼溅结论（2026-11-11）：大古柏/保生柏/黄帝陵/老君柏四个地址 HTTP 200，但 tileset.json 声明 `asset.extensions.DPToolKits.type=gaussianSplat`、`extensionsRequired` 含 `KHR_gaussian_splatting` 与 `KHR_gaussian_splatting_compression_spz_2`，叶子为 `merge/merge_0_gs.glb` 点云原语；与 qx-dyt 的 b3dm 三角网（mars3d osgb2tiles3）是不同渲染原语，当前 GLES2 三角网管线不支持。已列入未解决待办（需新增高斯泼溅解码 + 点云/泼溅渲染管线），Demo「模型」面板仅挂待办说明，不提供可点击入口。
+- @Jin Demo UI 改造（2026-11-11 真机验证通过，设备 5KLBB25911200313）：左侧功能坞新增「模型」入口（图层/数据/模型/地形/绘制/调试/更多 共 7 项），倾斜摄影按钮迁入「三维模型」面板，「数据与样例」面板移除 3D Tiles 入口并留引导文案；高斯泼溅四数据集在面板内标注待支持原因。
+
+### P4 配套修复：地形 z15 全 404 父级回退 + 3D Tiles heightOffset 实验参数（2026-11-11，构建核对 `v0.1.3-20261111-terrain-fallback-heightoffset2`）
+
+#### A. 地形服务 z15 缺失 → 父级瓦片回退（实验性，可回退）
+
+- @Jin 现象：真机近距离（displayZoom 被钳到 maxZoom=15）加载 210 地形时整轮失败，日志 `refresh complete z=15 tasks=182 delivered=0 failures=182`，182 块 z15 瓦片全部 HTTP 404。
+- @Jin 根因：210 服务 layer.json 的 available 声明 z15 覆盖目标区域（范围 52534-52689 / 22486-22725 含目标瓦片 52603/22613），但服务器上 z15 数据整体缺失（声明范围角点同样 404），z14 及以下正常；属“元数据夸大覆盖”。旧引擎无父级回退，404 即计失败，导致地形完全不显示。
+- @Jin 修复（`CesiumTerrainProvider.h/.cpp`，全部 @Jin 注释）：
+  - 新增 `fetchTileWithFallback()`：请求瓦片失败后按 EPSG:4326 地理网格逐级回退祖先（父索引 = 子 x/y 整除 2），首个成功的祖先瓦片按其**真实地理 bounds** 经 tileSink 注入 Renderer；仅当祖先成功、子级失败时才把子级写入缺失负缓存（网络整体故障不污染缓存）。
+  - 新增缺失负缓存 `missingServiceTiles_`（上限 4096，满则清空重探）：`buildTasks()` 对已知缺失瓦片直接换祖先，后续刷新不再重复打 404；`resetDeliveredTiles()`（手动刷新/切换图源/关地形）同步清空，保留重新探测机会。
+  - stats 新增 `parentFallbacks` 计数并经 statsJson 透出。
+- @Jin 真机证据（设备 5KLBB25911200313）：日志连续 `parent fallback 15/52609/22614 -> 14/26304/11307` 等，`refresh complete z=15 tasks=182 delivered=182 failures=0`，UI 状态条“地形加载完成 182/182 失败 0”；第二轮刷新父级全部磁盘缓存命中。
+- @Jin 回退方式：删除 `fetchTileWithFallback`/`nearestAvailableAncestor`/负缓存相关代码块，worker 改回直接调 `fetchTile` 即恢复旧行为；成功路径零开销（仅失败后才进入回退分支）。
+
+#### B. 3D Tiles heightOffset 垂直校准参数（实验性，可回退）
+
+- @Jin 目的：针对离线量化结论（模型底面 ~405m vs 锚点 DEM ~396m，模型整体悬空约 +9m，子块离散 +10~25m；EGM2008 大地水准面差 N=-34.64m 为理论上限参考），提供数据集无关的运行时垂直校准手段，不把 geoid 常数硬编码进引擎。
+- @Jin 数学：RTC 顶点存储为 `world - anchorEcef`，着色器 `rtc = aPos + uOffset`、`uOffset = anchorEcef - eye`。沿锚点 ECEF 天顶 `normalize(anchorEcef)` 平移 Δ 米只需改 uniform：`uOffset = anchorEcef - eye + up * heightOffset`，RTC 顶点与法线均不动，纯平移不影响光照，运行时连续可调、零模型重建。
+- @Jin 全链路：C++ `Tileset3DLayer.heightOffset`（atomic double，默认 0）→ `Renderer::drawTileset3D` uniform 注入 → `GlobeEngine::setTileset3DHeightOffset(layerId, meters)` → Harmony NAPI `nativeSetTileset3DHeightOffset`（含 index.d.ts 声明）→ ArkTS `NativeLib`/`NativeMapView.setTileset3DHeightOffset` → Demo「三维模型」面板步进控件（步长 5m、范围 ±100m、一键复位 0，仅模型显示时出现）。
+- @Jin 回退方式：Demo 控件恒显示 0、setter 恒传 0 即与旧行为逐位一致；彻底回退删除上述链路即可。当前仅 Harmony 链路导出，Android JNI 暂无 3D Tiles 能力，API 指南待能力定稿后同步。
+- @Jin 真机校准方法：加载 210 地形 + qx-dyt，在模型面板从 0 起以 -5m 步进下调，目视模型底面与地形贴合最佳后记录该数据集经验偏移量（离线预判起点约 -10m，最终以真机目视为准）。
+
+#### C. 真机功能验证（2026-11-11，设备 5KLBB25911200313，BUILD_ID `v0.1.3-20261111-terrain-fallback-heightoffset2`）
+
+- @Jin 地形父级回退真机确认：两轮加载均 `delivered=182 failures=0`，日志连续 `parent fallback 15/... -> 14/...`，第二轮父级 182 块全部磁盘缓存命中；修复前为 `delivered=0 failures=182`。
+- @Jin heightOffset 控制闭环真机确认：「三维模型」面板在模型显示后出现 -5 / 偏移量 / +5 / 复位 四控件；连续点 -5 到 -20m 状态条显示 `3D Tiles -20m（高度偏移）`、点复位回 `0m`、再点两次到 `-10m`，全程无崩溃、渲染连续、RTC 模型不重建。
+- @Jin 方向数学复核：绘制期 `uOffset = anchorEcef - eye + normalize(anchorEcef) * heightOffset`，顶点世界位置 = 原始 world + up * heightOffset；负值沿天顶反方向（地心方向）整体下移模型，符合“模型悬空需下调”的预期。
+- @Jin 待人工最终校准：离线量化预判起点 -10m（模型底面 ~405m vs DEM ~396m），最佳偏移量以真机目视模型底面与 210 地形贴合为准，确定后作为 qx-dyt 数据集经验值记录。
+- @Jin 定稿前收尾：恢复 Index.ets 两处 [diag-temp]（TILESET3D_FLY_ALT 700→2500、flyTo tilt 65°→默认倾角）；若高度偏移能力定稿，再补 Harmony API 帮助文档（docs/api/ 目前仅有 android 指南，3D Tiles 暂只在 Harmony 导出）。
+
+#### D. 真机校准结论（2026-11-11，人工目视确认）
+
+- @Jin qx-dyt 数据集经验高度偏移：**heightOffset = -20m**（在 210/Mars3D 12.5m 地形、65° 斜视下人工确认为当前最佳贴合值）。
+- @Jin 与离线分析的对照：离线量化差值约 -9m（模型底面 405m vs 锚点 DEM 396m），真机最佳值 -20m 明显更大，说明残差不只是 DEM 栅格综合，模型烘焙高程与 quantized-mesh 椭球高之间还存在约 10m 级的垂直基准/控制差；EGM2008 理论上限 -34.6m 未被吃满，两侧更可能是混合口径而非纯 geoid 差。
+- @Jin 通用性原则：引擎默认 heightOffset=0，不内置任何数据集常数；-20m 仅作为 qx-dyt 的宿主侧经验参数，由 Demo/集成方按数据集传入，换数据集需重新目视校准。
+- @Jin 操作备注：步进控件为按钮点击式（步长 5m），快速连点存在一次多点的可能（实测出现过 -10 连点两跳变到 -30 的情况），用“复位”回 0 后重新单步设置即可；后续可加节流防抖。
+
+#### E. Demo 写死经验偏移（2026-11-11，BUILD_ID heightoffset3 验证）
+
+- @Jin 按使用方要求，Demo 对 qx-dyt 加载即应用 heightOffset=-20m：Index.ets 新增常量 `TILESET3D_HEIGHT_OFFSET = -20.0`，`toggleTileset3D()` 在图层创建/恢复显示后幂等调用 `view.setTileset3DHeightOffset(layerId, -20)`，`@State tileset3dHeightOffset` 初值同步为该常量，面板上电即显示“偏移 -20m”，无需手动步进。
+- @Jin 边界：写死只发生在演示工程 Index.ets，SDK（C++/NAPI/ArkTS 门面）默认值仍为 0、不内置任何数据集常数；步进控件保留，人工仍可临时覆盖，点“复位”回 0，重新加载模型恢复 -20m。
+- @Jin 全新卸载重装后首载实测：面板直接显示“偏移 -20m”，状态与图层一致，写死链路生效。

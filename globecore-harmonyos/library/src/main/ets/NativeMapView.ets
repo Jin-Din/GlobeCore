@@ -327,6 +327,12 @@ export struct NativeMapView {
   }
 
   /** @Jin 切换 3D Tiles 图层显隐；layerId 为 addTileset3D 的返回值。 */
+  /** @Jin 实验性：设置 3D Tiles 图层垂直高度偏移（米，正上负下，默认 0）；只改绘制 uniform 不重建模型，可运行时连续调节。 */
+  setTileset3DHeightOffset(layerId: number, meters: number): void {
+    NativeLib.nativeSetTileset3DHeightOffset(this.nativeHandle, layerId, meters);
+    this.requestRender();
+  }
+
   setTileset3DVisible(layerId: number, visible: boolean): void {
     NativeLib.nativeSetTileset3DVisible(this.nativeHandle, layerId, visible);
     this.requestRender();

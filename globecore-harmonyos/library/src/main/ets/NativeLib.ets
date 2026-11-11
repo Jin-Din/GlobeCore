@@ -668,6 +668,13 @@ export class NativeLib {
     }
   }
 
+  // @Jin 实验性：3D Tiles 图层垂直高度偏移（米，正上负下，0 为基准），用于倾斜模型与地形高程基准校准。
+  static nativeSetTileset3DHeightOffset(handle: number, layerId: number, meters: number): void {
+    if (handle !== 0) {
+      gc.nativeSetTileset3DHeightOffset(handle, layerId, meters);
+    }
+  }
+
   // ── PROJ / GDAL 桥（bridge 导出的直通包装，门面见 NativeSrs/NativeLayerInfo/NativeVector）──
 
   static nativeGetProjVersion(): number {

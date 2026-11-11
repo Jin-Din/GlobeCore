@@ -41,10 +41,13 @@ public:
     using ViewportProvider = std::function<Tileset3DViewport()>;
     using ModelSink = std::function<void(Tileset3DModelCpu &&)>;
     using RenderRequest = std::function<void()>;
+    // @Jin REPLACE 选择集回传：每轮 refresh 把应显示的 b3dm URL 集合交给图层，供 Renderer 跳过过期 LOD。
+    using ActiveUrlSink = std::function<void(std::unordered_set<std::string>)>;
 
     Tileset3DProvider(int layerId, std::string rootUrl,
                       ViewportProvider viewportProvider, ModelSink sink,
-                      RenderRequest renderRequest);
+                      RenderRequest renderRequest,
+                      ActiveUrlSink activeUrlSink = nullptr); // @Jin 末参默认空，兼容旧调用
     ~Tileset3DProvider();
 
     Tileset3DProvider(const Tileset3DProvider &) = delete;
@@ -74,6 +77,7 @@ private:
     ViewportProvider viewportProvider_;
     ModelSink sink_;
     RenderRequest renderRequest_;
+    ActiveUrlSink activeUrlSink_; // @Jin REPLACE 选择集回传通道
 
     std::atomic<bool> stopping_{false};
     std::atomic<bool> refreshPending_{true};

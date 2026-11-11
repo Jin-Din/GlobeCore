@@ -162,6 +162,8 @@ interface GlobeCore {
   // @Jin 3D Tiles/b3dm 实验入口（feature/3dtiles-b3dm）：返回图层 id，失败 -1
   nativeAddTileset3D(handle: number, url: string): number;
   nativeSetTileset3DVisible(handle: number, layerId: number, visible: boolean): void;
+  // @Jin 实验性：3D Tiles 图层垂直高度偏移（米，正上负下，0 为基准），用于倾斜模型与地形高程基准校准。
+  nativeSetTileset3DHeightOffset(handle: number, layerId: number, meters: number): void;
 
   // ── GDAL / 图层元信息（bridge/gdal_info、layer_info）──
   nativeGetGdalVersion(): string;

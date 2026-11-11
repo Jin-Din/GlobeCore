@@ -167,6 +167,29 @@ GltfModel decodeGlb(const std::vector<uint8_t> &bytes) {
     const JsonValue &meshes = gltf.at("meshes");
     const JsonValue &materials = gltf.at("materials");
 
+    // @Jin 提取 GLB 内嵌图片（3D Tiles b3dm 纹理）：images[].bufferView 指向 BIN chunk 中的 JPEG/PNG 字节，
+    // 仅搬运原始编码字节，真正的 RGBA 解码留在 GL 线程的 ImageDecoder，避免后台线程碰 GL 资源。
+    const JsonValue &imagesJson = gltf.at("images");
+    if (imagesJson.isArray()) {
+        model.images.reserve(imagesJson.arr.size());
+        for (const JsonValue &im : imagesJson.arr) {
+            GltfEmbeddedImage embedded;
+            const JsonValue &mime = im.at("mimeType");
+            if (mime.isString()) embedded.mimeType = mime.strVal;
+            const JsonValue &imgBvIdx = im.at("bufferView");
+            if (imgBvIdx.isNumber() && bufferViews.isArray() &&
+                static_cast<size_t>(imgBvIdx.numVal) < bufferViews.arr.size()) {
+                const JsonValue &imgBv = bufferViews.arr[static_cast<size_t>(imgBvIdx.numVal)];
+                size_t imgOff = imgBv.at("byteOffset").isNumber() ? static_cast<size_t>(imgBv.at("byteOffset").numVal) : 0;
+                size_t imgLen = imgBv.at("byteLength").isNumber() ? static_cast<size_t>(imgBv.at("byteLength").numVal) : 0;
+                if (imgLen > 0 && imgOff + imgLen <= binSize) {
+                    embedded.bytes.assign(binData + imgOff, binData + imgOff + imgLen);
+                }
+            }
+            model.images.push_back(std::move(embedded));
+        }
+    }
+
     // helper: 从 accessor 索引提取 float 数组
     auto extractFloatArray = [&](int accessorIdx, std::vector<float> &out) -> bool {
         AccessorInfo ai = getAccessorInfo(accessors, accessorIdx);
@@ -257,6 +280,12 @@ GltfModel decodeGlb(const std::vector<uint8_t> &bytes) {
             if (nrmIdx.isNumber()) {
                 extractFloatArray(static_cast<int>(nrmIdx.numVal), prim.normals);
             }
+            // @Jin TEXCOORD_0 (optional)：3D Tiles 纹理坐标，FLOAT VEC2，复用通用 float 提取。
+            auto &uvIdx = attrs.at("TEXCOORD_0");
+            if (uvIdx.isNumber()) {
+                extractFloatArray(static_cast<int>(uvIdx.numVal), prim.texCoords);
+            }
+
 
             // indices (optional)
             auto &idxIdx = primVal.at("indices");
@@ -278,7 +307,24 @@ GltfModel decodeGlb(const std::vector<uint8_t> &bytes) {
                                 prim.baseColor[c] = static_cast<float>(bcf.arr[c].numVal);
                         }
                     }
+                    // @Jin baseColorTexture：textures[texIdx].source 给出 images 索引，记录到 primitive 供渲染上传。
+                    const JsonValue &bct = pbr.at("baseColorTexture");
+                    if (bct.isObject()) {
+                        const JsonValue &texIdxVal = bct.at("index");
+                        const JsonValue &texturesJson = gltf.at("textures");
+                        if (texIdxVal.isNumber() && texturesJson.isArray() &&
+                            static_cast<size_t>(texIdxVal.numVal) < texturesJson.arr.size()) {
+                            const JsonValue &tex = texturesJson.arr[static_cast<size_t>(texIdxVal.numVal)];
+                            const JsonValue &srcVal = tex.at("source");
+                            if (srcVal.isNumber()) prim.imageIndex = static_cast<int>(srcVal.numVal);
+                        }
+                    }
                 }
+            // @Jin KHR_materials_unlit：倾斜摄影常用无光照材质，渲染端据此跳过 Lambert。
+            const JsonValue &matExt = mat.at("extensions");
+            if (matExt.isObject() && matExt.at("KHR_materials_unlit").isObject()) {
+                prim.unlit = true;
+            }
             }
 
             // 若无 indices，生成默认 strip indices

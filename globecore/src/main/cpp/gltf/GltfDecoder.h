@@ -16,26 +16,36 @@ namespace globecore {
  *
  * 简化范围：
  *   - 只处理 .glb（binary glTF v2），不支持 .gltf（JSON+外部资源）
- *   - 只提取 POSITION/NORMAL/indices + baseColorFactor（PBR 材质简化为纯色）
+ *   - 提取 POSITION/NORMAL/TEXCOORD_0/indices + baseColorFactor/baseColorTexture（内嵌 JPEG/PNG 搬运，GL 线程解码）
  *   - 不处理动画、骨骼、纹理、Morph target
  *   - 坐标系：glTF 右手 Y-up，引擎 3D ECEF 左手 — 调用方负责变换
  *
  * 纯 CPU、无 GL 依赖，可在后台线程解码。
  */
 
+// @Jin GLB BIN chunk 中内嵌的图片（3D Tiles b3dm 纹理通常为 JPEG/PNG 内嵌，无外部 uri）。
+struct GltfEmbeddedImage {
+    std::string mimeType;        // image/jpeg | image/png
+    std::vector<uint8_t> bytes;  // 编码原始字节，GL 线程再用 ImageDecoder 解码
+};
+
 struct GltfPrimitive {
     std::vector<float> positions;  // [x,y,z, x,y,z, ...]
     std::vector<float> normals;    // [x,y,z, ...]（可为空 = 无法线）
+    std::vector<float> texCoords;  // @Jin TEXCOORD_0 [u,v,...]，可为空=无纹理坐标
     std::vector<uint16_t> indices16; // uint16 索引（vertexCount<=65536 时）
     std::vector<uint32_t> indices32; // uint32 索引（vertexCount>65536 时）
     bool use32 = false;             // true=用 indices32，false=用 indices16
     float baseColor[4] = {0.8f, 0.8f, 0.8f, 1.0f}; // RGBA [0,1]
+    int imageIndex = -1;              // @Jin baseColorTexture 解析出的图片索引（指向 GltfModel::images），-1=纯色
+    bool unlit = false;              // @Jin KHR_materials_unlit：片元直接输出纹理色，不做 Lambert
 };
 
 struct GltfModel {
     bool ok = false;
     std::string error;
     std::vector<GltfPrimitive> primitives;
+    std::vector<GltfEmbeddedImage> images; // @Jin GLB 内嵌图片，多个 primitive 可共享
 };
 
 /**

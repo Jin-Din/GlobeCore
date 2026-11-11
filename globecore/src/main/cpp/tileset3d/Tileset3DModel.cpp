@@ -30,6 +30,22 @@ void Tileset3DLayer::setError(const std::string &error) {
     error_ = error;
 }
 
+// @Jin REPLACE 选择集：worker 线程每轮选择后整体替换，GL 线程按 URL 查表，短临界区不涉及网络/GL 调用。
+void Tileset3DLayer::setActiveUrls(std::unordered_set<std::string> urls) {
+    std::lock_guard<std::mutex> lock(activeMtx_);
+    activeUrls_ = std::move(urls);
+}
+
+bool Tileset3DLayer::isUrlActive(const std::string &url) const {
+    std::lock_guard<std::mutex> lock(activeMtx_);
+    return activeUrls_.find(url) != activeUrls_.end();
+}
+
+bool Tileset3DLayer::hasActiveUrls() const {
+    std::lock_guard<std::mutex> lock(activeMtx_);
+    return !activeUrls_.empty();
+}
+
 Tileset3DModelCpu Tileset3DModelBuilder::build(
         const std::string &id, const std::string &sourceUrl,
         const B3dmContent &b3dm, const GltfModel &gltf,
@@ -117,8 +133,9 @@ Tileset3DModelCpu Tileset3DModelBuilder::build(
             normalSource = &generatedNormals;
         }
 
-        const size_t baseIndex = out.vertices.size() / 10;
-        out.vertices.reserve(out.vertices.size() + vertexCount * 10);
+        // @Jin 交错步长 12 float：position(3)+normal(3)+uv(2)+color(4)。
+        const size_t baseIndex = out.vertices.size() / 12;
+        out.vertices.reserve(out.vertices.size() + vertexCount * 12);
         for (size_t i = 0; i < vertexCount; ++i) {
             const Vec3 local(prim.positions[i * 3],
                              prim.positions[i * 3 + 1],
@@ -138,11 +155,24 @@ Tileset3DModelCpu Tileset3DModelBuilder::build(
             const Vec3 worldNormal =
                     Tileset3DTransform::transformDirection(localToWorld, normal).normalized();
 
+            // @Jin TEXCOORD_0：缺纹理坐标时给 (0,0)；glTF 的 V 原点在左上，stb 解码行序也是从上到下，
+            // 而 GL 纹理采样原点在左下，这里做 V=1-v 翻转，避免贴图上下颠倒。
+            float u = 0.0f;
+            float v = 0.0f;
+            if (prim.texCoords.size() >= (i + 1) * 2) {
+                u = prim.texCoords[i * 2];
+                // @Jin 直接使用 glTF 原始 V，不做 1-v 翻转：stb 解码出的像素首行即图像顶部，glTexImage2D 按原行序上传后
+                // GL 纹理坐标 t=0 采样的正是首行；而 glTF 规范 UV(0,0) 同样对应图像左上角，两者天然一致，再翻转反而会把三角形
+                // 镜像采样到纹理图集的黑色填充区（osgb2tiles 纹理常见留白），真机表现为黑灰碎片/椒盐噪点。
+                v = prim.texCoords[i * 2 + 1];
+            }
+
             out.vertices.insert(out.vertices.end(), {
                 static_cast<float>(rtcModel.x), static_cast<float>(rtcModel.y),
                 static_cast<float>(rtcModel.z),
                 static_cast<float>(worldNormal.x), static_cast<float>(worldNormal.y),
                 static_cast<float>(worldNormal.z),
+                u, v,
                 prim.baseColor[0], prim.baseColor[1], prim.baseColor[2], prim.baseColor[3]
             });
         }
@@ -158,18 +188,34 @@ Tileset3DModelCpu Tileset3DModelBuilder::build(
         vertexOffset += static_cast<uint32_t>(vertexCount);
     }
 
+    // @Jin 纹理搬运：当前模型合并为单 VBO 单 draw，取第一个有效 baseColorTexture；
+    // 多 primitive 多纹理的数据暂不支持（实际 qx-dyt 每个 b3dm 均为 1 primitive 1 纹理），遇到时记录警告。
+    for (const GltfPrimitive &prim : gltf.primitives) {
+        if (prim.unlit) out.unlit = true;
+        if (out.textureBytes.empty() && prim.imageIndex >= 0 &&
+            static_cast<size_t>(prim.imageIndex) < gltf.images.size()) {
+            const GltfEmbeddedImage &image = gltf.images[static_cast<size_t>(prim.imageIndex)];
+            if (!image.bytes.empty()) {
+                out.textureBytes = image.bytes;
+                out.textureMime = image.mimeType;
+            }
+        }
+    }
+    if (gltf.images.size() > 1) {
+        LOGW("Tileset3D multi-image glb not fully supported: images=%zu url=%s", gltf.images.size(), sourceUrl.c_str());
+    }
     if (!out.indices.empty()) {
         uint32_t maxIndex = 0;
         for (uint32_t index : out.indices) maxIndex = std::max(maxIndex, index);
         if (maxIndex >= 65535u) {
             // @Jin GLES2 核心不保证 UNSIGNED_INT 索引；超限时展开为非索引三角形，兼容老设备并保持 P2 渲染闭环。
             std::vector<float> expanded;
-            expanded.reserve(out.indices.size() * 10);
+            expanded.reserve(out.indices.size() * 12); // @Jin 交错步长随 UV 扩展为 12 float
             for (uint32_t index : out.indices) {
-                const size_t src = static_cast<size_t>(index) * 10;
-                if (src + 10 > out.vertices.size()) continue;
+                const size_t src = static_cast<size_t>(index) * 12;
+                if (src + 12 > out.vertices.size()) continue;
                 expanded.insert(expanded.end(), out.vertices.begin() + static_cast<std::ptrdiff_t>(src),
-                                out.vertices.begin() + static_cast<std::ptrdiff_t>(src + 10));
+                                out.vertices.begin() + static_cast<std::ptrdiff_t>(src + 12));
             }
             out.vertices.swap(expanded);
             out.indices.clear();
@@ -179,9 +225,10 @@ Tileset3DModelCpu Tileset3DModelBuilder::build(
     // @Jin 追加 genNormal 标识：1 表示源 glTF 无法线、由叉积自动生成，便于真机排查明暗问题。
     const bool generatedNormal = std::any_of(gltf.primitives.begin(), gltf.primitives.end(),
                                               [](const GltfPrimitive &p) { return p.normals.empty(); });
-    LOGI("Tileset3D model built: id=%s vertices=%zu indices=%zu zUp=%d rtc=%d genNormal=%d",
-         id.c_str(), out.vertices.size() / 10, out.indices.size(), zUp ? 1 : 0,
-         b3dm.hasRtcCenter ? 1 : 0, generatedNormal ? 1 : 0);
+    LOGI("Tileset3D model built: id=%s vertices=%zu indices=%zu zUp=%d rtc=%d genNormal=%d tex=%d unlit=%d",
+         id.c_str(), out.vertices.size() / 12, out.indices.size(), zUp ? 1 : 0,
+         b3dm.hasRtcCenter ? 1 : 0, generatedNormal ? 1 : 0,
+         out.textureBytes.empty() ? 0 : 1, out.unlit ? 1 : 0);
     return out;
 }
 

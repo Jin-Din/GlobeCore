@@ -32,10 +32,10 @@ uint64_t quantizedEyeSignature(const Tileset3DViewport &vp) {
 
 Tileset3DProvider::Tileset3DProvider(int layerId, std::string rootUrl,
                                      ViewportProvider viewportProvider, ModelSink sink,
-                                     RenderRequest renderRequest)
+                                     RenderRequest renderRequest, ActiveUrlSink activeUrlSink)
     : layerId_(layerId), rootUrl_(std::move(rootUrl)),
       viewportProvider_(std::move(viewportProvider)), sink_(std::move(sink)),
-      renderRequest_(std::move(renderRequest)) {}
+      renderRequest_(std::move(renderRequest)), activeUrlSink_(std::move(activeUrlSink)) {}
 
 Tileset3DProvider::~Tileset3DProvider() {
     stop();
@@ -187,6 +187,14 @@ void Tileset3DProvider::refresh(const Tileset3DViewport &viewport) {
     if (externalLoaded) {
         // @Jin 新子图就绪后立刻请求下一轮，递归选择直到叶子 b3dm；静态画面由量化签名去重兜底。
         requestRefresh();
+    }
+
+    // @Jin REPLACE 语义：把本轮所有图递归选择出的 b3dm URL 整体发布给图层，Renderer 据此跳过已不在选择集内的历史 LOD。
+    if (activeUrlSink_) {
+        std::unordered_set<std::string> activeUrls;
+        activeUrls.reserve(b3dmTasks.size());
+        for (const B3dmTask &task : b3dmTasks) activeUrls.insert(task.selection.contentUrl);
+        activeUrlSink_(std::move(activeUrls));
     }
 
     // @Jin 第三阶段（锁外）：单帧最多处理 8 个 b3dm，避免首次进入视角时网络/解码冲击过大。

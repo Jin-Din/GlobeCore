@@ -1181,7 +1181,11 @@ int GlobeEngine::addTileset3D(const std::string &url) {
                 layerRaw->enqueueModel(std::move(model));
                 layerRaw->loading = false; // @Jin 首个模型到达后退出加载态，后续 LRU/加载状态再精细化。
             },
-            [this] { if (renderCallback_) renderCallback_(); }
+            [this] { if (renderCallback_) renderCallback_(); },
+            // @Jin REPLACE 选择集回传：Provider 每轮把应显示的 b3dm URL 集合发布给图层，Renderer 据此跳过过期 LOD。
+            [layerRaw](std::unordered_set<std::string> urls) {
+                layerRaw->setActiveUrls(std::move(urls));
+            }
         );
         provider->start();
         tileset3dProviders_.push_back(std::move(provider));
@@ -1198,6 +1202,16 @@ void GlobeEngine::setTileset3DVisible(int layerId, bool visible) {
         tileset3dLayers_[static_cast<size_t>(layerId)]->visible = visible;
     }
     if (renderCallback_) renderCallback_();
+}
+
+void GlobeEngine::setTileset3DHeightOffset(int layerId, double meters) {
+    // @Jin 实验性高度偏移：只写图层原子量，Renderer 下一帧绘制时生效；不触发模型重建，可运行时连续调节。
+    std::lock_guard<std::mutex> lock(layersMtx_);
+    if (layerId < 0 || layerId >= static_cast<int>(tileset3dLayers_.size())) return; // @Jin 越界忽略
+    if (tileset3dLayers_[static_cast<size_t>(layerId)]) {
+        tileset3dLayers_[static_cast<size_t>(layerId)]->setHeightOffset(meters);
+    }
+    if (renderCallback_) renderCallback_(); // @Jin 请求重绘让偏移即时上屏
 }
 
 void GlobeEngine::setRenderCallback(std::function<void()> cb) {

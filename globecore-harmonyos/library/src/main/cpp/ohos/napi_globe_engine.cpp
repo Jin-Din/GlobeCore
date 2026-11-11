@@ -1349,6 +1349,20 @@ napi_value NativeSetTileset3DVisible(napi_env env, napi_callback_info info) {
     return nullptr;
 }
 
+// @Jin 实验性：3D Tiles 图层垂直高度偏移（米）；layerId 来自 nativeAddTileset3D，正上负下，0 恢复基准位置。
+napi_value NativeSetTileset3DHeightOffset(napi_env env, napi_callback_info info) {
+    napi_value args[3];
+    gcohos::NapiGetArgs(env, info, 3, args);
+    int64_t handle = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return nullptr;
+    int32_t layerId = -1;
+    double meters = 0.0;
+    gcohos::NapiGetInt32(env, args[1], layerId);
+    gcohos::NapiGetDouble(env, args[2], meters);
+    toGlobeEngine(handle)->setTileset3DHeightOffset(layerId, meters);
+    return nullptr;
+}
+
 } // namespace
 
 namespace gcohos {
@@ -1422,6 +1436,8 @@ napi_value RegisterGlobeEngine(napi_env env, napi_value exports) {
         // @Jin 3D Tiles/b3dm 实验性入口（feature/3dtiles-b3dm）：加载倾斜摄影 tileset 与图层显隐。
         {"nativeAddTileset3D", nullptr, NativeAddTileset3D, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeSetTileset3DVisible", nullptr, NativeSetTileset3DVisible, nullptr, nullptr, nullptr, napi_default, nullptr},
+        // @Jin 实验性 3D Tiles 高度偏移 NAPI 注册（可回退：删除本行即取消导出）。
+        {"nativeSetTileset3DHeightOffset", nullptr, NativeSetTileset3DHeightOffset, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;

@@ -346,6 +346,8 @@ public:
     int addTileset3D(const std::string &url);
     /// @Jin 控制 3D Tiles 图层显隐；索引越界忽略，隐藏后 Renderer 跳过该层全部模型。
     void setTileset3DVisible(int layerId, bool visible);
+    /// @Jin 实验性：设置 3D Tiles 图层垂直高度偏移（米，正上负下），沿锚点 ECEF 天顶平移，默认 0；用于校准倾斜模型与地形的高程基准差。
+    void setTileset3DHeightOffset(int layerId, double meters);
 
 private:
     Navigator navigator_;
