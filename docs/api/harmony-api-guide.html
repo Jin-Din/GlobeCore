@@ -345,26 +345,30 @@ map.addTileLayerWithOptions(this.baseDir + '/tdt4490-img',
 map.addTileLayerWithOptions(this.baseDir + '/tdt4490-cia',
   'https://t{s}.tianditu.gov.cn/DataServer?T=cia_c&x={x}&y={y}&l={z}&tk=TOKEN',
   18, true, 'EPSG:4490', false, 1);</code></pre>
-<div class="warn">已知边界（见主仓 docs/design/epsg-4490-*）：4490 注记存在轻微纵向拉伸与字号偏小，
-后续计划以单图层 <code>serviceZoomOffset</code> 参数交由使用方调节，当前未开放。</div></div>
+<div class="warn">已知边界（见主仓 docs/design/epsg-4490-* 与 jin-modification-records 第十一节）：4490 注记字号偏小已由 <code>geoSourceLevelBias=-1</code> 解决（清晰）；
+残余的高纬轻微纵向拉高为 c 切片像元扁率的服务固有特性，<code>geoVerticalCompensation</code> 补偿能力已实现但实验封存（默认 1.0 不生效），专项讨论后再启用。</div></div>
 
 <div class="api"><h4>addTileLayerWithLayerOptions <span class="badge b-jin">@Jin 新增</span> <span class="badge b-exp">实验</span></h4>
 <div class="sig">addTileLayerWithLayerOptions(cacheDir: string, urlTemplate: string, maxLevel: number, overlay: boolean,<br>&nbsp;&nbsp;options: TileLayerInitOptions): void</div>
-<p>@Jin layer-init-options：以 options 对象一次性传入建层参数，字段全部可选，缺省与 <code>addTileLayerWithOptions</code> 旧默认值一致；
-其中 <code>serviceZoomOffset</code> 建层即写入（首帧选瓦即带偏移），无需建后补调 <code>setLayerZoomOffset</code>。运行时 setter 仍可覆盖初值。</p>
+<p>@Jin layer-init-options：以 options 对象一次性传入建层参数，字段全部可选，缺省与 <code>addTileLayerWithOptions</code> 旧默认值一致。
+<b>2026-11-13 变更：</b>旧 Renderer 级单图层字段 <code>serviceZoomOffset</code> 与运行时方法 <code>setLayerZoomOffset</code> 已移除（GPU 放大软化，省流需求改用全局 <code>setTileLodOffset</code>）；
+原 <code>geoSourceLevelBias</code> 对外更名为 <code>zoomOffset</code>（引擎内部成员仍名 geoSourceLevelBias_），仅 <code>crs=EPSG:4326/4490</code> 地理切片生效，仅建层传入、修改需重建图层。</p>
 <table>
 <tr><th>options 字段</th><th>说明</th></tr>
 <tr><td class="param">crs?: string</td><td>同旧位置参数：<code>EPSG:3857</code>（默认）/ <code>EPSG:4326</code> / <code>EPSG:4490</code></td></tr>
 <tr><td class="param">tmsY?: boolean</td><td>true=TMS 行序；XYZ 服务缺省 false</td></tr>
 <tr><td class="param">tileMatrixOffset?: number</td><td>服务 TileMatrix 与 z 的偏移（天地图 c 服务传 1）</td></tr>
-<tr><td class="param">serviceZoomOffset?: number</td><td>单图层取瓦级别偏移，引擎钳制 <code>[-3,2]</code>，缺省 0 与旧行为一致；负值请求更粗一级瓦片（观感放大注记字号）</td></tr>
+<!-- @Jin 2026-11-13 zoomOffset（原 geoSourceLevelBias 对外更名；旧 serviceZoomOffset 已移除） -->
+<tr><td class="param">zoomOffset?: number</td><td>@Jin <b>仅 <code>crs=EPSG:4326/4490</code> 地理源生效</b>，墨卡托直连图层传入静默忽略：重投影选源层级 <code>s=clamp(z+zoomOffset,0,max)</code>，引擎钳 <code>[-2,1]</code>，缺省 0（v2 各向同性重采样，注记字号约为 3857 的一半）；天地图 c 注记传 <code>-1</code> 使源瓦 1:1 映射，字号与 3857 直连一致且无 GPU 放大模糊，代价是高纬垂直约 <code>1/cos(纬度)</code> 轻微拉高（c 切片像元扁率的服务固有特性，西安 34°≈1.2 倍）。仅建层 options 生效，修改需重建图层；引擎内部成员名仍为 <code>geoSourceLevelBias_</code></td></tr>
+<!-- @Jin 2026-11-13 垂直拉高补偿 geoVerticalCompensation（实验封存，默认 1.0 零行为变化） -->
+<tr><td class="param">geoVerticalCompensation?: number</td><td>@Jin 实验封存：仅 <code>zoomOffset&lt;0</code> 时有视觉意义，引擎钳 <code>[0,1]</code>，缺省 <code>1.0</code>＝各向同性严格瓦边界（与 v2 字节级一致，零行为变化）；<code>0.5</code>＝垂直拉高减半，<code>0</code>＝源像素方形映射（字形最方正）。公式 <code>sv=1+vComp&middot;(sec(中心纬度)-1)</code>，以瓦中心锚定纵向多采样压回 256 行，水平几何不变。代价：系数&lt;1 时纵向采样超出真实纬度带，水平接缝附近 overlay 注记理论上可能轻微重影，仅建议注记层使用。当前 demo 默认 1.0 且调试面板标注“实验封存”，专项验证前不要在生产设置非 1.0</td></tr>
 </table>
-<pre><code>// 天地图 4490 注记层建层即带 -1 偏移（影像/注记可各自独立取值）
-map.addTileLayerWithLayerOptions(this.baseDir + &#x27;/tdt4490-cia&#x27;,
-  &#x27;https://t{s}.tianditu.gov.cn/DataServer?T=cia_c&amp;x={x}&amp;y={y}&amp;l={z}&amp;tk=TOKEN&#x27;,
-  18, true, { crs: &#x27;EPSG:4490&#x27;, tmsY: false, tileMatrixOffset: 1, serviceZoomOffset: -1 });
-// 运行时仍可覆盖：map.setLayerZoomOffset(labelIndex, 0);</code></pre>
-<div class="warn">回退：不传 options 或 serviceZoomOffset 恒为 0 即恢复旧行为；旧 <code>addTileLayer/addTileLayerWithOptions</code> 签名保留不变。</div></div>
+<pre><code>// @Jin 天地图 4490 注记推荐写法：zoomOffset=-1 放大字号（重投影选源 s=z-1，清晰不糊）；影像层不传该字段
+map.addTileLayerWithLayerOptions(this.baseDir + &#x27;/tdt4490-cia-zo1&#x27;,
+  CIA_C_URL_TEMPLATE, 18, true,
+  { crs: &#x27;EPSG:4326&#x27;, tmsY: false, tileMatrixOffset: 1, zoomOffset: -1 });
+// 弱网/限流省流（全图层）请用全局接口：map.setTileLodOffset(-1);</code></pre>
+<div class="warn">回退：不传 options 或 zoomOffset 恒为 0、geoVerticalCompensation 恒为 1.0 即恢复旧行为；旧 <code>addTileLayer/addTileLayerWithOptions</code> 签名保留不变。</div></div>
 <div class="api"><h4>setLayerVisible / removeTileLayer <span class="badge b-base">原生</span></h4>
 <div class="sig">setLayerVisible(index: number, visible: boolean): void<br>removeTileLayer(index: number): void</div>
 <p>index 为 addTileLayer/addRasterLayer 的加入次序（0 起）；隐藏层不绘制、不取瓦片；移除为墓碑语义。</p></div>
@@ -497,18 +501,8 @@ map.updateOverlayPoints(ptId, [108.9594, 34.2196], undefined, ['太白山']);</c
 （字体偏小/高密度屏调试用，默认 0，实验能力）；<code>setTileLodAlignDisplay(true)</code> 开启高分辨率密度对齐。</p>
 <pre><code>console.info('camera z=' + map.cameraZoomLevel() + ' tile z=' + map.tileZoomLevel(18));
 map.setTileLodOffset(-1);   // 实验：瓦片降一级，回退传 0</code></pre></div>
-<!-- @Jin 2026-11-11 单图层 serviceZoomOffset（feature/3dtiles-b3dm 合入） -->
-<div class="api"><h4>setLayerZoomOffset（单图层 LOD 偏移） <span class="badge b-jin">@Jin 新增·实验·可回退</span></h4>
-<div class="sig">setLayerZoomOffset(index: number, offset: number): void</div>
-<p>只改变 <code>index</code> 指定瓦片图层的取瓦级别（index 为 addTileLayer/addTileLayerWithOptions 加入次序，0 起），
-不影响相机与其他图层；offset 引擎内钳制 [-3,2]，<b>0=标准（默认，零行为变化）</b>，负数请求更粗父瓦。
-2D 网格与 3D 四叉树/SSE 同步生效，交互 LOD 迟滞按偏移维度隔离；与全局 setTileLodOffset 正交可叠加
-（最终级别 = 全局 LOD 结果 + 本层偏移）。不持久化，重启恢复 0；切图源重建图层后需对新 index 重新设置。
-典型用途：高 DPR 屏仅把注记层设 -1 增大字号、限流时仅降低个别图层请求量。
-回退：移除 TileLayer.serviceZoomOffset 字段与本方法调用链。</p>
-<pre><code>// 影像层 index=0 保持标准，仅注记层 index=1 取粗一级
-map.setLayerZoomOffset(0, 0);
-map.setLayerZoomOffset(1, -1);</code></pre></div>
+<!-- @Jin 2026-11-13 原 setLayerZoomOffset（单图层 Renderer 级 LOD 偏移）已移除：GPU 放大软化且与选源偏置职责重叠；
+  单图层选源差异统一由建层 options.zoomOffset 承担（仅 4326/4490），全局省流仍用 setTileLodOffset。 -->
 
 <h3>6.11 渲染控制</h3>
 <div class="api"><h4>requestRender / viewHeightVp <span class="badge b-base">原生</span></h4>
@@ -701,7 +695,9 @@ map.addTileLayerWithOptions(cache + '/tdt-cia-c',
 <tr><td>addRasterLayer 返回 -1 / 提示不支持本地栅格</td><td>lite 包无 GDAL，本地栅格为桩</td><td>改用在线瓦片；或构建 GLOBECORE_LITE=OFF 全量包</td></tr>
 <tr><td>NativeSrs.convert 恒返回 null、getProjVersion=0</td><td>lite 包 PROJ 为桩</td><td>全量包 + 初始化 NativeSrs.initProjData</td></tr>
 <tr><td>加载 shp/kml 提示仅支持 GeoJSON</td><td>lite 包 OGR 为桩，只保留原生 GeoJSON reader</td><td>转 GeoJSON 加载，或使用全量包</td></tr>
-<tr><td>4490 注记字小/轻微拉伸</td><td>地理切片重投影特性（已知边界）</td><td>实验性 setTileLodOffset(-1) 对比；后续单图层 serviceZoomOffset 方案</td></tr>
+<!-- @Jin 2026-11-13 4490 字号方案定稿：zoomOffset（原 geoSourceLevelBias 更名） -->
+<tr><td>4490 注记字小</td><td>v2 重投影 s=z 时源瓦 2:1 缩小，字号约为 3857 一半</td><td>@Jin 已解决：注记层建层传 <code>zoomOffset:-1</code>（重投影选源 s=z-1，清晰放大；旧 serviceZoomOffset 已移除，其负档为 GPU 放大软化）</td></tr>
+<tr><td>4490 zoomOffset=-1 高纬垂直轻拉高</td><td>c 切片像元扁率（cos(纬度)）的服务固有特性</td><td>已知边界，纬度越高越明显；默认 zoomOffset=0 不受影响，可按图层权衡；geoVerticalCompensation 实验封存中</td></tr>
 <tr><td>拾取不到 overlay</td><td>图层 noPick 或图层顺序</td><td>检查 setOverlayNoPick 与 add 顺序</td></tr>
 <tr><td>手势多指跳变</td><td>旧版本问题</td><td>确认使用含 @Jin 防跳改造的包（main 0.1.5.0-dev 起）</td></tr>
 </table>

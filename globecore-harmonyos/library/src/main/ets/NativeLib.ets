@@ -15,12 +15,19 @@ import common from '@ohos.app.ability.common';
 import fs from '@ohos.file.fs';
 
 // @Jin layer-init-options（实验/可回退）：具名初始化选项，ArkTS 禁止对象字面量作类型，故在底层门面定义、上层再导出。
-/** 瓦片图层初始化选项：crs/tmsY/tileMatrixOffset 同旧位置参数；serviceZoomOffset 为建层即生效的单图层 LOD 偏移（引擎钳 [-3,2]）。 */
+/**
+ * @Jin 瓦片图层初始化选项：crs/tmsY/tileMatrixOffset 同旧位置参数。
+ * zoomOffset：单图层地理源选源层级偏置（2026-11-13 由 geoSourceLevelBias 对外更名），仅 crs=EPSG:4326/4490 生效，
+ * 选源 s=clamp(z+zoomOffset)，引擎钳 [-2,1]，默认 0；天地图 c 注记层传 -1 可使字号与 3857 直连一致且无 GPU 放大模糊
+ * （垂直保留约 1/cos(纬度) 服务固有扁率）；墨卡托图层传入静默忽略；仅建层生效，修改需重建图层。
+ */
 export interface TileLayerInitOptions {
   crs?: string;
   tmsY?: boolean;
   tileMatrixOffset?: number;
-  serviceZoomOffset?: number;
+  zoomOffset?: number;
+  // @Jin 垂直拉高补偿 [0,1]：1.0 默认各向同性；0.5 减半；0 字形方正（可能接缝轻微重影，仅建议注记层；实验封存默认 1.0）。
+  geoVerticalCompensation?: number;
 }
 
 /** 3D Tiles 图层初始化选项：heightOffset 垂直高度偏移（米，正上负下），建层即写入、首帧生效。 */
@@ -352,14 +359,6 @@ export class NativeLib {
       return 0;
     }
     return gc.nativeGetTileZoomLevel(handle, maxLevel);
-  }
-
-  // @Jin 设置实验性瓦片 LOD 偏移：负数更粗，0 恢复；应用重启后自动保持标准默认值。
-  /** @Jin 单图层 serviceZoomOffset：透传到 native GlobeEngine::setLayerZoomOffset */
-  static nativeSetLayerZoomOffset(handle: number, index: number, offset: number): void {
-    if (handle !== 0) {
-      gc.nativeSetLayerZoomOffset(handle, index, offset);
-    }
   }
 
   static nativeSetTileLodOffset(handle: number, offset: number): void {

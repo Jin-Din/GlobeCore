@@ -109,10 +109,6 @@ public:
     /// index 越界则忽略；变更后若已注入重绘回调则触发一帧重绘（RENDERMODE_WHEN_DIRTY 下即时生效）。
     void setLayerVisible(int index, bool visible);
 
-    /// @Jin 单图层瓦片 LOD 偏移（实验、可回退）：只改变指定图层取瓦级别（2D 网格与 3D SSE 同步生效），
-    /// 不改变相机与其他图层；offset 钳制到 [-3,2]，0 恢复该层标准行为。index 为 addTileLayer 加入次序（0 起）。
-    void setLayerZoomOffset(int index, int offset);
-
     /// 移除一个瓦片图源图层（含 [addRasterLayer] 的栅格层）：墓碑——置 removed + 隐藏，不 erase 以保持
     /// 其它层 index 稳定（口径同 [removeVectorLayer]）。其瓦片纹理由 [Renderer] 在下一帧于 GL 线程释放，
     /// 后台加载队列即时清空（不再产生 GDAL/联网工作）。index 越界忽略；变更后触发一帧重绘。

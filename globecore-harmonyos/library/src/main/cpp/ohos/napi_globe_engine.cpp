@@ -644,7 +644,7 @@ napi_value NativeAddTileLayerWithOptions(napi_env env, napi_callback_info info) 
 }
 
 // @Jin layer-init-options（实验/可回退）：options 对象形态入口，避免位置参数继续膨胀。
-// options 字段全部可选：crs(string)/tmsY(bool)/tileMatrixOffset(int)/serviceZoomOffset(int)，缺省与旧 8 参函数同默认值。
+// @Jin options 字段全部可选：crs(string)/tmsY(bool)/tileMatrixOffset(int)/zoomOffset(int，仅 4326/4490)/geoVerticalCompensation(double)，缺省与旧 8 参函数同默认值。
 napi_value NativeAddTileLayerWithLayerOptions(napi_env env, napi_callback_info info) {
     napi_value args[6];
     gcohos::NapiGetArgs(env, info, 6, args);
@@ -682,13 +682,25 @@ napi_value NativeAddTileLayerWithLayerOptions(napi_env env, napi_callback_info i
                 options.tileMatrixOffset = v;
             }
         }
-        if (napi_get_named_property(env, opts, "serviceZoomOffset", &prop) == napi_ok) {
+        // @Jin 2026-11-13 对外字段 zoomOffset（旧 geoSourceLevelBias 更名；旧 Renderer 级 serviceZoomOffset 已移除）：
+        // @Jin 仅 crs=EPSG:4326/4490 地理源重投影选源生效，TileLoader 内钳 [-2,1]；墨卡托图层传入静默忽略。
+        if (napi_get_named_property(env, opts, "zoomOffset", &prop) == napi_ok) {
             napi_valuetype vt = napi_undefined;
             napi_typeof(env, prop, &vt);
             if (vt == napi_number) {
                 int32_t v = 0;
                 gcohos::NapiGetInt32(env, prop, v);
-                options.serviceZoomOffset = v; // C++ 建层时统一钳 [-3,2]
+                options.zoomOffset = v;
+            }
+        }
+        // @Jin 地理源垂直拉高补偿（仅 crs=EPSG:4326/4490 生效）：缺省 1.0，TileLoader 内钳 [0,1]。
+        if (napi_get_named_property(env, opts, "geoVerticalCompensation", &prop) == napi_ok) {
+            napi_valuetype vt = napi_undefined;
+            napi_typeof(env, prop, &vt);
+            if (vt == napi_number) {
+                double d = 1.0;
+                gcohos::NapiGetDouble(env, prop, d);
+                options.geoVerticalCompensation = d;
             }
         }
     }
@@ -706,20 +718,6 @@ napi_value NativeSetLayerVisible(napi_env env, napi_callback_info info) {
     gcohos::NapiGetInt32(env, args[1], index);
     gcohos::NapiGetBool(env, args[2], visible);
     toGlobeEngine(handle)->setLayerVisible(index, visible);
-    return nullptr;
-}
-
-// @Jin 单图层瓦片 LOD 偏移（实验、可回退）：只影响 index 指定图层，offset 引擎内钳制 [-3,2]，0 恢复标准。
-napi_value NativeSetLayerZoomOffset(napi_env env, napi_callback_info info) {
-    napi_value args[3];
-    gcohos::NapiGetArgs(env, info, 3, args);
-    int64_t handle = 0;
-    int32_t index = -1;
-    int32_t offset = 0;
-    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return nullptr;
-    gcohos::NapiGetInt32(env, args[1], index);
-    gcohos::NapiGetInt32(env, args[2], offset);
-    toGlobeEngine(handle)->setLayerZoomOffset(index, offset);
     return nullptr;
 }
 
@@ -1515,8 +1513,6 @@ napi_value RegisterGlobeEngine(napi_env env, napi_value exports) {
         {"nativeAddTileLayerWithOptions", nullptr, NativeAddTileLayerWithOptions, nullptr, nullptr, nullptr, napi_default, nullptr},
     {"nativeAddTileLayerWithLayerOptions", nullptr, NativeAddTileLayerWithLayerOptions, nullptr, nullptr, nullptr, napi_default, nullptr}, // @Jin 4326/4490 地理在线瓦片适配
         {"nativeSetLayerVisible", nullptr, NativeSetLayerVisible, nullptr, nullptr, nullptr, napi_default, nullptr},
-    // @Jin 单图层 serviceZoomOffset 运行时调节（默认 0，不改变既有调用方行为）。
-    {"nativeSetLayerZoomOffset", nullptr, NativeSetLayerZoomOffset, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeAddRasterLayer", nullptr, NativeAddRasterLayer, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeRemoveTileLayer", nullptr, NativeRemoveTileLayer, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeGetRasterAddError", nullptr, NativeGetRasterAddError, nullptr, nullptr, nullptr, napi_default, nullptr},

@@ -15,6 +15,8 @@
 - 七、图层初始化参数入参化 layer-init-options
 - 八、3D 垂直视角高 zoom 黑面修复 T4（地平线椭球化+垂直眼点安全壳）（fix/3d-gesture-low-altitude，2026-11-11）：serviceZoomOffset/heightOffset 建层 options 一次性传入
 - 九、低空周边黑块根治 T5/T8、缩放焦点地形锚点 T9 与捏合降单指窜动 T9-fix2（fix/3d-gesture-low-altitude，2026-11-12~13）：DEM 死锁兜底、侧视锥有界松弛、射线-地形迭代求交、native 触摸桥基准重建+grace
+- 十、单图层 serviceZoomOffset 模糊核查 A/B 结论与标准化测试机位（2026-11-13，main）：新旧 LOD 路径同级实证、unsharp 实验回退、西安 z8/0° 测试机位
+- 十一、天地图 3857/4490 服务差异与 4490 注记字小/模糊根治：geoSourceLevelBias 地理源选源层级偏置（2026-11-13，main）
 
 ## 六、3D 低空手势改造（fix/3d-gesture-low-altitude，2026-11-11）
 
@@ -347,6 +349,7 @@ NativeMapView({
 - @Jin 3D Tiles(b3dm) 已合入主线（2026-11-11，仍按实验能力管理）：纹理已通、朝向已修正、heightOffset=-20m 校准贴地；高斯泼溅 GLB、PBR、拾取、磁盘缓存为后续待办。
 - @Jin 新增待办：heightOffset 步进按钮快速连点可能一次跳多档，需节流防抖；政务版陕西底图接入（服务地址与 xyz 规则待核实）。
 - @Jin ~~3D 拾取/缩放锚点只与椭球求交（遗留 P3）~~ 已完成（2026-11-12 T9）：9×9 地形锚点网格 + 射线-地形迭代求交，双指缩放焦点漂移与长按拾取偏差一并修复，详见第九节。
+- @Jin 新增待办（2026-11-13 能力核查）：**要素属性内存化回取（map.click 闭环）**。现状：C++ 拾取 `pickVector/pickVector3D` 已完备（GPU PickID+CPU 回退、3D 贴地口径、两阶段优先级），但命中仅得 layerIndex+fid；GeoJSON properties 在解析期被丢弃（仅留 labelField 单字段），`NativeVector.getFeatureAttributes` 按源文件路径走 GDAL 重读，LITE 桩实现不可用、overlay 层无源文件。计划：① C++ `VectorFeatureData/VectorLayer` 增加 fid→properties JSON 内存表（默认仅存白名单字段或设总字节上限，防省级大层内存膨胀），GDAL reader 与 `lite_geojson_reader.cpp` 双通路填充；② 新增 `GlobeEngine::featureAttributes(layerIndex,fid, outJson)`（层越界/fid 未命中返回 false），NAPI `nativeFeatureAttributes` + ArkTS `NativeMapView.featureAttributes()`、Android JNI/Kotlin 双端导出；③ 补齐 Harmony 缺失的 `featureRenderColor` NAPI 导出对齐 Android；④ 同步更新 docs/api 双平台文档；实验性可回退（不调新 API 时零行为变化，回退即删属性表与接线）。
 
 ### 实验开关 / 回退方式索引
 
@@ -422,3 +425,110 @@ NativeMapView({
 - T8：GeographicQuadtree.cpp 侧平面阈值改回 `if (v < 0.0)`（删除 kSideFrustumCullSlackM/cullThreshold）。
 - T9：`setTerrainAnchorEnabled(false)` 整体回退；彻底移除需删除 TerrainAnchorGrid 全套与 Renderer 网格发布块。
 - T9-fix2：删除 XComponentBridge 中 `gLastNumPoints_`/`gPostPinchGraceFrames_` 成员、MOVE 转换重建块与 grace 拦截块、UP 的 n==1 基准重建，即恢复“降单指沿用陈旧 gLastX_/gLastY_”的旧行为（不建议）。
+
+## 十、单图层 serviceZoomOffset 模糊核查 A/B 结论与标准化测试机位（main，2026-11-13）
+
+### 10.1 问题与结论
+
+- 现象：注记层设 `serviceZoomOffset=-1` 后，主观观感比"全局 LOD 偏移改造为单图层参数之前"模糊，怀疑 LOD 下沉改坏取瓦/UV。
+- 真机 A/B（天地图 3857、同机位、同注记层 idx=3、采样器强制统一为纯 GL_LINEAR），在 Renderer 2D/3D 渲染入口加临时级别诊断日志（定稿已删）：
+
+  | 档位 | svcOff | nav_.tileLevel() | 注记层最终 targetLevel |
+  |---|---|---|---|
+  | 全局标准 | 0 | 14 | 14 |
+  | 单图层注记 -1（新路径） | -1 | 14 | **13** |
+  | 全局 -1（旧 Navigator.tileLodBias 路径） | 0 | 13（bias 已内置） | **13** |
+
+- 结论：两条 -1 路径下注记层**请求的瓦片级别完全一致**，单图层改造（Renderer 逐层叠加 offset + 钳制、SSE 同步 `ldexp(1,-offset)`、迟滞 LOD 按 offset 隔离）数学上与旧全局路径等价，**无取瓦/UV bug**。
+- 观感差异真因：① 旧全局 -1 对影像层与注记层同时降级，底图/注记粗细协调；新单图层 -1 只降注记，被放大的软笔画注记贴在高锐影像上，反差衬托显"糊"；② 同期实验的 unsharp mask 锐化着色器改变了原版双线性观感，已按评估结论**整体回退**（Renderer.cpp/.h 恢复 HEAD，BUILD_ID 恢复 gesture-final）。
+- 保留能力：单图层 `serviceZoomOffset`（含建层 options 与运行时 setLayerZoomOffset）、旧全局 `setTileLodOffset` 接口均保留不变；默认 0 行为零变化。
+
+### 10.2 标准化测试机位（长期有效）
+
+- @Jin 约定：LOD/清晰度类 A/B 一律使用固定机位——西安（lat 34.344801, lon 108.934987）、地图 z8、倾角 0°、航向 0°，高度 110000m（真机 DPR 2.38 校准：220000m→z7，110000m→z8）。
+- demo 调试坞「LOD 调试（单图层）」面板内新增按钮「测试机位·西安 z8/0°」，一键 `flyToCamera(new Camera(34.344801, 108.934987, TEST_XIAN_ALT_M=110000, 0, 0))`；常量 `TEST_XIAN_ALT_M` 集中在 Index.ets 顶部，换机/换 DPR 后只改这一处再按 HUD 校准。
+
+### 10.3 其他定稿修复
+
+- @Jin NativeMapView.ets 删除重复的 `export type { TileLayerInitOptions, Tileset3DInitOptions }`（重复导出阻断 ArkTS 编译），保留单处带 @Jin 说明的导出。
+- 临时 A/B 入口（globalLodOffset state、selectGlobalLod、[临时AB] 按钮组）与 ABDBG 诊断日志、unsharp/bicubic 锐化全套着色器与程序均已移除/回退，工作区无实验残留。
+
+## 十一、天地图 3857/4490 服务差异与 4490 注记字小/模糊根治（main，2026-11-13）
+
+### 11.1 两套服务的切片矩阵差异（HTTP 实证）
+
+- 天地图 WMTS 两套 TileMatrixSet 同属 256px 瓦片，但根矩阵结构不同（真机请求实测）：
+  - **w（EPSG:3857 墨卡托，img_w/cia_w）**：TILEMATRIX=1 为 2×2（标准 XYZ z1），TILEMATRIX=0 为空 PNG；瓦内地面各向同性，引擎可墨卡托直连、1:1 采样。
+  - **c（EPSG:4326/4490 地理，img_c/cia_c）**：TILEMATRIX=1 为 **2×1**（根 2 列 1 行），第 s 零基级列数=2^(s+1)、行数=2^s；像元地面足迹为“水平 cosφ、垂直 1”的**扁矩形**，水平与垂直地面分辨率不等。
+- 引擎内部统一按墨卡托球体选瓦，c 服务瓦片必须在 TileLoader 内重投影（`generateGeographicTile`）：按墨卡托瓦四至求相交地理服务瓦→拼贴→逐行墨卡托反投影双线性重采样成 256² 墨卡托 PNG。
+
+### 11.2 4490 标准档字小的根因（几何推导）
+
+- v2 重投影选源层级 **s=z**（为修正 v1 的垂直 1/cosφ 拉高）：一个墨卡托瓦在水平方向恰好覆盖 2 块 c 服务瓦（512 源像素→256 输出，**2:1 缩小**），垂直约 2cosφ 块；各向同性达标，但服务瓦内所有内容（含注记字形）被整体缩到约一半，故 4490 注记比 3857 直连（1:1）视觉字号小约一半。
+- 旧 v1 选 s=z-1：水平 1:1（字号与 3857 一致），但 c 像元垂直地面跨度为水平的 1/cosφ 倍，输出垂直被放大约 1/cosφ（西安 34°≈1.2 倍），即早期“轻微上下拉伸”的来源。两套方案是 c 服务扁像元下**不可同时消除的固有折中**。
+
+### 11.3 serviceZoomOffset=-1 为什么模糊（两服务皆然）
+
+- serviceZoomOffset 作用于**引擎墨卡托选瓦级**：-1 让引擎请求粗一级墨卡托瓦并由 GPU 双线性放大 2 倍显示——这是栅格放大的固有软化，与 LOD 下沉改造无关（第十节 A/B 已实证新旧路径取瓦级别完全一致）。
+- 4490 下是**双重重采样**：先 geo→墨卡托双线性缩小，再 GPU 双线性放大，模糊更重；加载途中祖先兜底纹理与叶瓦锐度不一，主观上呈“碎片化”。
+- 3857 标准档字号本就合适，不需要该偏移；4490 的正确解法应在**重投影选源环节**完成，而不是放大已生成的墨卡托纹理。
+
+### 11.4 修复：geoSourceLevelBias 地理源选源层级偏置（实验、可回退）
+
+- 新增**单图层建层选项** `geoSourceLevelBias`（仅 crs=EPSG:4326/4490 生效），重投影选源公式由 s=z 改为 **s=clamp(z+bias, 0, maxGeoLevel)**，引擎钳 [-2,1]，默认 0 与 v2 完全一致。
+- 天地图 4490 注记层传 **-1**：恢复水平 1:1 源瓦映射，字号与 3857 标准一致，且全程无 GPU 放大（重投影在 256 源像素尺度一次完成），字形清晰；影像层保持 0 不变。
+- 折中（如实记录）：bias=-1 时垂直方向保留 c 服务固有扁率，西安 34° 约 1.2 倍轻拉高，纬度越高越明显；用户可按图层在“字小但各向同性(0)”与“字号正常但轻拉高(-1)”间自行选择。
+- 缓存隔离：不同偏置对同一墨卡托瓦产出不同 PNG，demo 结果缓存目录按偏置分目录（`tianditu-c4326-v2-gb-1-*`），原始地理瓦缓存（-geo-raw）仍按服务矩阵共享。
+- 真机实证（西安 z8/倾角 0 标准机位，2026-11-13）：日志确认注记层 `srcLevelBias=-1`、影像层 0；三帧同机位对比中 4490(bias=-1) 字号/清晰度与 3857 标准基本一致，4490(bias=0) 明显字小。
+
+### 11.5 改动清单（注释均带 @Jin）
+
+- C++ 核心（globecore）：`TileLayer.h` TileLayerOptions 增 `geoSourceLevelBias`；`TileLoader.h/.cpp` 增成员、setGeographicSource 末位默认参数、generateGeographicTile 选源公式与日志；`GlobeEngine.cpp` 透传并入建层日志。
+- Harmony NAPI/ArkTS：`napi_globe_engine.cpp` 解析 options.geoSourceLevelBias；`NativeLib.ets` TileLayerInitOptions 增字段；`NativeMapView.ets` 用法文档。
+- Demo：调试坞 LOD 面板增「4490 注记源级偏置（标准 s=z / 放大 s=z-1）」，切换即墓碑化重建 4490 图层；仅 4490 生效，3857/ArcGIS 下点击仅提示。
+- 文档：本节 + docs/api/harmony-api-guide.html（options 字段、推荐示例、已知边界）。
+- 回退：不传该字段或传 0 即完全恢复 v2；删除选项字段与 TileLoader 偏置分支即彻底回退。
+- 待办：Android JNI 尚未暴露 TileLayerOptions（C++ 默认 0 已保证零行为变化），后续按需补 JNI/Kotlin 入口与 Android API 文档。
+
+### 11.6 两个“偏移”的分工定稿与单图层作用域评估（2026-11-13）
+
+- 背景：serviceZoomOffset 下沉为单图层参数后，4490 注记设 -1 出现模糊/碎片化，需确认是否为改造回归、参数作用域是否合适。
+- 全链路核查（ArkTS Index.ets → NAPI napi_globe_engine.cpp → GlobeEngine → Renderer/TileLoader）：传参无误；对照提交 7086275 的 diff，旧全局实现 `level += tileLodBias_` 与新单图层实现 `level = nav_.tileLevel(maxLevel) + layerZoomOffset` 数学等价，模糊不是下沉改造引入的回归。
+- 两个参数的分工定稿：
+
+| 参数 | 作用层面 | 机制 | 视觉结果 | 适用场景 |
+|---|---|---|---|---|
+| `serviceZoomOffset` | Renderer 引擎选瓦级（2D/3D 同步，SSE 同步缩放） | 选更粗墨卡托瓦，GPU 双线性放大显示 | 固有软化；4490 还叠加重投影重采样，模糊/碎片化更重 | 弱网/限流省流节流，全栅格图层通用 |
+| `geoSourceLevelBias` | TileLoader 重投影选源（仅 crs=EPSG:4326/4490） | s=clamp(z+bias) 选地理源瓦，仍产出标准 z 级墨卡托瓦 | texel 1:1、无 GPU 放大，清晰；代价是高纬 sec(φ) 轻拉高 | 4490/c 切片注记字号修复 |
+
+- 单图层作用域评估结论：**合适，不回退全局**。LOD 偏移本质是图源属性（各层金字塔/服务结构不同，档位本就可能不同）；粗瓦地理四至由四叉树严格保证，层间不会错位；全局 `setTileLodBias` 保留为整 App 省流总开关，与单图层偏移正交可叠加。
+- 4490 注记推荐配置（定稿）：`serviceZoomOffset=0` + `geoSourceLevelBias=-1`；影像层两者均保持 0。
+- demo 防误用（仅 ArkTS 层，C++ 零改动）：天地图 4490 图源下 LOD 调试面板对注记层 serviceZoomOffset 负档给出橙色警示，引导改用源级偏置；说明文字重新定位为“省流节流（清晰度换流量），不是字号修复手段”。
+
+### 11.7 geoVerticalCompensation 垂直拉高补偿（实验封存，2026-11-13）
+
+- 动机：11.4 的 bias=-1 恢复字号后保留 c 服务固有 sec(φ) 垂直拉高（西安 34.3°≈1.21 倍），真机反馈“垂直轻拉高过度，有点夸张”。
+- 实现（实验、可回退）：新增连续系数 `geoVerticalCompensation`，引擎钳 [0,1]，默认 1.0。公式 `sv = 1 + vComp·(sec(中心纬度) − 1)`，以瓦中心锚定调整纬度带 `adjLatSpan=256/sv/pixelsPerLat`；vComp<0.999 时纵向在调整带内线性取纬（放弃墨卡托反投影），多采样的源内容压回 256 行；水平方向与瓦片几何完全不动。1.0＝各向同性严格瓦边界（与 v2 字节级一致），0.5＝拉高减半（西安有效 sv≈1.10），0＝源像素方形映射（字形最方正）。
+- 缓存隔离：不同补偿产出不同 PNG，demo 结果缓存按补偿分目录（`-vc50-*`、`-vc0-*`，默认 1.0 不带后缀）。
+- 真机验证情况：同机位（西安 z8/倾角 0）三档 1.0/0.5/0 日志均确认生效；但同 ROI 连通域高宽比测量受影像未加载完、跨帧字形粘连/分裂差异污染（三档样本 n=37/33/20，字形集合不一致，中位数不可比），未取得可信量化结论；代码几何方向经逐行推导确认正确。
+- 代价（如实记录）：系数<1 时纵向采样超出瓦真实纬度带，水平接缝附近 overlay 注记理论上可能轻微重影，仅建议注记层使用，影像层保持默认。
+- 结论：**实验封存**。库默认 1.0 零行为变化；demo 调试按钮保留但标题标注“实验封存：默认 1.0，专项讨论前勿调”；后续针对 4490 拉高专项讨论时再启用验证。回退方式：不传该字段或恒传 1.0，彻底回退删除 TileLayerOptions/TileLoader 中该字段与补偿几何分支。
+- 改动文件（注释均带 @Jin）：C++ `TileLayer.h`（options 字段）、`TileLoader.h/.cpp`（成员/钳制/补偿几何/日志/缓存目录）、`GlobeEngine.cpp`（透传）；Harmony `napi_globe_engine.cpp`、`NativeLib.ets`、`NativeMapView.ets`；demo `Index.ets`（三档按钮与缓存 tag）；Harmony API 文档与本记录。
+- 待办延续：Android JNI 尚未暴露 TileLayerOptions（含 geoSourceLevelBias 与 geoVerticalCompensation），C++ 默认值保证零行为变化，后续按需补 JNI/Kotlin 入口与 Android API 文档。
+
+### 11.8 单图层参数收口：移除 Renderer 级 serviceZoomOffset，zoomOffset 承接选源语义（2026-11-13，构建号 v0.1.5-20261113-zoomoffset1）
+
+- 背景：11.6 定稿两个偏移分工后，旧 `serviceZoomOffset`（Renderer 选瓦级，GPU 放大软化、4490 双重重采样模糊）已无适用场景（省流由全局 `setTileLodOffset` 承担），且与 `geoSourceLevelBias` 名称并存易误用。用户决策：移除旧参数，把对外名称 `serviceZoomOffset` 简化为 `zoomOffset` 并赋予 `geoSourceLevelBias` 的选源语义；引擎内部成员保留 `geoSourceLevelBias_` 原名。
+- 语义变更（对外）：
+  - `TileLayerInitOptions.serviceZoomOffset`（[-3,2]，全图层、含运行时 setter）**移除**；
+  - `TileLayerInitOptions.geoSourceLevelBias` 更名为 **`zoomOffset`**（[-2,1]，仅 crs=EPSG:4326/4490 生效，墨卡托图层静默忽略，仅建层 options 传入、修改需重建图层，无运行时 setter）；
+  - `geoVerticalCompensation` 字段名不变（实验封存，默认 1.0）。
+- C++ 改动（注释均带 @Jin）：
+  - `TileLayer.h`：TileLayerOptions 删除 `serviceZoomOffset`、`geoSourceLevelBias` 更名 `zoomOffset`；TileLayer 删除 `serviceZoomOffset` 成员。
+  - `GlobeEngine.h/.cpp`：删除 `setLayerZoomOffset` 声明与实现；建层日志改为 `... zoomOffset=%d`；`setGeographicSource` 入参由 `options.zoomOffset` 传入（TileLoader 内部仍名 geoSourceLevelBias_，选源公式 s=clamp(z+bias) 不变）。
+  - `Renderer.h/.cpp`：删除 `lastIdleGlobeTileZoomOffset_` 成员与 4 处重置点；2D `renderLayer` 与 3D `renderGlobeLayer3D` 选瓦恢复全局单值 `nav_.tileLevel(maxLevel)`；删除 `layerSseScale`，3D SSE 恢复 `lodDetailFactor × tileLodSseScale()`；交互迟滞恢复仅按 maxLevel 隔离。
+- Harmony 桥改动：`napi_globe_engine.cpp` 删除 NativeSetLayerZoomOffset 与注册表项，options 解析改读 `zoomOffset`；`index.d.ts`、`NativeLib.ets`、`NativeMapView.ets` 同步删方法/改字段/更新注释。demo/library 为 junction 自动同步。
+- Demo 改动（Index.ets）：删除 imgZoomOffset/labelZoomOffset 状态、selectLayerZoomOffset 方法与调试面板两组按钮及防误用提示；geoLabelLevelBias 状态更名 `geoLabelZoomOffset`、方法更名 `selectGeoLabelZoomOffset`；4490 注记 options 改传 `zoomOffset`，影像层与墨卡托图层传空 options；结果缓存 tag 由 `-gb` 改 **`-zo`**（旧实验缓存不再命中，首次重新下载，原始地理瓦 -geo-raw 缓存不变）；LOD 面板保留「4490 注记 zoomOffset（仅 c 切片）」两档按钮与垂直补偿封存组。
+- 真机验证（设备 5KLBB25911200313，2026-11-13）：BUILD ID `v0.1.5-20261113-zoomoffset1` 入日志；切「放大 s=z-1」后日志 `addTileLayer ... crs=EPSG:4326 geo=1 zoomOffset=-1`、TileLoader `srcLevelBias=-1 vComp=1.00`、缓存目录 `tianditu-c4326-v2-zo-1-cia(-geo-raw)`；标准档全程 zoomOffset=0；应用启动、图源切换、地形加载正常。
+- 影响面与回退：默认 0 时选瓦/选源与改造前完全一致；全局 `setTileLodOffset/setTileLodAlignDisplay` 原样保留（整 App 省流/对齐显示实验不受影响）；Android JNI 未暴露 options，零影响。回退方式：整体 revert 本提交即恢复双参数形态。
+- 文档：Harmony/Android API 指南同步（字段表、示例、故障对照、移除说明、规划中段落）；历史设计文档（layer-init-options-proposal、epsg-4490 design、har-packaging-plan）保留原文作存档，不回改。

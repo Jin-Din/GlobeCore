@@ -635,19 +635,24 @@ std::string TileLoader::buildUrl(int z, int x, int y) {
 }
 
 void TileLoader::setGeographicSource(std::string rawCacheDir, std::string urlTemplate,
-                                     int maxGeoLevel0Based, bool tmsY, int tileMatrixOffset) {
+                                     int maxGeoLevel0Based, bool tmsY, int tileMatrixOffset,
+                                     int geoSourceLevelBias, double geoVerticalCompensation) { // @Jin 末位默认参数见头文件
     std::lock_guard<std::mutex> lk(urlMtx_);
     geoScheme_ = !urlTemplate.empty();
     geoUrlTemplate_ = std::move(urlTemplate);
     geoMaxLevel0Based_ = std::max(0, maxGeoLevel0Based);
     geoTmsY_ = tmsY;
     geoTileMatrixOffset_ = tileMatrixOffset;
+    // @Jin 选源层级偏置钳到 [-2,1]：负值取更粗父瓦（放大字号），正值仅预留；默认 0 与 v2 行为完全一致。
+    geoSourceLevelBias_ = std::max(-2, std::min(1, geoSourceLevelBias));
+    // @Jin 垂直拉高补偿钳到 [0,1]：1.0=各向同性（默认，与 v2 完全一致），越小纵向多采样越多、字形越方正。
+    geoVerticalComp_ = std::max(0.0, std::min(1.0, geoVerticalCompensation));
     // @Jin 原始地理瓦独立缓存：与结果（墨卡托瓦）缓存目录隔离，同一编号两套切片绝不串图。
     geoRawCache_.setBaseDir(std::move(rawCacheDir));
     // @Jin 地理适配层不再按墨卡托 (z,x,y) 直连；结果缓存 miss 时改由 generateGeographicTile 取图。
     urlTemplate_.clear();
-    LOGI("TileLoader geographic source(EPSG4326/4490) on=%d maxGeoLevel0=%d tmsY=%d matrixOffset=%d rawDir=%s",
-         geoScheme_ ? 1 : 0, geoMaxLevel0Based_, geoTmsY_ ? 1 : 0, geoTileMatrixOffset_,
+    LOGI("TileLoader geographic source(EPSG4326/4490) on=%d maxGeoLevel0=%d tmsY=%d matrixOffset=%d srcLevelBias=%d vComp=%.2f rawDir=%s", // @Jin 日志带偏置/补偿便于真机核对
+         geoScheme_ ? 1 : 0, geoMaxLevel0Based_, geoTmsY_ ? 1 : 0, geoTileMatrixOffset_, geoSourceLevelBias_, geoVerticalComp_,
          geoRawCache_.baseDir().c_str());
 }
 
@@ -662,6 +667,8 @@ bool TileLoader::generateGeographicTile(int z, int x, int y,
     anySrcNetwork = false;
     std::string geoTmpl;
     int maxS = 0, matrixOffset = 0;
+    int srcLevelBias = 0; // @Jin 地理源选源层级偏置（s=z+bias）
+    double vComp = 1.0;   // @Jin 垂直拉高补偿 [0,1]，1.0=各向同性
     bool tmsY = false;
     {
         std::lock_guard<std::mutex> lk(urlMtx_);
@@ -670,6 +677,8 @@ bool TileLoader::generateGeographicTile(int z, int x, int y,
         maxS = geoMaxLevel0Based_;
         tmsY = geoTmsY_;
         matrixOffset = geoTileMatrixOffset_;
+        srcLevelBias = geoSourceLevelBias_; // @Jin 选源层级偏置随 URL 配置同锁读取
+        vComp = geoVerticalComp_;            // @Jin 垂直拉高补偿同锁读取
     }
 
     // @Jin 目标引擎墨卡托瓦地理四至（角纬度为墨卡托反投影；瓦内按线性经纬处理，与 3D 网格/本地栅格同口径）。
@@ -680,14 +689,28 @@ bool TileLoader::generateGeographicTile(int z, int x, int y,
     // @Jin 若按 s=z-1 取图，水平虽 1:1，但垂直源地面分辨率只有需求的 cosφ 倍（34°≈0.83），
     // @Jin 输出时垂直被整体放大约 1/cosφ≈1.2，注记文字会上下拉高（与层级无关，肉眼可见）。
     // @Jin s=z 时每个输出像元从源的约 2(宽)×2cosφ(高) 区域重采样，恰好抵消源像元扁率，地面各向同性。
-    const int s = std::max(0, std::min(maxS, z));
+    // @Jin 选源层级支持逐层偏置：默认 bias=0 即 v2 的 s=z（各向同性、字号约为 3857 一半）；
+    // @Jin bias=-1 取 s=z-1，源瓦→墨卡托瓦水平 1:1 映射，注记字号与 3857 直连一致且无 GPU 放大模糊，
+    // @Jin 垂直方向保留服务像元扁率（约 1/cos(纬度) 拉高，西安 34°≈1.2 倍），属 c 切片固有特性。
+    const int s = std::max(0, std::min(maxS, z + srcLevelBias));
     const double cols = std::ldexp(1.0, s + 1);
     const double rows = std::ldexp(1.0, s);
     constexpr double kEps = 1e-9;
     int gx0 = static_cast<int>(std::floor((tLonMin + 180.0) / 360.0 * cols));
     int gx1 = static_cast<int>(std::floor((tLonMax + 180.0) / 360.0 * cols - kEps));
-    int gy0 = static_cast<int>(std::floor((90.0 - tLatMax) / 180.0 * rows));
-    int gy1 = static_cast<int>(std::floor((90.0 - tLatMin) / 180.0 * rows - kEps));
+    // @Jin 垂直拉高补偿：c 服务像元垂直地面跨度为水平 1/cos(纬度)，严格瓦边界内自然纵向源行数≈256·cosφ，
+    // @Jin 直接映射字形被拉高 secφ。补偿<1 时以瓦中心锚定、纵向多采样到 256/sv 行（sv=1+v·(secφ-1)），
+    // @Jin 水平方向与瓦片几何完全不变；v=1 时调整四至等同真实四至，行为与 v2 字节级一致。
+    constexpr int kTileEarly = 256; // @Jin kTile 在本函数后文才定义，补偿块先行使用同值常量
+    const double pixelsPerLatEarly = rows * kTileEarly / 180.0;
+    const double centerLat = 0.5 * (tLatMin + tLatMax);
+    const double secPhi = 1.0 / std::max(0.05, std::cos(centerLat * 3.14159265358979323846 / 180.0));
+    const double sv = 1.0 + vComp * (secPhi - 1.0); // @Jin 期望的有效纵向缩放：v=1→secφ（各向同性），v=0→1（方形）
+    const double adjLatSpan = static_cast<double>(kTileEarly) / std::max(1.0, sv) / pixelsPerLatEarly;
+    const double adjLatMax = centerLat + 0.5 * adjLatSpan;
+    const double adjLatMin = centerLat - 0.5 * adjLatSpan;
+    int gy0 = static_cast<int>(std::floor((90.0 - adjLatMax) / 180.0 * rows));
+    int gy1 = static_cast<int>(std::floor((90.0 - adjLatMin) / 180.0 * rows - kEps));
     gx0 = std::max(0, std::min(gx0, static_cast<int>(cols) - 1));
     gx1 = std::max(0, std::min(gx1, static_cast<int>(cols) - 1));
     gy0 = std::max(0, std::min(gy0, static_cast<int>(rows) - 1));
@@ -786,12 +809,17 @@ bool TileLoader::generateGeographicTile(int z, int x, int y,
         }
     };
     for (int py = 0; py < kTile; ++py) {
-        // @Jin 第 py 行像元中心的归一化墨卡托 wy=(y+(py+0.5)/256)/2^z，反投影得精确纬度；
-        // @Jin 与纹理 UV 的线性映射（2D 轴对齐瓦、3D 网格 UV）完全对齐，消除瓦内垂直拉伸。
-        const double wy = (static_cast<double>(y) + (static_cast<double>(py) + 0.5) / kTile) * invTilesZ;
-        double rowLonUnused = 0.0;
         double lat = 0.0;
-        MercatorProjection::worldToLonLat(0.0, wy, rowLonUnused, lat);
+        if (vComp < 0.999) {
+            // @Jin 补偿档：在调整后的纬度带内线性取纬（中心锚定、多采样的源内容均匀压回 256 行）。
+            lat = adjLatMax - (static_cast<double>(py) + 0.5) / kTile * adjLatSpan;
+        } else {
+            // @Jin 第 py 行像元中心的归一化墨卡托 wy=(y+(py+0.5)/256)/2^z，反投影得精确纬度；
+            // @Jin 与纹理 UV 的线性映射（2D 轴对齐瓦、3D 网格 UV）完全对齐，消除瓦内垂直拉伸。
+            const double wy = (static_cast<double>(y) + (static_cast<double>(py) + 0.5) / kTile) * invTilesZ;
+            double rowLonUnused = 0.0;
+            MercatorProjection::worldToLonLat(0.0, wy, rowLonUnused, lat);
+        }
         const double fy = (originLatN - lat) * pixelsPerLat - 0.5;
         for (int px = 0; px < kTile; ++px) {
             const double lon = tLonMin + (px + 0.5) / kTile * tileLonSpan;

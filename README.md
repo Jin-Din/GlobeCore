@@ -25,7 +25,7 @@ OpenGL ES 2.0 绘制全部在 native 完成，并内联编译了 GDAL/OGR、PROJ
 - @Jin 三维地形 CesiumTerrainProvider 下沉 C++：quantized-mesh 视口调度/磁盘缓存/重试去重，Android/Harmony/Qt 统一生命周期事件
 - @Jin 地形相机自动跟随（`setTerrainProviderAutoFollow`，实验默认关）；C++ `flyToCamera` 平滑飞行（Harmony/Android 双门面）
 - @Jin 瓦片 LOD 诊断与运行时偏移（`tileZoomLevel` / `setTileLodOffset` / `setTileLodAlignDisplay`）与高密度屏 DPR 修正
-- @Jin 单图层瓦片 LOD 偏移 `setLayerZoomOffset(index, offset)`：逐层控制取瓦级别（2D/3D 同步、与全局偏移正交），默认 0 可回退（2026-11-11 合入）
+- @Jin 单图层选源偏置 `zoomOffset`（建层 options，仅 EPSG:4326/4490 生效，引擎内部名 geoSourceLevelBias_，钳 [-2,1]，默认 0）：天地图 c 注记传 -1 恢复字号且无 GPU 放大模糊；旧 Renderer 级 `serviceZoomOffset`/`setLayerZoomOffset` 已于 2026-11-13 移除（省流统一走全局 setTileLodOffset），详见改造记录 11.8
 - @Jin 3D Tiles(b3dm) 倾斜摄影加载渲染：tileset 解析/SSE 调度/换轴/纹理解码全链路，仅 b3dm 三角网，实验可回退（2026-11-11 合入主线）
 - @Jin 3D Tiles 图层级高度偏移 `setTileset3DHeightOffset(layerId, meters)`（仅作用于指定模型图层）；地形服务高层级瓦片 404 时自动父级回退 + 缺失负缓存
 - @Jin 快捷定位峰顶 POI 文字标注；SDK 能力查询结论文档 `docs/sdk-capability-queries.md`；Android/Harmony 双 API HTML 帮助文档 `docs/api/`
@@ -33,6 +33,8 @@ OpenGL ES 2.0 绘制全部在 native 完成，并内联编译了 GDAL/OGR、PROJ
 - @Jin 3D 射线投影平移（同分支，实验默认开、可回退）：`setRaycastPanEnabled`，逐帧屏幕射线求交替代 mPerPx 线性近似，修复带倾角低空“拖不动/发飘”；射线失败自动回退旧路径（真机同条件画面响应 16px→280px+）
 - @Jin 触摸单位口径勘误：OH_NativeXComponent 事件确认为物理像素 px（真机实测），修正 native 手势层误标 vp 的注释/内部命名，零逻辑改动
 - @Jin 图层初始化参数入参化（layer-init-options，实验可回退）：`addTileLayerWithLayerOptions(..., options)` 建层即传 `serviceZoomOffset`（options 另含 crs/tmsY/tileMatrixOffset），`addTileset3DWithOptions(url, { heightOffset })` 建层即带高度偏移；既有 setter 全保留、运行时覆盖初值，options 缺省/为 0 时旧行为完全不变
+
+- @Jin 4490 地理源选源偏置对外定名 `zoomOffset`（2026-11-13，实验可回退，内部成员 geoSourceLevelBias_）：仅 crs=EPSG:4326/4490 生效，重投影选源 s=clamp(z+zoomOffset)；天地图 c 注记传 -1 使字号与 3857 直连一致且无 GPU 放大模糊；同节实验封存 `geoVerticalCompensation` 垂直拉高补偿（默认 1.0 零行为变化，专项再议）；详见 docs/jin-modification-records.md 第十一节（11.8 为参数收口记录）
 
 **增强/改造**
 
@@ -52,8 +54,8 @@ OpenGL ES 2.0 绘制全部在 native 完成，并内联编译了 GDAL/OGR、PROJ
 **实验中与已知问题**
 
 - @Jin exp1e~exp1h 系列仍按实验提交管理，开关与回退方式见 `docs/jin-modification-records.md` 第五节
-- @Jin 天地图 4490 注记 cia_c 字偏小与轻微上下拉伸仍存在；早期 4490 重采样路径内的 serviceZoomOffset 实验已回退，通用单图层 API 现已独立提供（见新增能力），但级差只能整体缩放字号、不能消除 1.2 倍拉伸本身；推荐注记改用 cia_w 或客户端矢量文字
-- @Jin 未解决待办：陕西省级大面 3D 地形遮挡；4490 注记字小/拉伸的彻底方案；高斯泼溅 GLB 点云管线；heightOffset 步进节流防抖；政务版陕西底图（地址待核实）；Android JNI/Kotlin 移植 addTileLayerWithLayerOptions/addTileset3DWithOptions（含 3D Tiles 系列入口，C++ 核心已双端共用）
+- @Jin 天地图 4490 注记字小已由 `geoSourceLevelBias=-1` 解决（清晰、字号对齐 3857）；残余高纬 sec(φ)≈1.2 倍轻微垂直拉高为 c 切片像元扁率的服务固有特性，`geoVerticalCompensation` 补偿能力已实现但实验封存（默认 1.0），专项讨论后再启用；注意 serviceZoomOffset 负档会 GPU 放大模糊、不用于字号修复
+- @Jin 未解决待办：陕西省级大面 3D 地形遮挡；4490 高纬轻微拉高的补偿定稿（geoVerticalCompensation 封存中）；Android JNI 补 TileLayerOptions（zoomOffset/geoVerticalCompensation）；高斯泼溅 GLB 点云管线；heightOffset 步进节流防抖；政务版陕西底图（地址待核实）；Android JNI/Kotlin 移植 addTileLayerWithLayerOptions/addTileset3DWithOptions（含 3D Tiles 系列入口，C++ 核心已双端共用）
 - @Jin 原“全局 LOD 偏移改造为单图层参数”待办已于 2026-11-11 完成（`setLayerZoomOffset`，Harmony 全链路 + API 文档）
 - @Jin 3D Tiles(b3dm) 已随 `feature/3dtiles-b3dm` 合入主线（2026-11-11），仍按实验能力管理：纹理解码已通，PBR/i3dm/pnts/cmpt、要素拾取、磁盘缓存、高斯泼溅未支持，回退方式见 `docs/jin-modification-records.md` 与 `docs/design/3dtiles-b3dm-plan.md`
 

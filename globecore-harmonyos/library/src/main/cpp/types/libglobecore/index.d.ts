@@ -35,8 +35,8 @@ interface GlobeCore {
   nativeAddTileLayer(handle: number, cacheDir: string, urlTemplate: string, maxLevel: number, overlay: boolean): void;
   // @Jin EPSG:4326/4490 地理在线瓦片适配（实验）：crs 传 EPSG:4326/EPSG:4490 启用，tileMatrixOffset 天地图 c 传 1
   nativeAddTileLayerWithOptions(handle: number, cacheDir: string, urlTemplate: string, maxLevel: number, overlay: boolean, crs: string, tmsY: boolean, tileMatrixOffset: number): void;
-  // @Jin layer-init-options（实验/可回退）：options 对象形态，serviceZoomOffset 建层即生效，缺省 0 行为不变
-  nativeAddTileLayerWithLayerOptions(handle: number, cacheDir: string, urlTemplate: string, maxLevel: number, overlay: boolean, options: { crs?: string; tmsY?: boolean; tileMatrixOffset?: number; serviceZoomOffset?: number }): void;
+  // @Jin layer-init-options（实验/可回退）：options 对象形态，zoomOffset 仅 4326/4490 地理源选源生效，缺省 0 行为不变
+  nativeAddTileLayerWithLayerOptions(handle: number, cacheDir: string, urlTemplate: string, maxLevel: number, overlay: boolean, options: { crs?: string; tmsY?: boolean; tileMatrixOffset?: number; zoomOffset?: number; geoVerticalCompensation?: number }): void;
   nativeSetLayerVisible(handle: number, index: number, visible: boolean): void;
   nativeAddRasterLayer(handle: number, cacheDir: string, path: string): number;
   /// 移除瓦片图源图层（含栅格层，墓碑；index 为 addTileLayer/addRasterLayer 加入次序）
@@ -73,9 +73,6 @@ interface GlobeCore {
   nativeGetCameraZoomLevel(handle: number): number;
   /// @Jin 当前相机在指定图层上限下的目标瓦片 LOD（3D 四叉树仍可能按距离混入更粗瓦片）。
   nativeGetTileZoomLevel(handle: number, maxLevel: number): number;
-  /// @Jin 实验性瓦片 LOD 偏移：负数更粗，0 恢复标准细节。
-  /** @Jin 单图层瓦片 LOD 偏移（实验、可回退）：index 为 addTileLayer 加入次序，offset 钳制 [-3,2]，0 恢复标准；只影响该图层 */
-  nativeSetLayerZoomOffset(handle: number, index: number, offset: number): void;
   nativeSetTileLodOffset(handle: number, offset: number): void;
   /// @Jin 实验模式：目标瓦片 LOD 与相机地图显示级别保持一致。
   nativeSetTileLodAlignDisplay(handle: number, align: boolean): void;

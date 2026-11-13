@@ -249,17 +249,16 @@ void GlobeEngine::addTileLayer(const std::string &cacheDir, const std::string &u
         // @Jin 4326/4490 地理在线瓦片适配（实验、可回退）：原始地理瓦缓存目录独立（-geo-raw），
         // 0 基服务上限＝图源 maxLevel 减去 TILEMATRIX 偏移（天地图 c：18 - 1 = 17，根 2×1 对应 TILEMATRIX=1）。
         const int maxGeoLevel0 = std::max(0, maxLevel - std::max(0, options.tileMatrixOffset));
+        // @Jin 透传地理源选源层级偏置（默认 0，行为同 v2；-1 用于注记层恢复与 3857 一致的字号）。
         layer->loader->setGeographicSource(cacheDir + "-geo-raw", urlTemplate,
-                                           maxGeoLevel0, options.tmsY, options.tileMatrixOffset);
+                                           maxGeoLevel0, options.tmsY, options.tileMatrixOffset,
+                                           options.zoomOffset,
+                                           options.geoVerticalCompensation); // @Jin zoomOffset（内部 geoSourceLevelBias_）与垂直拉高补偿透传
     }
-    // @Jin layer-init-options：建层即写入 serviceZoomOffset 初值（与 setLayerZoomOffset 同口径钳 [-3,2]），
-    // 首帧选瓦即带偏移；默认 0 时与旧行为完全一致，运行时 setLayerZoomOffset 可覆盖。
-    // @Jin 修复：std::move 入 layers_ 后 unique_ptr 已置空，偏移值必须先落本地变量，日志不得再解引用 layer。
-    const int appliedZoomOffset = std::max(-3, std::min(2, options.serviceZoomOffset));
-    layer->serviceZoomOffset = appliedZoomOffset;
     layers_.push_back(std::move(layer));
+    // @Jin zoomOffset 仅地理切片重投影选源使用（仅 geographic 分支透传给 TileLoader），Renderer 选瓦不再有单图层偏移。
     LOGI("GlobeEngine addTileLayer maxLevel=%d overlay=%d crs=%s geo=%d zoomOffset=%d", maxLevel, overlay ? 1 : 0,
-         options.crs.empty() ? "EPSG:3857" : options.crs.c_str(), geographic ? 1 : 0, appliedZoomOffset);
+         options.crs.empty() ? "EPSG:3857" : options.crs.c_str(), geographic ? 1 : 0, options.zoomOffset);
 }
 
 void GlobeEngine::setLayerVisible(int index, bool visible) {
@@ -267,18 +266,6 @@ void GlobeEngine::setLayerVisible(int index, bool visible) {
     layers_[static_cast<size_t>(index)]->visible = visible;
     LOGI("GlobeEngine setLayerVisible index=%d visible=%d", index, visible ? 1 : 0);
     // 只改了可见性标志（不涉及 GL），省电模式下主动请求一帧使变更立即生效。
-    if (renderCallback_) renderCallback_();
-}
-
-void GlobeEngine::setLayerZoomOffset(int index, int offset) {
-    // @Jin 单图层 LOD（实验、可回退）：与全局 setTileLodOffset 同口径钳制 [-3,2]，只写本层标志，
-    // Renderer 2D/3D 取瓦时在全局 LOD 结果上叠加本层偏移；默认 0，行为与改造前完全一致。
-    std::lock_guard<std::mutex> lock(layersMtx_);
-    if (index < 0 || static_cast<size_t>(index) >= layers_.size()) return;
-    const int clamped = std::max(-3, std::min(2, offset));
-    layers_[static_cast<size_t>(index)]->serviceZoomOffset = clamped;
-    LOGI("GlobeEngine setLayerZoomOffset index=%d offset=%d", index, clamped);
-    // 取瓦级别变化需要立即重选可见叶并重排请求，主动请求一帧（与 setLayerVisible 同口径）。
     if (renderCallback_) renderCallback_();
 }
 

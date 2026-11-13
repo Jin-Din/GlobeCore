@@ -10,6 +10,7 @@
 | 2026-10-29 | Overlay / 矢量文字标注 | 支持 `labels` 数据通路；Harmony 宿主应显式 `setFontPath()` 加载中文字体 | 已验证 native 几何含 `labels=1`，无字体时不绘制文字 |
 | 2026-10-29 | 绕点旋转 | 支持绕当前相机目标点（屏幕中心）旋转；尚无任意经纬度/屏幕焦点旋转 API | 双指旋转可用；需要扩展 `rotateHeading(delta, focusX, focusY, lon, lat)` |
 | 2026-11-10 | 3D Tiles / 倾斜摄影模型加载 | 实验分支 feature/3dtiles-b3dm 已打通 C++ 内核 P0-P2（b3dm 解码、SSE 调度、Renderer 纯色渲染），对外 API 尚未导出 | LRU/纹理/PBR/平台 API 待 P3/P4 |
+| 2026-11-13 | 矢量要素点击命中（map.click / pick） | **支持命中检测，C++ 层实现**；但命中后仅返回 layerIndex+fid，GeoJSON 全属性回取在 LITE 包不可用 | 属性内存化回取列入待办 |
 
 ## 2026-10-29：地形夸张 / 垂直缩放参数
 
@@ -100,3 +101,18 @@ fun rotateAroundPosition(longitude: Double, latitude: Double, altitude: Double?,
   - @Jin Provider 调度加固：外部 tileset 改为工作清单递归展开，支持 root→external→external→b3dm 任意深度（实测数据深度 2：65 个 JSON、92 个 b3dm 全部可达）；修复 `lock_guard` 内手动 unlock 的未定义行为；接入 `Camera3D` double 精度视锥 6 平面做保守裁剪；单帧最多处理 8 个 b3dm 限制冲击。
   - @Jin 验证：鸿蒙 NDK clang 全量语法核查通过；`.cxx` ninja 完整编译链接产出 `libglobecore.so`（14/14 目标零 error）；Node 对真实服务模拟递归确认全部叶子 b3dm URL 可解析下载。
   - @Jin 当前边界：仅纯色/Lambert，无纹理与 PBR；无磁盘缓存、LRU 卸载、失败重试、ADD refine；无 NAPI/JNI/ArkTS/Demo 入口；移除 `tileset3d/` 源清单与 `GlobeEngine/Renderer` 接线即可整体回退。
+
+## 2026-11-13：矢量要素点击命中查询（GeoJSON 等 map.click 能力）
+
+- @Jin 查询问题：SDK 是否支持地图数据要素（如 GeoJSON 图层）的点击命中查询（map.click）；能力在哪一层实现，C++ 还是 ArkTS。
+- @Jin 总结论：**点击命中检测能力已具备，且核心实现在 C++ 层，ArkTS/Android 仅为门面透传**；当前 demo 已在用（单击 Toast 显示经纬度 + 命中 fid）。真正的缺口是「命中后取 GeoJSON properties 属性表」在 Harmony LITE 包不可用。
+- @Jin 分层证据：
+  1. **C++ core（能力本体，globecore/src/main/cpp）**：`GlobeEngine::pickVector(sx,sy,outLayerIndex,outFid)` 2D 走 GPU PickID 离屏 pass（RGBA8 FBO + pickIdVbo，UI 线程发请求→GL 线程 drawFrame 回读，100ms 超时自动回退 `pickVectorCpu`）；`pickVector3D` 为屏幕空间投影判据，对 pickPrims（RTC 世界坐标，与贴地渲染同口径）逐图元点/线/面容差判定。两阶段优先级：先动态叠加层后文件矢量层，层内逆序（后加优先）、点线优先于面；`setOverlayNoPick` 可让高亮瞬态层退出拾取竞争；隐藏/级别不足/墓碑层与绘制同进同退不可拾取。
+  2. **命中后配套（C++）**：`featureGeometry(layerIndex,fid)` 回取经纬度几何（供画选中高亮）、`featureRenderColor` 回取实际渲染色；`screenToGeo` 回算点击点经纬度。
+  3. **Harmony 通路**：native 手势桥 `XComponentBridge` UP 分支（位移 < touchSlop）→ `postPendingTap` → 渲染线程 TSFN → NAPI `nativeSetTapCallback` → ArkTS `NativeMapView.setOnTapListener`；NAPI 另导出 `nativePickVector/nativeFeatureGeometry/nativeSetOverlayNoPick`，ArkTS 门面 `pickVector()` 返回 `PickResult{layerIndex,fid}`。
+  4. **Android 通路**：JNI 导出 pickVector/featureGeometry/**featureRenderColor**（Harmony NAPI 目前缺 featureRenderColor 导出，平台不一致小缺口）。
+  5. **demo 现状**：`Index.ets onMapTap` 已串联 screenToGeo + pickVector，Toast 输出「经纬度 + 命中要素 fid」。
+- @Jin 关键缺口（属性表）：
+  - 拾取结果只有 layerIndex + fid，**没有按 (layerIndex,fid) 回取 GeoJSON feature.properties 的公开 API**；解析期 `VectorFeatureData` 只保留单个 labelField 文本，全量 properties 被丢弃（GDAL 通路与 LITE `lite_geojson_reader.cpp` 同）。
+  - 既有 `NativeVector.getFeatureAttributes(path, featureId)` 是**按源文件路径重新打开 GDAL/OGR 读取**，不接受 layerIndex；full 构建对本地文件可用，**LITE 构建在 `lite_gdal_stubs.cpp` 为桩（恒返回空串/false）**；在线 GeoJSON 虽落了缓存文件，但 LITE 无 OGR 无法二次解析，overlay 内存层则根本无源文件。
+- @Jin 改造方向（已列入 jin-modification-records.md 第五节待办）：解析期把 properties 内存化（fid→JSON 字符串，配字段白名单/层数与体积上限），新增 C++ `featureAttributes(layerIndex,fid)` 并双端导出，替代按路径二次读文件的旧模式。

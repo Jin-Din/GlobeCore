@@ -23,8 +23,6 @@ import { MapGestures, GestureSink } from './MapGestures';
 // @Jin layer-init-options：初始化选项接口下沉至 NativeLib 定义，此处再导出以保持 HAR 根出口不变。
 export type { TileLayerInitOptions, Tileset3DInitOptions };
 
-// @Jin layer-init-options：初始化选项接口下沉至 NativeLib 定义，此处再导出以保持 HAR 根出口不变。
-export type { TileLayerInitOptions, Tileset3DInitOptions };
 
 /** 组件内区域/偏移坐标（onAreaChange 的 Area.position 取值，与地理 Position 无关） */
 interface Position2D {
@@ -255,8 +253,9 @@ export struct NativeMapView {
 
   /**
    * @Jin layer-init-options（实验/可回退）：options 对象形态建层，字段全可选。
-   * serviceZoomOffset 在建层时写入（首帧选瓦即带偏移），运行时仍可用 setLayerZoomOffset 覆盖；
-   * 不传 serviceZoomOffset 或传 0 与旧 addTileLayer/addTileLayerWithOptions 行为完全一致。
+   * @Jin zoomOffset 仅 crs=EPSG:4326/4490 地理源生效（重投影选源层级 s=clamp(z+zoomOffset)，引擎钳 [-2,1]，默认 0）；
+   * 天地图 c 注记传 -1 可让字号与 3857 直连一致且无 GPU 放大模糊；墨卡托图层传入静默忽略；仅建层生效，修改需重建图层。
+   * @Jin geoVerticalCompensation 地理源垂直拉高补偿 [0,1]（实验封存，默认 1.0 各向同性；0.5 拉高减半；0 字形方正），仅配合 zoomOffset=-1 使用。
    */
   addTileLayerWithLayerOptions(cacheDir: string, urlTemplate: string, maxLevel: number, overlay: boolean,
     options: TileLayerInitOptions): void {
@@ -505,16 +504,6 @@ export struct NativeMapView {
   /** @Jin 当前相机在指定图源上限下的目标瓦片 LOD；用于诊断“界面级别”和“实际瓦片级别”的差异。 */
   tileZoomLevel(maxLevel: number = 18): number {
     return NativeLib.nativeGetTileZoomLevel(this.nativeHandle, maxLevel);
-  }
-
-  /**
-   * @Jin 单图层瓦片 LOD 偏移（实验、可回退）：只改变 index 指定图层的取瓦级别，
-   * 不影响相机与其他图层；offset 负数请求更粗父瓦（如天地图 4490 注记字号偏小），
-   * 钳制 [-3,2]，0 恢复该层标准行为。index 为 addTileLayer/addTileLayerWithOptions 的加入次序（0 起）。
-   */
-  setLayerZoomOffset(index: number, offset: number): void {
-    NativeLib.nativeSetLayerZoomOffset(this.nativeHandle, index, offset);
-    this.requestRender();
   }
 
   /** @Jin 实验性瓦片 LOD 偏移：负数更粗、0 恢复标准细节；调用后立即请求重绘。 */

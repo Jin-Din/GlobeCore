@@ -78,8 +78,11 @@ public:
     /// @Jin 然后复用与普通图层一致的结果缓存/去重/解码上传链路；引擎选瓦四叉树与 3D 几何不变。
     /// @Jin rawCacheDir 必须与结果缓存目录不同；maxGeoLevel0Based 为 0 基（根 2×1 记 0）上限；
     /// @Jin tmsY 为服务行序；tileMatrixOffset 为 TILEMATRIX 相对 0 基层级的偏移（天地图 c 传 1）。
+    // @Jin geoSourceLevelBias：地理源选源层级偏置（见 TileLayerOptions 说明），默认 0 行为不变。
+    // @Jin geoVerticalCompensation：垂直拉高补偿系数 [0,1]，默认 1.0 零行为变化。
     void setGeographicSource(std::string rawCacheDir, std::string urlTemplate,
-                             int maxGeoLevel0Based, bool tmsY, int tileMatrixOffset);
+                             int maxGeoLevel0Based, bool tmsY, int tileMatrixOffset, int geoSourceLevelBias = 0,
+                             double geoVerticalCompensation = 1.0);
     bool isGeographicSource() const;
 
     /// 设置栅格数据源路径（本地 tif/img）。非空时，磁盘缓存未命中的瓦片由 [RasterRenderer] 按 (z,x,y)
@@ -165,6 +168,8 @@ private:
     int geoMaxLevel0Based_ = 0;
     bool geoTmsY_ = false;
     int geoTileMatrixOffset_ = 0;
+    int geoSourceLevelBias_ = 0; // @Jin 地理源选源层级偏置（s=z+bias），默认 0。
+    double geoVerticalComp_ = 1.0; // @Jin 垂直拉高补偿 [0,1]，1.0=各向同性。
     TileCache geoRawCache_; // @Jin 原始地理服务瓦独立缓存（与结果缓存隔离）。
     std::string rasterPath_;
     // 栅格四至（minLon,minLat,maxLon,maxLat）及有效性：供 request() 交集预判（urlMtx_ 保护）

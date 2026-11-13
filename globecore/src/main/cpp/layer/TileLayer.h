@@ -32,9 +32,17 @@ struct TileLayerOptions {
     std::string crs;               ///< @Jin ""/"EPSG:3857"=墨卡托；"EPSG:4326"/"EPSG:4490"=地理切片。
     bool tmsY = false;             ///< @Jin 服务行序：true=TMS（y=0 在南），false=XYZ（y=0 在北）。
     int tileMatrixOffset = 0;      ///< @Jin 服务 TILEMATRIX 相对 0 基层级的偏移（天地图 c 根 2×1 记 1，传 1）。
-    // @Jin 图层初始化 LOD 偏移（layer-init-options，实验/可回退）：建层即写入 serviceZoomOffset，
-    // 与建后 setLayerZoomOffset 同口径钳制 [-3,2]，默认 0 行为不变；setter 保留用于运行时调节并覆盖此初值。
-    int serviceZoomOffset = 0;
+    // @Jin 单图层地理源选源层级偏置 zoomOffset（2026-11-13 对外字段由 geoSourceLevelBias 更名；引擎内部成员仍沿用 geoSourceLevelBias_）：
+    // @Jin 仅 crs=EPSG:4326/4490 地理切片生效，TileLoader 重投影选源 s=clamp(z+zoomOffset,0,max)，引擎内钳 [-2,1]。
+    // @Jin 默认 0＝各向同性重采样（v2，注记字号约为 3857 的一半）；-1＝源瓦 1:1 水平映射，注记字号与墨卡托直连
+    // @Jin 一致且无 GPU 放大模糊，代价是高纬垂直方向 1/cos(纬度) 轻微拉高（天地图 c 服务像元扁率的固有特性）。
+    // @Jin 墨卡托直连图层（crs 空/EPSG:3857）不读此字段，传入静默忽略；仅建层 options 生效，运行时修改需重建图层。
+    int zoomOffset = 0;
+    // @Jin 地理源垂直拉高补偿（仅 geoSourceLevelBias<0 时有视觉意义）：1.0=各向同性严格边界（默认，零行为变化）；
+    // 0.5=拉高减半；0=源像素方形映射（字形方正）。原理：c 服务像元垂直地面跨度为水平 1/cos(纬度)，
+    // 严格瓦边界内无法同时保持水平 1:1 与零拉高，系数<1 时纵向多采样一小条源瓦（中心锚定），
+    // 水平与瓦片几何不变，代价是水平接缝附近 overlay 注记理论上可能轻微重影，仅建议注记层使用。
+    double geoVerticalCompensation = 1.0;
 };
 
 struct TileLayer {
@@ -61,11 +69,6 @@ struct TileLayer {
     /// 纹理待回收标志：置 [removed] 时由调用线程置位，GL 线程在下一帧 exchange 消费后释放本层全部瓦片纹理
     /// （GL 资源只可在 GL 线程删除）。回收后该层转入闲置：其 [loader] 排队项已清空、就绪字节已丢弃。
     std::atomic<bool> discardTextures{false};
-
-    /// @Jin 单图层服务级瓦片缩放偏移（单图层 LOD 改造，实验、可回退）：在 Navigator 全局 LOD 结果之上
-    /// 对本层请求/绘制的瓦片 z 再做整数偏移，负值取更粗父瓦（如天地图 4490 注记字号偏小场景），
-    /// 引擎内钳制到 [-3,2]，默认 0 与原行为完全一致；只影响本层，不改相机、不影响其他图层。
-    int serviceZoomOffset = 0;
 
     // @Jin: 在线影像/注记两层各 6 个 worker，在天地图限流风险和首屏批量补齐速度之间取平衡。
     TileLayer(std::string cacheDir, std::string urlTemplate, int maxLevel_, bool overlay_, int numThreads = 6)
