@@ -73,6 +73,21 @@ public:
     /// @Jin 每帧由 Renderer 注入当前目标点地形高与附近安全高，防止 3D 眼点穿入山体。
     void setTerrainSurfaceHeights(double targetHeightM, double safetyHeightM);
 
+    // @Jin T9（实验性/可回退）：3D 缩放/拾取锚点的地形表面求交。Renderer 在 GL 线程按视口 footprint
+    // 采样 N×N 地形高度网格并经本接口线程安全发布；手势线程在 screenToGeo3DUnlocked 内做射线-地形
+    // 迭代求交，修复带倾角双指缩放焦点漂移（旧逻辑射线只交椭球海拔 0，山区锚点落到山后）。
+    // 回退：setTerrainAnchorEnabled(false) 即恢复纯椭球求交，零行为差异。
+    struct TerrainAnchorGrid {
+        static constexpr int N = 9;
+        bool valid = false;
+        double lon0 = 0.0, lon1 = 0.0, lat0 = 0.0, lat1 = 0.0;
+        std::array<double, N * N> heights{}; // 行优先：heights[iy*N+ix]，单位米（椭球高）
+        uint64_t revision = 0;
+    };
+    void setTerrainAnchorGrid(const TerrainAnchorGrid &grid);
+    void setTerrainAnchorEnabled(bool enabled);
+    bool terrainAnchorEnabled() const;
+
     /// 设置相机：以 [Camera] 值对象整体写入（对应 参考实现 Camera）。除中心/高度外，
     /// 一并记录 heading/tilt/roll/altitudeMode（当前 2D 渲染暂未消费、仅建模留存），并用其 fieldOfView
     /// 参与 altitude↔zoom 换算。加锁，可任意线程调用。
@@ -205,6 +220,10 @@ private:
     /// 3D 相机快照/射线反算的免锁版（camera3D/screenToGeo3D 的实体，供 zoomBy 等持锁路径复用）
     Camera3D camera3DUnlocked() const;
     bool screenToGeo3DUnlocked(double sxPx, double syPx, double &outLonDeg, double &outLatDeg) const;
+    /// @Jin T2e（实验/可回退）：屏幕点射线与命中点地表法线的入射角（度，0=垂直入射，90=掠射）。
+    /// 近地大倾角下锚点射线接近椭球切线，交点对像素位移极敏感导致平移抖动；超过阈值时平移自动回退线性路径。
+    /// 回退：beginPanGesture/panByPixels 中删除对本函数的调用即恢复“只要求交成功就走射线”的旧 P2 行为。
+    bool rayGroundIncidenceDegUnlocked(double sxPx, double syPx, double &outIncidenceDeg) const;
     /// 由归一化世界坐标设置中心经纬度
     void setCenterWorld(double wx, double wy);
     /// 将相机高度钳制到 zoom∈[MIN_LEVEL,MAX_LEVEL] 对应的高度区间（视口未知时跳过）
@@ -246,12 +265,22 @@ private:
     double minCameraAltitudeMeters_ = 38.2;
     double terrainClearanceM_ = 150.0;
     // @Jin P2（实验性/可回退）：射线平移会话状态。panRayValid_=false 时 panByPixels 走旧线性路径。
-    bool raycastPanEnabled_ = true;
+    // @Jin T2e 真机结论：射线与椭球求交在近地/带倾角视角对像素位移过敏感，单指平移抖动（65°/30° 阈值均复现）；
+    // 线性 mPerPx 路径在开/关地形下均稳定。默认改为关闭，setRaycastPanEnabled(true) 仍可显式启用（启用时入射角混合策略仍生效）。
+    // 回退：本行改回 true 即恢复 P2 初始默认行为。
+    bool raycastPanEnabled_ = false;
     bool panRayValid_ = false;
     double panLastScreenX_ = 0.0;
     double panLastScreenY_ = 0.0;
     double panLastLon_ = 0.0;
     double panLastLat_ = 0.0;
+    // @Jin T9：地形锚点网格快照（独立互斥量，手势线程只读拷贝，不与导航主锁嵌套）。
+    mutable std::mutex anchorMtx_;
+    TerrainAnchorGrid anchorGrid_;
+    bool terrainAnchorEnabled_ = true; // @Jin 默认开启；false 时 screenToGeo3DUnlocked 回退纯椭球求交。
+    /// @Jin T9：网格内双线性插值取地形高；网格无效或点在 footprint 外返回 0（= 旧椭球行为）。
+    double sampleAnchorHeightMeters(double lonDeg, double latDeg) const;
+
     // @Jin 手势静默窗口：最后一次 pan/zoom/rotate/tilt 后短时间内仍视为交互中，避免抬手瞬间预算突增造成跳帧。
     std::chrono::steady_clock::time_point lastInteractionTime_{};
     bool hasInteractionTime_ = false;

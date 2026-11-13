@@ -190,6 +190,9 @@ void XComponentBridge::dispatchTouchEventCB(OH_NativeXComponent *component, void
 
 namespace {
 constexpr float kTouchSlop = 8.0f;        // @Jin px（物理像素，非 vp）：越过此位移才判定拖动；2026-11 真机实测勘误
+// @Jin T9-fix2（实验/可回退）：捏合降单指 grace 期参数。grace 帧内单步超过阈值视为残余滑移直接丢弃。
+constexpr int kPostPinchGraceFrames = 6;          // 约 100ms（60Hz），覆盖抬指后的残余滑移期
+constexpr float kPostPinchGraceStepPx = 120.0f;   // 物理 px；正常有意拖动单帧通常 <80px，fling 只在全抬后启动不受此限
 // 长按判定时长：单指按下保持（未越过 touchSlop 拖动、未抬离）超此时长即确认为长按。
 constexpr int64_t kLongPressTimeoutNs = 500LL * 1000 * 1000; // 500ms
 // 俯仰灵敏度直接采用 参考实现 口径：tiltDelta = 180° · Δcy / 视口高（见 handleTouch），不再用自定
@@ -197,6 +200,13 @@ constexpr int64_t kLongPressTimeoutNs = 500LL * 1000 * 1000; // 500ms
 // 旋转/俯仰解耦阈值（度/事件）：双指连线角逐帧增量绝对值超此值判为「旋转手势」，本帧不据质心 Y 调仰角
 // （对齐 参考实现：旋转仅改 heading、tilt 为独立手势；我们保留双指俯仰故需此阈值近似解耦）
 constexpr double kRotateSuppressTiltDeg = 0.8;
+// @Jin T1（实验/可回退）：捏合缩放与双指俯仰的主导判定阈值。
+// zoomMetric=双指距离相对变化；tiltMetric=质心纵向漂移/视口高（与 tiltDelta=180°·tiltMetric 同口径）。
+// 缩放强度达到俯仰强度 kZoomLeadRatio 倍且超过最小触发值时，本会话进入缩放主导、抑制 tilt；
+// 俯仰强度连续 kTiltReleaseStreak 帧达到缩放 2 倍才解除，避免手势边界来回抖动。回退：两常量置极端值可等价关闭。
+constexpr double kZoomLeadMinMetric = 0.002;   // 0.2% 指距变化才算有效缩放意图，过滤静止噪声
+constexpr double kZoomLeadRatio = 1.2;         // 缩放强度 / 俯仰强度 超过此值进入缩放主导
+constexpr int kTiltReleaseStreak = 3;          // 解除迟滞所需的俯仰连续占优帧数
 // @Jin 惯性滑动：抬指瞬时速度低于此不起惯性；高于上限钳住（防极限甩动飞出国）；单位 px/s（物理像素，2026-11 勘误，旧误标 vp/s）
 constexpr double kFlingMinPxPerSec = 60.0;  // @Jin 旧名 kFlingMinVpPerSec，单位勘误为 px/s
 constexpr double kFlingMaxPxPerSec = 12000.0; // @Jin 旧名 kFlingMaxVpPerSec，单位勘误为 px/s
@@ -215,6 +225,8 @@ void XComponentBridge::handleTouch(const OH_NativeXComponent_TouchEvent &ev) {
     if (engine_ == nullptr) return;
     const uint32_t n = ev.numPoints;
     if (n == 0) return;
+    const uint32_t prevN = gLastNumPoints_; // @Jin T9-fix2：上一事件手指数，用于识别双指→单指转换
+    gLastNumPoints_ = n;
     // @Jin 主触点：touchPoints[0]（x/y 为相对 XComponent 左上角的物理像素 px，与引擎视口/ panByPixels 同口径；2026-11 真机实测勘误，旧注释误标 vp）
     const float x0 = ev.touchPoints[0].x;
     const float y0 = ev.touchPoints[0].y;
@@ -226,6 +238,7 @@ void XComponentBridge::handleTouch(const OH_NativeXComponent_TouchEvent &ev) {
             gPinching_ = false;
             gHadMulti_ = false;
             gVelRefTsNs_ = 0;
+            gPostPinchGraceFrames_ = 0; // @Jin T9-fix2：新按下序列清 grace
             gLongPressFired_ = false; // 新按下序列复位长按标志
             if (host_) host_->cancelFling(); // 新按下接管相机：中止进行中的惯性滑动
             // @Jin P2（实验性/可回退）：DOWN 建立射线投影平移锚点；2D/开关关闭时 native 内部自动忽略。
@@ -239,6 +252,8 @@ void XComponentBridge::handleTouch(const OH_NativeXComponent_TouchEvent &ev) {
                 gLastPinchDist_ = std::hypot(ev.touchPoints[1].x - x0, ev.touchPoints[1].y - y0);
                 gLastPinchAngleDeg_ = pinchAngleDeg(x0, y0, ev.touchPoints[1].x, ev.touchPoints[1].y);
                 gLastCentroidY_ = (y0 + ev.touchPoints[1].y) * 0.5;
+                gPinchZoomLed_ = false; // @Jin T1：新捏合会话重置主导迟滞
+                gPinchTiltStreak_ = 0;
                 if (host_) host_->cancelPendingLongPress(); // 双指不是长按
             } else if (host_) {
                 // 单指按下装载长按候选：到时若未移动/未抬离则由渲染线程触发 handleLongPress
@@ -249,6 +264,7 @@ void XComponentBridge::handleTouch(const OH_NativeXComponent_TouchEvent &ev) {
         case OH_NATIVEXCOMPONENT_MOVE: {
             if (!gDown_) break;
             if (n >= 2) {
+                gPostPinchGraceFrames_ = 0; // @Jin T9-fix2：仍在双指状态，单指 grace 不生效
                 const double dist = std::hypot(ev.touchPoints[1].x - x0, ev.touchPoints[1].y - y0);
                 const double cx = (x0 + ev.touchPoints[1].x) * 0.5;
                 const double cy = (y0 + ev.touchPoints[1].y) * 0.5;
@@ -259,6 +275,8 @@ void XComponentBridge::handleTouch(const OH_NativeXComponent_TouchEvent &ev) {
                     gLastPinchDist_ = dist;
                     gLastPinchAngleDeg_ = pinchAngleDeg(x0, y0, ev.touchPoints[1].x, ev.touchPoints[1].y);
                     gLastCentroidY_ = cy;
+                    gPinchZoomLed_ = false; // @Jin T1：中途补指重建会话，重置主导迟滞
+                    gPinchTiltStreak_ = 0;
                     if (host_) host_->cancelPendingLongPress(); // 进入双指，取消长按候选
                     break;
                 }
@@ -285,7 +303,23 @@ void XComponentBridge::handleTouch(const OH_NativeXComponent_TouchEvent &ev) {
                     // （|Δ角|≥阈值）则抑制仰角（对齐 参考实现 旋转不改 tilt），仅更新基准免旋转结束瞬间质心跳变误触发大仰角。
                     const double vh = static_cast<double>(engine_->viewportHeight());
                     const double tiltDelta = (vh > 0.0) ? -(cy - gLastCentroidY_) * 180.0 / vh : 0.0;
-                    if (std::fabs(deltaDeg) < kRotateSuppressTiltDeg && tiltDelta != 0) {
+                    // @Jin T1：缩放/俯仰主导判定，修复纯捏合放大时质心漂移把视角缓慢“扳正”的问题。
+                    if (vh > 0.0 && gLastPinchDist_ > 0.0) {
+                        const double zoomMetric = std::fabs(dist - gLastPinchDist_) / gLastPinchDist_;
+                        const double tiltMetric = std::fabs(cy - gLastCentroidY_) / vh;
+                        if (!gPinchZoomLed_) {
+                            if (zoomMetric >= kZoomLeadMinMetric && zoomMetric > kZoomLeadRatio * tiltMetric) {
+                                gPinchZoomLed_ = true;   // 进入缩放主导：本会话后续帧抑制 tilt
+                                gPinchTiltStreak_ = 0;
+                            }
+                        } else if (tiltMetric > 2.0 * zoomMetric) {
+                            if (++gPinchTiltStreak_ >= kTiltReleaseStreak) gPinchZoomLed_ = false; // 持续俯仰才解除
+                        } else {
+                            gPinchTiltStreak_ = 0;
+                        }
+                    }
+                    // @Jin T1：旋转抑制保持原口径；缩放主导会话内再抑制仰角，zoomBy 上面已照常执行不受影响。
+                    if (std::fabs(deltaDeg) < kRotateSuppressTiltDeg && tiltDelta != 0 && !gPinchZoomLed_) {
                         engine_->rotateTilt(tiltDelta);
                         requestRender();
                     }
@@ -294,6 +328,16 @@ void XComponentBridge::handleTouch(const OH_NativeXComponent_TouchEvent &ev) {
                 break;
             }
             // 单指平移
+            // @Jin T9-fix2：双指→单指转换的首个 MOVE（部分机型 UP 晚于 MOVE，prevN 仍为 2）。
+            // 此时 gLastX_/gLastY_ 停在捏合前的陈旧位置，直接算增量会产生横跨整个捏合过程的大平移
+            // （真机手势时间线实测：zoom 后 1~11ms 出现 40~123px 孤立 pan，视野向手指漂移方向窜动）。
+            // 处理：原地重建基准、本帧不平移，并启动 grace 严阈值窗口。
+            if (prevN >= 2) {
+                gLastX_ = x0;
+                gLastY_ = y0;
+                gPostPinchGraceFrames_ = kPostPinchGraceFrames;
+                break;
+            }
             if (!gDragging_) {
                 if (std::fabs(x0 - gDownX_) + std::fabs(y0 - gDownY_) < kTouchSlop) break;
                 gDragging_ = true;
@@ -303,6 +347,13 @@ void XComponentBridge::handleTouch(const OH_NativeXComponent_TouchEvent &ev) {
             const double dy = y0 - gLastY_;
             gLastX_ = x0;
             gLastY_ = y0;
+            // @Jin T9-fix2：grace 期内拦截残余滑移（基准已钉到当前点，下一帧恢复正常）。
+            if (gPostPinchGraceFrames_ > 0) {
+                gPostPinchGraceFrames_--;
+                if (std::fabs(dx) > kPostPinchGraceStepPx || std::fabs(dy) > kPostPinchGraceStepPx) {
+                    break;
+                }
+            }
             if (dx != 0 || dy != 0) {
                 engine_->panByPixels(dx, dy);
                 requestRender();
@@ -363,6 +414,11 @@ void XComponentBridge::handleTouch(const OH_NativeXComponent_TouchEvent &ev) {
                 gPinching_ = false;
             } else if (n == 1) {
                 gPinching_ = false; // 从双指降为单指
+                // @Jin T9-fix2：以剩余手指（touchPoints[0]）当前位置重建平移基准并启动 grace，
+                // 避免后续首帧 MOVE 用捏合前陈旧坐标算出大跳。注意 ev.x/ev.y 是抬起的那根手指，不能用。
+                gLastX_ = ev.touchPoints[0].x;
+                gLastY_ = ev.touchPoints[0].y;
+                gPostPinchGraceFrames_ = kPostPinchGraceFrames;
             }
             break;
         }

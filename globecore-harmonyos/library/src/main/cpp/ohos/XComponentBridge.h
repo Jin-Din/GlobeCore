@@ -97,9 +97,19 @@ private:
     float gLastY_ = 0;        // 上一帧主触点 y
     float gDownX_ = 0;        // 本次按下起点（touchSlop 判定）
     float gDownY_ = 0;        // 本次按下起点
+    // @Jin T9-fix2（实验/可回退）：真机 SURFACE 触摸走本 native 桥（MapGestures.ets 仅 ArkTS 兜底）。
+    // 捏合降单指后 gLastX_/gLastY_ 仍停在捏合前位置，首帧单指 MOVE 会算出横跨整个捏合过程的大平移
+    // （真机日志：40~123px 孤立 pan，即“第 N 下收缩视野右下窜”）。以下两成员用于转换检测与 grace 严阈值。
+    // 回退：删除 gLastNumPoints_/gPostPinchGraceFrames_ 及 cpp 中相关判断即恢复旧行为。
+    uint32_t gLastNumPoints_ = 0;      // 上一触摸事件手指数（MOVE 中识别双指→单指转换）
+    int gPostPinchGraceFrames_ = 0;    // 捏合结束后单指平移严阈值剩余帧数
     double gLastPinchDist_ = 0;   // 双指上一帧距离（捏合缩放增量基准）
     double gLastPinchAngleDeg_ = 0; // 双指上一帧连线角（旋转增量基准）
     double gLastCentroidY_ = 0;   // 双指上一帧质心 Y（俯仰增量基准）
+    // @Jin T1（实验/可回退）：捏合会话缩放主导迟滞状态，修复纯缩放时质心 Y 漂移被误翻译成 tilt 导致视角回正。
+    // 回退方式：把 cpp 中 gPinchZoomLed_ 的置位逻辑短路（恒 false）即恢复“每帧质心 Y 都驱动 rotateTilt”的旧行为。
+    bool gPinchZoomLed_ = false;     // 本捏合会话是否已判定为缩放主导（主导期间抑制 rotateTilt）
+    int gPinchTiltStreak_ = 0;       // 俯仰意图连续占优帧数，达阈值才解除缩放主导，防边界抖动
     // 惯性滑动速度估计：保留约 80ms 前的参考触点，UP 时据 (当前位置-参考)/Δt 求初速
     float gVelRefX_ = 0;
     float gVelRefY_ = 0;

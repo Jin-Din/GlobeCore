@@ -301,7 +301,7 @@ public:
     /// 设置地形安全净空（米，钳 0~10000），山区调小后低空缩放不再被地形安全壳强制抬升。
     void setTerrainClearanceMeters(double meters);
 
-    // @Jin P2（实验性/可回退）：3D 射线投影平移会话，透传 Navigator；默认开启，setRaycastPanEnabled(false) 回退线性近似。
+    // @Jin P2（实验性/可回退）：3D 射线投影平移会话，透传 Navigator；T2e 起默认关闭（真机抖动结论），setRaycastPanEnabled(true) 显式启用。
     void beginPanGesture(double sxPx, double syPx);
     void endPanGesture();
     void setRaycastPanEnabled(bool enabled);

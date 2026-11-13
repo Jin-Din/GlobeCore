@@ -16,6 +16,10 @@ constexpr double kZoomDenomFactor = 512.0;
 // （log2(赤道周长/38.2)≈20，与 app MercatorZoom.MIN_CAMERA_ALTITUDE 同源），
 // 见 clampAltitude 注释
 constexpr double kMinCameraAltitudeMeters = 38.2; // @Jin P1 起仅作默认值出处，运行时下限改由成员 minCameraAltitudeMeters_ 控制
+// @Jin T2e（实验/可回退）：射线平移入射角阈值（度）。真机对照实验确认 P2 射线平移在近地倾斜视角是单指
+// 平移抖动的主因（强制回退线性后抖动消失）。入射角=射线与命中点地表法线夹角，超过 30° 视为掠射、自动回退
+// 线性 mPerPx 路径；近垂直视角仍走射线，保留 P2 在透视近景的方向精度。回退：删除阈值判断即恢复旧 P2 全射线行为。
+constexpr double kRaycastPanMaxIncidenceDeg = 30.0; // @Jin T2e：65° 真机仍抖，收紧到 30°，带倾角浏览基本走线性路径
 
 inline double tanHalfFov(double fovDeg) { return std::tan(fovDeg * 0.5 * kPi / 180.0); }
 } // namespace
@@ -58,6 +62,41 @@ void Navigator::setTerrainSurfaceHeights(double targetHeightM, double safetyHeig
                                      safetyHeightM > 0.0 ? safetyHeightM : 0.0);
 }
 
+// @Jin T9（实验性/可回退）：地形锚点网格发布与查询实现。
+void Navigator::setTerrainAnchorGrid(const TerrainAnchorGrid &grid) {
+    std::lock_guard<std::mutex> lk(anchorMtx_);
+    anchorGrid_ = grid; // 小结构体（81 double + 边界），短锁拷贝即可，手势线程无长等待。
+}
+
+void Navigator::setTerrainAnchorEnabled(bool enabled) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    terrainAnchorEnabled_ = enabled;
+}
+
+bool Navigator::terrainAnchorEnabled() const {
+    std::lock_guard<std::mutex> lk(mtx_);
+    return terrainAnchorEnabled_;
+}
+
+double Navigator::sampleAnchorHeightMeters(double lonDeg, double latDeg) const {
+    std::lock_guard<std::mutex> lk(anchorMtx_);
+    const TerrainAnchorGrid &g = anchorGrid_;
+    if (!g.valid || lonDeg < g.lon0 || lonDeg > g.lon1 || latDeg < g.lat0 || latDeg > g.lat1) {
+        return 0.0; // 网格外/无地形：与旧椭球口径一致。
+    }
+    const double fx = (lonDeg - g.lon0) / (g.lon1 - g.lon0) * (TerrainAnchorGrid::N - 1);
+    const double fy = (latDeg - g.lat0) / (g.lat1 - g.lat0) * (TerrainAnchorGrid::N - 1);
+    int ix = static_cast<int>(fx), iy = static_cast<int>(fy);
+    if (ix < 0) ix = 0;
+    if (iy < 0) iy = 0;
+    if (ix > TerrainAnchorGrid::N - 2) ix = TerrainAnchorGrid::N - 2;
+    if (iy > TerrainAnchorGrid::N - 2) iy = TerrainAnchorGrid::N - 2;
+    const double tx = fx - ix, ty = fy - iy;
+    const auto H = [&](int x, int y) { return g.heights[y * TerrainAnchorGrid::N + x]; };
+    const double h00 = H(ix, iy), h10 = H(ix + 1, iy), h01 = H(ix, iy + 1), h11 = H(ix + 1, iy + 1);
+    return (h00 * (1.0 - tx) + h10 * tx) * (1.0 - ty) + (h01 * (1.0 - tx) + h11 * tx) * ty;
+}
+
 void Navigator::setDetailControl(double detailControl) {
     std::lock_guard<std::mutex> lk(mtx_);
     detailControl_ = detailControl > 0.0 ? detailControl : 1.0;
@@ -94,7 +133,11 @@ void Navigator::beginPanGesture(double sxPx, double syPx) {
     panRayValid_ = false;
     if (mode_ != ViewMode::MODE_3D || !raycastPanEnabled_) return;
     double lon = 0.0, lat = 0.0;
-    if (screenToGeo3DUnlocked(sxPx, syPx, lon, lat)) {
+    // @Jin T2e：掠射角（近地大倾角点屏幕下半区）不建射线会话，panRayValid_ 保持 false → 走线性路径，消除抖动。
+    double incidenceDeg = 0.0;
+    if (screenToGeo3DUnlocked(sxPx, syPx, lon, lat) &&
+        (!rayGroundIncidenceDegUnlocked(sxPx, syPx, incidenceDeg) ||
+         incidenceDeg <= kRaycastPanMaxIncidenceDeg)) {
         panRayValid_ = true;
         panLastScreenX_ = sxPx;
         panLastScreenY_ = syPx;
@@ -167,7 +210,15 @@ Navigator::Camera3D Navigator::camera3DUnlocked() const {
     const Wgs84Globe &g = Wgs84Globe::instance();
     // @Jin 目标点抬到 DEM 表面后，altitude_ 的语义在 3D 下为“相对目标地形表面的高度”。
     const double terrainTargetHeight = terrainTargetHeightM_;
-    g.geographicToCartesian(centerLon_, centerLat_, terrainTargetHeight + altitude_, c.eye);
+    // @Jin T4（实验/可回退）：垂直视角（tilt=0）眼点同样遵守视口安全壳。旧逻辑眼点恒为目标点+altitude_，
+    // @Jin 高 zoom 时 altitude_ 仅几十~百余米，而周边山脊 aboveMax 可能高于眼点，四叉树地平线/视锥把瓦片全部
+    // @Jin 剔除（实测 leaves=0、整屏黑，DIAG3D: tgtH≈2184 safeH≈2400 alt≈157）。抬到 safeH+净空后眼点始终在
+    // @Jin 地形安全壳之上；无地形（safeH=0）时口径与旧实现完全一致。回退：恢复下方单行旧写法。
+    const double eyeHeightAboveEllipsoid = (terrainSafetyHeightM_ > 0.0)
+        ? std::max(terrainTargetHeight + altitude_, terrainSafetyHeightM_ + terrainClearanceM_)
+        : (terrainTargetHeight + altitude_);
+    // @Jin 旧实现（回退用）：g.geographicToCartesian(centerLon_, centerLat_, terrainTargetHeight + altitude_, c.eye);
+    g.geographicToCartesian(centerLon_, centerLat_, eyeHeightAboveEllipsoid, c.eye);
     g.geographicToCartesian(centerLon_, centerLat_, terrainTargetHeight, c.center);
     // 局部 ENU 基准（单位向量）：法向 n、东 e、北 north
     const double lat = centerLat_ * kPi / 180.0;
@@ -261,6 +312,30 @@ bool Navigator::screenToGeo3D(double sxPx, double syPx, double &outLonDeg, doubl
     return screenToGeo3DUnlocked(sxPx, syPx, outLonDeg, outLatDeg);
 }
 
+// @Jin T2e：复用 screenToGeo3DUnlocked 的射线构造口径，求射线与命中点外法线的入射角。
+bool Navigator::rayGroundIncidenceDegUnlocked(double sxPx, double syPx, double &outIncidenceDeg) const {
+    const Camera3D c = camera3DUnlocked();
+    if (!c.valid) return false;
+    const double vw = static_cast<double>(viewportWidth_);
+    const double vh = static_cast<double>(viewportHeight_);
+    const double ndcX = 2.0 * sxPx / vw - 1.0;
+    const double ndcY = 1.0 - 2.0 * syPx / vh;
+    const double aspect = vw / vh;
+    const double tanHalf = std::tan(fieldOfViewDeg_ * kPi / 180.0 * 0.5);
+    const Vec3 right = c.forward.cross(c.up).normalized();
+    const Vec3 up2 = right.cross(c.forward);
+    const Vec3 dir = (c.forward + right * (ndcX * tanHalf * aspect) + up2 * (ndcY * tanHalf)).normalized();
+    Vec3 hit;
+    if (!Wgs84Globe::instance().intersectRay(Ray{c.eye, dir}, hit)) return false; // 落到地平线外
+    double hitLon = 0.0, hitLat = 0.0, hitAlt = 0.0;
+    Wgs84Globe::instance().cartesianToGeographic(hit, hitLon, hitLat, hitAlt);
+    Vec3 normal;
+    Wgs84Globe::instance().geographicNormal(hitLon, hitLat, normal);
+    const double cosIncidence = std::max(-1.0, std::min(1.0, -(dir.dot(normal)))); // 垂直入射=1
+    outIncidenceDeg = std::acos(cosIncidence) * 180.0 / kPi;
+    return true;
+}
+
 bool Navigator::screenToGeo3DUnlocked(double sxPx, double syPx, double &outLonDeg, double &outLatDeg) const {
     const Camera3D c = camera3DUnlocked();
     if (!c.valid) return false;
@@ -279,6 +354,35 @@ bool Navigator::screenToGeo3DUnlocked(double sxPx, double syPx, double &outLonDe
     if (!Wgs84Globe::instance().intersectRay(ray, hit)) return false;
     double alt = 0.0;
     Wgs84Globe::instance().cartesianToGeographic(hit, outLonDeg, outLatDeg, alt);
+    // @Jin T9（实验性/可回退）：射线与地形表面迭代求交。旧逻辑只交椭球（海拔 0），山区带倾角时锚点
+    // 落到山后远处椭球点，双指缩放焦点逐帧漂移（展开下移/收缩上移）。现以椭球交点为初值，逐次把射线与
+    // “当前经纬点地形高处的切平面”求交并更新经纬，3 次内收敛；网格外/无 DEM 时采样返回 0，立即退出、
+    // 与旧行为逐位等价。回退：setTerrainAnchorEnabled(false)。
+    if (terrainAnchorEnabled_) {
+        const Wgs84Globe &globe = Wgs84Globe::instance();
+        double lon = outLonDeg, lat = outLatDeg;
+        for (int iter = 0; iter < 3; ++iter) {
+            const double h = sampleAnchorHeightMeters(lon, lat);
+            if (h <= 0.0) break;
+            Vec3 normal;
+            globe.geographicNormal(lon, lat, normal);
+            Vec3 q;
+            globe.geographicToCartesian(lon, lat, h, q);
+            const double denom = dir.dot(normal);
+            if (denom >= -1e-9) break; // 射线与切平面平行或反向，保留上一次结果。
+            const double t = (q - c.eye).dot(normal) / denom;
+            if (!(t > 0.0)) break;
+            const Vec3 hit2 = c.eye + dir * t;
+            double nlon = 0.0, nlat = 0.0, nalt = 0.0;
+            globe.cartesianToGeographic(hit2, nlon, nlat, nalt);
+            // 收敛判据：经纬增量小于约 0.5m（5e-6 度≈0.5m）。
+            const bool converged = std::fabs(nlon - lon) < 5e-6 && std::fabs(nlat - lat) < 5e-6;
+            lon = nlon; lat = nlat;
+            if (converged) break;
+        }
+        outLonDeg = lon;
+        outLatDeg = lat;
+    }
     return true;
 }
 
@@ -309,7 +413,11 @@ void Navigator::panByPixels(double dxPx, double dyPx) {
             const double nextSx = panLastScreenX_ + dxPx;
             const double nextSy = panLastScreenY_ + dyPx;
             double hitLon = 0.0, hitLat = 0.0;
-            if (screenToGeo3DUnlocked(nextSx, nextSy, hitLon, hitLat)) {
+            // @Jin T2e：本帧新屏幕点若已进入掠射区，跳过射线路径回落线性，锚点保留待下一帧视角恢复后继续。
+            double frameIncidenceDeg = 0.0;
+            const bool incidenceOk = !rayGroundIncidenceDegUnlocked(nextSx, nextSy, frameIncidenceDeg) ||
+                                     frameIncidenceDeg <= kRaycastPanMaxIncidenceDeg;
+            if (incidenceOk && screenToGeo3DUnlocked(nextSx, nextSy, hitLon, hitLat)) {
                 const Wgs84Globe &gRay = Wgs84Globe::instance();
                 Vec3 prevCart, hitCart;
                 gRay.geographicToCartesian(panLastLon_, panLastLat_, 0.0, prevCart);
@@ -400,10 +508,29 @@ void Navigator::zoomBy(double factor, double focusXpx, double focusYpx) {
         clampAltitude();
         if (anchored) {
             const double s = altitude_ / altBegin;
-            centerLon_ = aLon + s * (centerLon_ - aLon);
+            double newLon = aLon + s * (centerLon_ - aLon);
+            double newLat = MercatorProjection::clampLatitude(aLat + s * (centerLat_ - aLat));
+            // @Jin T2d（实验/可回退）：锚点射线只与椭球面(海拔0)求交、不含地形，山区低空带倾角时
+            // 交点会落到山后远处，按此锚点滑动中心会把视野“甩出”。钳制单帧中心地面位移不超过
+            // 视口垂直地面半跨的 0.6 倍：正常小步缩放位移远小于该值不受影响，错误锚点的大跳被截断。
+            // 回退：删除本 if 块、直接把 newLon/newLat 赋给 centerLon_/centerLat_ 即恢复旧行为。
+            double avgLat = (newLat + centerLat_) * 0.5 * kPi / 180.0;
+            double cosLatN = std::cos(avgLat);
+            if (cosLatN < 1e-3) cosLatN = 1e-3;
+            const double dEast = EQUATORIAL_RADIUS * (newLon - centerLon_) * kPi / 180.0 * cosLatN;
+            const double dNorth = EQUATORIAL_RADIUS * (newLat - centerLat_) * kPi / 180.0;
+            const double shiftM = std::hypot(dEast, dNorth);
+            const double halfSpanM = altitude_ * tanHalfFov(fieldOfViewDeg_);
+            const double shiftLimitM = halfSpanM * 0.6;
+            if (shiftM > shiftLimitM && shiftM > 0.0) {
+                const double q = shiftLimitM / shiftM;
+                newLon = centerLon_ + (newLon - centerLon_) * q;
+                newLat = MercatorProjection::clampLatitude(centerLat_ + (newLat - centerLat_) * q);
+            }
+            centerLon_ = newLon;
             while (centerLon_ < -180.0) centerLon_ += 360.0;
             while (centerLon_ >= 180.0) centerLon_ -= 360.0;
-            centerLat_ = MercatorProjection::clampLatitude(aLat + s * (centerLat_ - aLat));
+            centerLat_ = newLat;
         }
         // 焦点落在地平线外（射线未命中）时退化为只改高度不动中心，同 参考实现 capture 失败即 invalidate
         markInteractionUnlocked(); // @Jin 标记 3D 缩放活动。

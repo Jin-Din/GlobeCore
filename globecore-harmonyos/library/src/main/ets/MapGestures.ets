@@ -96,6 +96,14 @@ export class MapGestures {
    *  pinchInProgress 会随手指<2 立即清零，导致全抬判定误以为是单指手势而触发 fling，
    *  把张手/捏手末速度当成平移惯性 → 放大上跳、缩小下跳。用本标志在全抬处门控 fling/点击。 */
   private pinchHappened: boolean = false;
+  // @Jin T9-fix（实验/可回退）：记录最近一次双指捏合结束（降单指/全抬）的事件时间戳，
+  // 用于在捏合后 300ms 静默窗内抑制残余速度触发的 fling——真机日志证实“第3/4次收缩视野右下窜”
+  // 即捏合收尾残余位移被当成单指甩动惯性（一次 40~70vp 推搡 + 一串衰减 pan）。回退：删除本成员及相关判断。
+  private lastPinchEndTs: number = 0;
+  // @Jin T9-fix：捏合降单指后的 grace 帧单步阈值（vp），由 60 收紧到 35，拦残余滑移；正常有意拖动起手步长仅几 vp。
+  private readonly postPinchGraceStepVp: number = 35;
+  // @Jin T9-fix：捏合后 fling 静默窗（ms），窗内全抬不触发惯性平移。
+  private readonly postPinchFlingGateMs: number = 300;
   private lastPinchDist: number = 0;
   /** 两指连线 atan2 角（弧度）；非双指态 NaN，POINTER_DOWN 建基准、UP 复位，防丢帧跳变 */
   private lastPinchAngleRad: number = Number.NaN;
@@ -200,7 +208,7 @@ export class MapGestures {
       this.dragging = false;
       this.samples = [];
       this.pushSample(event.timestamp, rf0.x, rf0.y);
-      this.resetSingleBaseline(rf0.x, rf0.y, 4); // @Jin 转换后4帧严阈值，拦第一帧残留
+      this.resetSingleBaseline(rf0.x, rf0.y, 6); // @Jin T9-fix：4帧→6帧（约100ms），覆盖捏合抬指后的残余滑移期
       return;
     }
     // 单指：平移
@@ -224,7 +232,8 @@ export class MapGestures {
     let dy: number = f.y - this.lastSingleY;
     // @Jin 刚从多指切来的前几帧用更严阈值（60vp）：真机日志显示残留步 120~196px 会穿过
     // 常规 100vp 与 native 200px 之间的空档；正常跟手一帧仅几~几十 vp，不会误杀。
-    const stepLimit: number = this.singleGraceFrames > 0 ? 60 : this.panJumpVp;
+    // @Jin T9-fix：grace 期阈值 60vp→35vp（postPinchGraceStepVp），真机日志中 65/67vp 的残余步曾穿过 60 阈值。
+    const stepLimit: number = this.singleGraceFrames > 0 ? this.postPinchGraceStepVp : this.panJumpVp;
     if (this.singleGraceFrames > 0) {
       this.singleGraceFrames -= 1;
     }
@@ -281,6 +290,9 @@ export class MapGestures {
       // 若不重置基准，剩余手指的第一帧 Move 会拿捏合前的旧 lastSample 求 dx/dy，
       // 产生一次横跨整个捏合过程的大 panBy，把地图猛推（常见握持下表现为视点自动向下）。
       // 处理：把剩余手指视为一次“新的按下”，以其当前位置重建平移基准与速度采样，丢弃捏合期位移。
+      if (pinchJustEnded) {
+        this.lastPinchEndTs = event.timestamp; // @Jin T9-fix：无论降单指还是全抬，都开启捏合后 fling 静默窗
+      }
       if (pinchJustEnded && remaining !== null) {
         // @Jin 已进入新的单指阶段：用“真正仍按住”的手指当前坐标重置基准；随后若用户明确
         // 做单指甩动可正常 fling。真正的首帧大位移拦截在 onFingerMove 的多→单转换处完成。
@@ -291,7 +303,7 @@ export class MapGestures {
         this.dragging = false; // 新起手须重新越过 touchSlop 才算拖动
         this.samples = [];
         this.pushSample(event.timestamp, remaining.x, remaining.y);
-        this.resetSingleBaseline(remaining.x, remaining.y, 4); // @Jin 依次抬：4帧严阈值
+        this.resetSingleBaseline(remaining.x, remaining.y, 6); // @Jin T9-fix：依次抬 grace 4帧→6帧，配合 35vp 步长拦残余滑移
       }
     }
     if (this.fingers.size !== 0 || canceled) {
@@ -330,7 +342,12 @@ export class MapGestures {
       const v = this.computeFlingVelocity();
       // @Jin 关键修复：刚结束双指捏合（尤其两指几乎同时抬起、无降单指中间帧）时禁止 fling，
       // 否则张手/捏手的残余末速度被当成平移惯性，造成放大上跳、缩小下跳。
-      if (!this.pinchInProgress && !this.pinchHappened && v !== null && this.sink.isReady()) {
+      // @Jin T9-fix：捏合降单指时 pinchHappened 已被清零，残余位移仍可能让 computeFlingVelocity 得到
+      // 一个朝向捏合方向的速度（真机日志：40~70vp 推搡后接 11ms 间隔衰减 pan，视野向右下窜）。
+      // 增加 300ms 静默窗：窗内全抬一律不 fling；窗后仍按住并有意甩动时 samples 已重新积累，惯性正常。
+      const withinPinchGate: boolean = this.lastPinchEndTs > 0
+        && (event.timestamp - this.lastPinchEndTs) < this.postPinchFlingGateMs;
+      if (!this.pinchInProgress && !this.pinchHappened && !withinPinchGate && v !== null && this.sink.isReady()) {
         this.startFling(v[0], v[1]);
       }
     }

@@ -2,12 +2,25 @@
 #define GLOBECORE_GLOBE_GEOGRAPHIC_QUADTREE_H
 
 #include <vector>
+#include <chrono>
 
 #include "geom/Vec3.h"
 #include "globe/Globe.h"
 #include "globe/Tessellator.h"
 
 namespace globecore {
+
+/// @Jin T3g（实验/可回退）：逐瓦片地形高程查询接口。旧实现把视口/全局最高山脊高程统一抬升到
+/// 每一个瓦片的 AABB，山谷瓦片被过度抬高后在低空被近裁面裁掉（真机：山区 z16+ 倾角接近时周边黑块）。
+/// 本接口让四叉树按每个瓦片 bbox 查询其真实覆盖的最大高程。回退：buildVisibleTiles 传 nullptr 即恢复统一余量路径。
+class ITileTerrainQuery {
+public:
+    virtual ~ITileTerrainQuery() = default;
+    /// 返回与瓦片 bbox 相交的 DEM 中的最大地表高程（米，椭球面以上）；无任何 DEM 覆盖返回 0。
+    virtual double maxTerrainHeightForBounds(double lonMin, double latMin,
+                                             double lonMax, double latMax) const = 0;
+};
+
 
 /**
  * GeographicQuadtree：3D 球体模式下带帧间一致性的可见瓦片选取器（#11 优化）。
@@ -34,12 +47,15 @@ public:
 
     /// 构建可见叶瓦片集合。相机微动时复用上帧结果（增量模式）；显著移动/参数变更时全量重建。
     /// 接口与 Tessellator::buildVisibleTiles 对齐，可直接替换。
+    // @Jin T3g：terrainQuery 非空时逐瓦片查真实最大高程；terrainCullMarginM 仅作无接口回退与帧间变化检测代理。
     void buildVisibleTiles(const TessCamera &cam, int targetLevel, int maxLevel,
                            double tanHalfFov, int viewportHeightPx, double detailFactor,
                            const Globe &globe, std::vector<GlobeTile> &out,
-                           double terrainCullMarginM = 0.0);
+                           double terrainCullMarginM = 0.0,
+                           const ITileTerrainQuery *terrainQuery = nullptr);
 
     /// 清除帧间缓存（上下文重建/换图源时调用）
+
     void clear();
 
 private:
@@ -56,6 +72,9 @@ private:
     double prevDetailFactor_ = -1.0;
     // @Jin 地形剔除余量变化（首批 DEM 到达或清空地形）也必须重建可见叶集。
     double prevTerrainCullMarginM_ = -1.0;
+    // @Jin T3h（实验/可回退）：仅地形修订变化导致的叶集重建节流，缓解 DEM 批量注入期的帧尖峰（实测 220~477ms）与占位块滞留。
+    std::chrono::steady_clock::time_point lastRevisionRebuildTime_{};
+    bool hasLastRevisionRebuildTime_ = false;
     std::vector<GlobeTile> prevVisible_;
 
     /// @Jin 判断相机是否发生会影响可见叶集的变化；朝向变化必须立即重建，眼点阈值按离地高度缩放。

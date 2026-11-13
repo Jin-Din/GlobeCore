@@ -46,7 +46,8 @@ namespace globecore {
  * 当前级瓦片纹理未就绪时，用最近的有效祖先纹理经 UV 子矩形变换拉伸铺满（对齐 参考实现 useAncestorTileTexture），
  * 消除缩放/加载途中的黑缝。LOD 叶级别由 [Navigator::tileLevel]（复刻 参考实现 mustSubdivide）给出。
  */
-class Renderer {
+// @Jin T3g：实现逐瓦片地形高程查询，供 GeographicQuadtree 按瓦片真实 aboveMax 建 AABB（实验/可回退，回退见 cpp 调用点）。
+class Renderer : public ITileTerrainQuery {
 public:
     Renderer(Navigator &navigator, const std::vector<std::unique_ptr<TileLayer>> &layers,
              const std::vector<std::unique_ptr<VectorLayer>> &vectorLayers,
@@ -154,6 +155,20 @@ private:
     double terrainCullMarginM() const;
     /// @Jin 在生成 3D 相机前同步目标地形高与安全壳，避免放大时眼点落入山脊。
     void updateNavigatorTerrainFrame();
+    /// @Jin T2（实验/可回退）：按当前相机视口地面覆盖范围统计 DEM 安全高，只计入与视口区域相交的 DEM，
+    /// 避免去过山区后全局 aboveMax 污染平坦区域低空接近。回退：updateNavigatorTerrainFrame 改回遍历全量 terrainCache_。
+    double viewportTerrainSafetyHeight(const Camera &camera) const;
+    /// @Jin T3g：ITileTerrainQuery 实现——与瓦片 bbox 相交的 DEM 最大 aboveMax（米），无覆盖返回 0。
+    double maxTerrainHeightForBounds(double lonMin, double latMin, double lonMax, double latMax) const override;
+    // @Jin T2b（实验/可回退）：视口安全高的时间平滑状态。平移时 DEM 进出视口 bbox 会让 aboveMax 阶跃，
+    // 直接逐帧采用会引起斜距突变（单指平移抖动）。上升立即采纳（防穿山），下降按帧缓慢衰减。回退：updateNavigatorTerrainFrame 中跳过平滑直接用 raw。
+    double viewportSafetySmoothed_ = -1.0; // -1=首帧未初始化
+    // @Jin T2d（实验/可回退）：相机中心点地形高 targetHeight 的双向低通状态。跨 DEM 边界采样阶跃会让
+    // eye/center 高度同步跳变（单指平移/缩放抖动），防穿山仍由上升立即生效的 safety 平滑值兜底。回退：帧循环跳过该平滑。
+    double viewportTargetSmoothed_ = -1.0; // -1=首帧未初始化
+    // @Jin T3i（实验/可回退）：逐瓦片地形查询的帧缓存与地形签名缓存，消除 DEM 波峰期 O(瓦片×DEM) 全表扫描。回退：onDrawFrame 不清缓存或直接删除缓存读写。
+    mutable std::unordered_map<int64_t, std::unordered_map<int64_t, double>> tileTerrainHeightFrameCache_;
+    mutable std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> terrainSignatureMemo_; // key=tileKey → (revision, signature)
 
 private:
     /// 瓦片 (z,x,y) 打包为唯一键
