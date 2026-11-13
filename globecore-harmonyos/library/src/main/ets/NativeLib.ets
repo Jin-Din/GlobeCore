@@ -14,8 +14,6 @@ import gc from 'libglobecore.so';
 import common from '@ohos.app.ability.common';
 import fs from '@ohos.file.fs';
 
-
-
 // @Jin layer-init-options（实验/可回退）：具名初始化选项，ArkTS 禁止对象字面量作类型，故在底层门面定义、上层再导出。
 /** 瓦片图层初始化选项：crs/tmsY/tileMatrixOffset 同旧位置参数；serviceZoomOffset 为建层即生效的单图层 LOD 偏移（引擎钳 [-3,2]）。 */
 export interface TileLayerInitOptions {
@@ -501,6 +499,26 @@ export class NativeLib {
   static nativeSetDisplayDensity(handle: number, density: number): void {
     if (handle !== 0) {
       gc.nativeSetDisplayDensity(handle, density);
+    }
+  }
+
+  // @Jin P1（实验性/可回退）：3D 低空操作限制参数化，默认 38.2m/150m，不调用即旧行为。
+  static nativeSetMinCameraAltitude(handle: number, meters: number): void {
+    if (handle !== 0) {
+      gc.nativeSetMinCameraAltitude(handle, meters);
+    }
+  }
+
+  static nativeSetTerrainClearance(handle: number, meters: number): void {
+    if (handle !== 0) {
+      gc.nativeSetTerrainClearance(handle, meters);
+    }
+  }
+
+  // @Jin P2（实验性/可回退）：射线投影平移总开关，false 回退线性近似。
+  static nativeSetRaycastPanEnabled(handle: number, enabled: boolean): void {
+    if (handle !== 0) {
+      gc.nativeSetRaycastPanEnabled(handle, enabled);
     }
   }
 

@@ -1168,6 +1168,28 @@ void GlobeEngine::setDisplayDensity(double density) {
     navigator_.setDisplayDensity(density); // LOD densityFactor（对齐 参考实现 displayMetrics.density）
 }
 
+// @Jin P1（实验性/可回退）：低空操作限制参数化透传，默认值不变，回退只需宿主不调用下列接口。
+void GlobeEngine::setMinCameraAltitudeMeters(double meters) {
+    navigator_.setMinCameraAltitudeMeters(meters);
+}
+
+void GlobeEngine::setTerrainClearanceMeters(double meters) {
+    navigator_.setTerrainClearanceMeters(meters);
+}
+
+// @Jin P2（实验性/可回退）：射线平移会话透传。
+void GlobeEngine::beginPanGesture(double sxPx, double syPx) {
+    navigator_.beginPanGesture(sxPx, syPx);
+}
+
+void GlobeEngine::endPanGesture() {
+    navigator_.endPanGesture();
+}
+
+void GlobeEngine::setRaycastPanEnabled(bool enabled) {
+    navigator_.setRaycastPanEnabled(enabled);
+}
+
 int GlobeEngine::addTileset3D(const std::string &url) {
     // @Jin layer-init-options：旧单参入口保留，委托带选项实现（nullptr=默认参数，行为不变）。
     return addTileset3D(url, nullptr);

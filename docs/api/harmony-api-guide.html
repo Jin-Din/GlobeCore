@@ -273,8 +273,8 @@ native 就绪后回调，未就绪时调用会被门面安全忽略。</p>
 <pre><code>map.flyToCamera(new Camera(34.2196, 108.9594, 700, 0, 30, 0, 45, AltitudeMode.ABSOLUTE), 2200);</code></pre></div>
 
 <div class="api"><h4>panBy / zoomBy / rotateBy / tiltBy <span class="badge b-base">原生</span></h4>
-<div class="sig">panBy(dxVp: number, dyVp: number): void<br>zoomBy(scaleFactor: number, focusX: number, focusY: number): void<br>rotateBy(deltaDeg: number): void<br>tiltBy(deltaDeg: number): void</div>
-<p>编程式相机操作：平移（vp 像素）、以 (focusX,focusY) 为焦点缩放、航向旋转、俯仰增量（仅 3D）。
+<div class="sig">panBy(dxPx: number, dyPx: number): void<br>zoomBy(scaleFactor: number, focusX: number, focusY: number): void<br>rotateBy(deltaDeg: number): void<br>tiltBy(deltaDeg: number): void</div>
+<p>编程式相机操作：平移（<span class="badge b-jin">@Jin 勘误：物理像素 px，非 vp</span>，与 native 触摸/视口同口径）、以 (focusX,focusY) 为焦点缩放、航向旋转、俯仰增量（仅 3D）。
 <span class="badge b-jin">@Jin 改造</span> <code>panBy</code> 在 native 侧带单帧阈值兜底，配合 ArkTS 手势识别器消除多指切换跳变。</p>
 <pre><code>map.zoomBy(1.5, x, y);  // 在 (x,y) 处放大 1.5 倍
 map.tiltBy(10);         // 倾角 +10°</code></pre></div>
@@ -282,6 +282,25 @@ map.tiltBy(10);         // 倾角 +10°</code></pre></div>
 <div class="api"><h4>is3DMode / isReady / isNativeReady / getHandle <span class="badge b-base">原生</span></h4>
 <div class="sig">is3DMode(): boolean<br>isReady(): boolean<br>getHandle(): number</div>
 <p>状态查询；<code>getHandle()</code> 返回 native 句柄（int64），0 表示未就绪，一般业务无需使用。</p></div>
+
+<div class="api"><h4>setMinCameraAltitudeMeters / setTerrainClearanceMeters <span class="badge b-jin">@Jin 新增·实验·可回退</span></h4>
+<div class="sig">setMinCameraAltitudeMeters(meters: number): void<br>setTerrainClearanceMeters(meters: number): void</div>
+<p>3D 低空操作限制参数化（2026-11，fix/3d-gesture-low-altitude）。<b>高度地板</b>为相机离地最小高度，native 钳 1~100000m，默认 38.2m；
+<b>地形净空</b>为眼点相对视野内最高地形的最小离地高度，钳 0~10000m，默认 150m。默认值与旧硬编码一致，不调用即旧行为，参数仅内存态、重启恢复。
+山区低空缩放被安全壳强制抬升时，调小这两个值可继续放大（真机太白山 55° 倾角场景由 z16 提升到 z20）。</p>
+<pre><code>// 低空调试：放开高度地板与地形净空
+map.setMinCameraAltitudeMeters(5);
+map.setTerrainClearanceMeters(0);
+// 恢复默认
+map.setMinCameraAltitudeMeters(38.2);
+map.setTerrainClearanceMeters(150);</code></pre></div>
+
+<div class="api"><h4>setRaycastPanEnabled <span class="badge b-jin">@Jin 新增·实验·可回退</span></h4>
+<div class="sig">setRaycastPanEnabled(enabled: boolean): void</div>
+<p>3D 平移算法开关，默认 <code>true</code>。开启时手势平移逐帧对屏幕点做椭球射线求交、按交点 ENU 差分移动中心，
+带倾角低空下方向与缩放感正确；射线落到地平线外时该帧自动回退线性近似。传 <code>false</code> 整体回退旧 mPerPx 线性平移。
+手势 DOWN/UP 的会话由 native 自动维护，宿主仅切换开关。真机同条件 700px 拖动：旧路径画面响应约 16px，射线路径 280px+。</p>
+<pre><code>map.setRaycastPanEnabled(false); // 回退旧线性平移做效果对比</code></pre></div>
 
 <h3>6.2 手势与点击回调</h3>
 <div class="api"><h4>setOnTapListener / setOnLongPressListener <span class="badge b-base">原生</span> <span class="badge b-jin">@Jin 防跳改造</span></h4>

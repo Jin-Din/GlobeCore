@@ -11,7 +11,38 @@
 - 三、飞行相机与矢量地形贴地（drape 系列）
 - 四、API 文档与工程约定
 - 五、未解决待办与实验开关/回退索引
-- 七、图层初始化参数入参化 layer-init-options（2026-11-11）：serviceZoomOffset/heightOffset 建层 options 一次性传入（第六节低空手势随 fix/3d-gesture-low-altitude 分支后续合入）
+- 六、3D 低空手势改造（fix/3d-gesture-low-altitude，2026-11-11）：单位勘误、P1 低空参数化、P2 射线投影平移
+- 七、图层初始化参数入参化 layer-init-options
+- 八、3D 垂直视角高 zoom 黑面修复 T4（地平线椭球化+垂直眼点安全壳）（fix/3d-gesture-low-altitude，2026-11-11）：serviceZoomOffset/heightOffset 建层 options 一次性传入
+- 九、低空周边黑块根治 T5/T8、缩放焦点地形锚点 T9 与捏合降单指窜动 T9-fix2（fix/3d-gesture-low-altitude，2026-11-12~13）：DEM 死锁兜底、侧视锥有界松弛、射线-地形迭代求交、native 触摸桥基准重建+grace
+
+## 六、3D 低空手势改造（fix/3d-gesture-low-altitude，2026-11-11）
+
+> 背景：真机反馈 3D 模式倾角 0 时最大只能到约 17 级、带倾角（55°/-35°）大比例尺下不能继续缩放且平移困难。先分析后改造，全部为实验性、可回退，代码注释统一 @Jin。
+
+### 0. 前置结论：手势单位口径勘误（零逻辑改动）
+
+- 真机实测（2560×1600、DPR 2.38）：在超出 vp 视口（约 1076×672）的物理像素点 (1800,1000) 长按，2D 逆地理 marker 落点 (1790~1810,988~1010) 与触点逐像素重合，结合官方文档确认 `OH_NativeXComponent_TouchEvent.x/y` 单位为**物理像素 px**而非 vp。
+- 修正 XComponentBridge/EglContext/napi 层把 px 误标为 vp 的注释与内部符号（kFling*VpPerSec→PxPerSec、xVp→xPx 等）；公开 API 无变化。MapGestures.ets 消费 ArkUI TouchEvent（真 vp），加注释标明两条通路差异。
+
+### P1. 高度地板与地形净空参数化
+
+- 旧约束：`Navigator.cpp` 编译期常量 `kMinCameraAltitudeMeters=38.2m`（相机离地地板）与 `kMinTerrainClearanceM=150m`（眼点相对视野最高地形的净空），山区低空被安全壳强制抬升，缩放无感。
+- 改造：下沉为成员 `minCameraAltitudeMeters_`（钳 1~100000m，默认 38.2）、`terrainClearanceM_`（钳 0~10000m，默认 150），经 GlobeEngine→Harmony NAPI/ArkTS、Android JNI/Kotlin 双端暴露：
+  - `setMinCameraAltitudeMeters(meters)` / `setTerrainClearanceMeters(meters)`；setter 后立即 `clampAltitude()` 生效。
+- 真机数据（太白山、倾角 55°）：默认参数按钮缩放止于 displayLevel **z16**（另发现 demo `zoom()` 自带 500m 硬下限，已放宽到 5m 以暴露 SDK 真实地板）；切 5m 地板 + 0m 净空后同场景放大到 **z20**（瓦片仍 z18，图源 maxLevel=18 的数据天花板，之上为纹理拉伸，符合预期）。
+
+### P2. 3D 射线投影平移
+
+- 旧路径：`panByPixels` 3D 分支用正射口径 `mPerPx=2·alt·tan(fov/2)/视口高` 线性近似 + 屏幕基向量折算；低 alt（z20 时约 0.05m/px）且透视压缩下手感“拖不动、发飘”。
+- 新路径（默认开）：手势 DOWN 调 `beginPanGesture(sx,sy)` 记录屏幕锚点的椭球射线交点；每帧把“锚点屏幕坐标+本帧位移”作为新屏幕点再次 `screenToGeo3DUnlocked` 求交，按两交点 ENU 差分平移中心并逐帧滚动锚点（支持长拖动）；射线落到地平线外失败时本帧自动回退线性近似、锚点保留。UP/CANCEL 调 `endPanGesture`；fling 不经会话走旧路径。
+- 开关：`setRaycastPanEnabled(false)` 整体回退；Harmony 手势桥在 DOWN/UP 自动维护会话，Android 在 NativeMapView.onTouchEvent 按 action 维护。
+- 真机数据（z20、倾角 55°，NCC 块匹配估计画面位移）：同 700px 手指拖动，旧线性路径画面仅响应 **16px**（NCC 0.92 几乎不动），射线路径响应 **≥280px**；300px 短拖响应 320px+，开关双向切换有效。
+
+### 附带发现（未在本分支修复）
+
+- 3D 长按拾取只与椭球求交（高程 0），overlay 点按 DEM 表面烘焙，倾角下 marker 与触点存在数百 px 屏幕偏差（2D 无此问题）；后续 P3 拟在拾取/缩放锚点增加 DEM 求交修正。
+- 构建 ID：`v0.1.4-20261111-low-alt-gesture-p1p2`（Renderer.cpp GLOBECORE_BUILD_ID）。
 
 ## 七、图层初始化参数入参化 layer-init-options（2026-11-11）
 
@@ -44,6 +75,42 @@
 ### 5. 遗留
 
 - Android JNI/Kotlin 尚未提供 tileset3d 与 WithOptions 入口（C++ 核心已双端共用），列入待办；heightOffset 步进节流防抖待办不变。
+## 八、3D 垂直视角高 zoom 黑面修复 T4（fix/3d-gesture-low-altitude，2026-11-12）
+
+> 背景：真机反馈 3D 模式垂直视角（倾角≈0°）放大到 z15+ 后整屏无影像（纯黑），2D 同级正常；带倾角时部分场景也有周边黑块。全部为实验性、可回退，注释统一 @Jin。
+
+### 1. 真机诊断数据（临时 DIAG3D/DIAGCULL 日志，验证后已删除）
+
+- 黑面瞬间四叉树可见叶集 `leaves=0`（正常同场景应为 10+ 个 z18 叶），TILEPIPE `placeholder=0 leaf=0`，管线零请求零绘制。
+- 相机状态：目标地形高 `tgtH≈2184m`、视口安全壳 `safeH≈2400m`、相机相对高度 `alt≈157m`。
+- 根节点剔除原因：`DIAGCULL z0 horizon=0 rejectPlane=-1`——死在**地平线测试**，不是视锥平面。
+
+### 2. 两个叠加根因
+
+1. **垂直视角眼点不遵守视口安全壳**（`Navigator::camera3DUnlocked`）：tilt=0 分支眼点恒为 `目标点地形高 + altitude_`，高 zoom 时 altitude_ 仅几十~百余米；带倾角分支本有 `safety-target+clearance` 净空保护，垂直分支漏接，眼点钻进周边山脊安全壳之下。
+2. **地平线判据被地形高程污染（决定性）**：T3g 把逐瓦片地形抬高量（nodeSurfaceMargin）同时用于视锥 AABB 与地平线采样。地平线测试 `dot(q,e)*|E| >= |q|²` 是“地球背面剔除”，只对球面点成立（Tessellator 一直用高 0 采样）；低空眼点半径小于邻近地形壳半径时，正前方瓦片也被判到地平线下，根节点直接剪枝 → 全黑。
+
+### 3. 修复内容
+
+- **T4-a 地平线采样回归椭球面**（`GeographicQuadtree.cpp`）：最近点新增 `nearestHorizon`（高 0）专供地平线判定；9 网格采样拆为地形壳点（只入视锥 AABB）与 `ph`（高 0，入地平线）；跨 180° 补点 `phW1/phW2`、极冠补点 `phN/phS` 同口径。地形壳对视锥的山脊近裁面保护完整保留。回退：高 0 采样改回 nodeSurfaceMargin 即恢复 T3g 行为。
+- **T4-b 垂直眼点安全壳**（`Navigator.cpp`）：tilt=0 眼点高度改为 `max(目标高+altitude_, safeH+terrainClearanceM_)`；无地形（safeH=0）时与旧表达式逐位等价。回退：恢复单行旧写法（注释中已保留）。
+
+### 4. 工程事故与重建（如实记录）
+
+- 排查中误用 `git checkout -- GeographicQuadtree.cpp`，把该文件**未提交的 T3g/T3h 改动连同诊断代码一起回退**；.h 未受影响（ITileTerrainQuery、T3h 节流成员仍在）。
+- 已依据会话内留存的完整 diff 逐块重建 .cpp：T3g 逐瓦片 `maxTerrainHeightForBounds+50m`、T3h 180ms 修订号节流、T3c 朝向 0.35°/位移 0.5%·40m 阈值，并在重建版上直接叠加 T4-a。ninja 编译通过，行为经真机复核。
+
+### 5. 真机验证（BUILD_ID v0.1.5-20261112-fix-t4-horizon2，诊断已移除）
+
+- 原黑面同场景（甘肃山区 z17/z20、倾角 0°）：`leaves=10 zRange=[18,18]`，TILEPIPE `placeholder=0 leaf≈1140`，影像完整无黑块；最低高度地板 38.2m 仍保持叶集。
+- 高 zoom 单指平移：叶集连续（leaves 稳定 10）、目标高程平滑过渡，无黑面复发；2D 模式同级正常，切 2D/3D 无回归。
+- 带倾角场景与本次同根（地平线剔除通路唯一），双指倾角手势需人工补充验证。
+
+### 6. 回退方式
+
+- T4-a：GeographicQuadtree.cpp 中高 0 地平线采样点（nearestHorizon/ph/phW/phN/phS）改回 nodeSurfaceMargin。
+- T4-b：Navigator.cpp 删除 eyeHeightAboveEllipsoid 分支，恢复 `geographicToCartesian(..., terrainTargetHeight + altitude_, c.eye)`。
+
 ## 一、新增能力
 
 ### @Jin 实验性在线 GeoJSON Source（P0）
@@ -279,6 +346,7 @@ NativeMapView({
 - @Jin 地形 Provider 选块仍为中心 7×7 固定窗口，未升级为按 tilt/heading/FOV 的非对称视锥选块；大倾角极近景边缘可能缺 DEM。详见一、自动跟随节「已知边界」。
 - @Jin 3D Tiles(b3dm) 已合入主线（2026-11-11，仍按实验能力管理）：纹理已通、朝向已修正、heightOffset=-20m 校准贴地；高斯泼溅 GLB、PBR、拾取、磁盘缓存为后续待办。
 - @Jin 新增待办：heightOffset 步进按钮快速连点可能一次跳多档，需节流防抖；政务版陕西底图接入（服务地址与 xyz 规则待核实）。
+- @Jin ~~3D 拾取/缩放锚点只与椭球求交（遗留 P3）~~ 已完成（2026-11-12 T9）：9×9 地形锚点网格 + 射线-地形迭代求交，双指缩放焦点漂移与长按拾取偏差一并修复，详见第九节。
 
 ### 实验开关 / 回退方式索引
 
@@ -297,3 +365,60 @@ NativeMapView({
 | 单图层 serviceZoomOffset | 移除 TileLayer.serviceZoomOffset 字段与 setLayerZoomOffset 调用链（默认 0 即原行为） | 一、单图层 serviceZoomOffset |
 | 地形父级回退 | 删除 CesiumTerrainProvider fetchTileWithFallback 与 missingServiceTiles_ 负缓存 | 一、地形父级回退 |
 | 3D Tiles(b3dm) | CMakeLists 移除 tileset3d/ 源清单及 GlobeEngine/Renderer 相关代码 | 一、3D Tiles 节 + docs/design/3dtiles-b3dm-plan.md |
+| P1 高度地板/地形净空 | 运行时参数不持久化，不调用 setter 即默认 38.2m/150m 旧行为；调试坞选“默认”档恢复 | 六、P1 |
+| T4-a 地平线椭球化 | GeographicQuadtree.cpp 高 0 采样点改回 nodeSurfaceMargin 即恢复 T3g 行为 | 八、3 |
+| T4-b 垂直眼点安全壳 | Navigator.cpp 删除 eyeHeightAboveEllipsoid 分支，恢复地形高+altitude 单行旧写法 | 八、3 |
+| T5 无 DEM bbox 安全高兜底 | 删除 Renderer::maxTerrainHeightForBounds 中 `if (maxHeight <= 0.0 && !terrainCache_.empty())` 块 | 九、2 |
+| T8 侧视锥有界松弛 | GeographicQuadtree.cpp 阈值改回 `if (v < 0.0)`（删 kSideFrustumCullSlackM） | 九、3 |
+| T9 地形锚点迭代求交 | `setTerrainAnchorEnabled(false)` 回退纯椭球；彻底移除需删 TerrainAnchorGrid 全套与 Renderer 发布块 | 九、4 |
+| P2 射线投影平移 | `setRaycastPanEnabled(false)` 回退 mPerPx 线性近似；默认开，射线失败自动单帧回退 | 六、P2 |
+
+## 九、低空周边黑块根治 T5/T8、缩放焦点地形锚点 T9 与捏合降单指窜动 T9-fix2（fix/3d-gesture-low-altitude，2026-11-12~13）
+
+> 背景：T4 后真机仍反馈 3D 模式 z15+（尤其垂直视角、山区）屏幕周边影像不出、一片黑，且局部地形需手动刷新才加载；另有带倾角双指缩放焦点漂移（展开下移/收缩上移、不绕双指中心）。全部为实验性、可回退，注释统一 @Jin，构建号 v0.1.5-20261112-t9-anchor。
+
+### 1. 诊断方法与关键数据（诊断代码定稿前已全部移除）
+
+- 四叉树细分埋点（DIAGCULL2/DIAGREJ/DIAGLEAF）：输出每帧 leaves、6 平面剔除数、被剔节点 z/x/y 与平面有向距离 v、叶节点经纬范围；渲染端埋点（DIAGBLK）：leaves/tex/ancestor/none、复用缓存标志、眼高与倾角。
+- 垂直视角（倾角 0°）z18、眼高约 150m（太白山）：修复前 leaves 仅 **8**，侧平面剔除 27~39 个高级别节点，被剔节点 v 多在 -5~-13m（临界误杀），地图区空洞 **50%~87%**；地形 28/28 已全部加载完成，排除纹理/网络/缓存原因。
+- 判别实验：临时禁用 4 个侧视锥平面后画面铺满但 leaves 暴增至 657（超 kMaxTiles=640 预算），证明侧锥误杀是叶集不足主因，但全面禁用不可作正式方案。
+
+### 2. 根因一：DEM 死锁环（T5 修复）
+
+- `Renderer::maxTerrainHeightForBounds` 对 bbox 无已缓存 DEM 相交时返回 0，视锥 AABB 只剩 50m 逐瓦片余量；太白山真实山脊相对高差上千米，侧视锥平面把环周瓦片整支误剔。
+- 地形请求又由可见叶集驱动：被剔瓦片永远拿不到 DEM → AABB 永远低矮 → 永远被剔，形成死锁，表现为必须手动“刷新地形”才出图。
+- 修复（Renderer.cpp，实验/可回退）：无 DEM 相交且 terrainCache_ 非空时，兜底取 `viewportTerrainSafetyHeight(nav_.camera())`（含 1.8× 视口半径与 +50m 余量）；无地形图层时安全高返回 0，与旧行为逐位等价。回退：删除该 if 块。
+
+### 3. 根因二：保守剔除与瓦片尺度失配（T8 修复）
+
+- 眼高约 150m、fovY 45° 时视锥地面覆盖仅约 200m×124m，而单个 z18 瓦片跨度约 126~153m；p-vertex 保守 AABB 测试把角点稍出视锥的整瓦剔除，SSE 又强制细化到 z18、父级不留兜底，被剔区域彻底无几何。
+- 修复（GeographicQuadtree.cpp，实验/可回退）：4 个侧视锥平面（L/R/B/T）剔除阈值由 v<0 放宽为 v<-300m（`kSideFrustumCullSlackM`，约 2 个 z18 瓦片跨度，等价多保留一环邻接瓦片）；near/far 平面保持严格，不削弱穿山保护。
+- 真机数据：垂直 z18 leaves 8→**85**、地图区空洞 50%~87%→**0%~13%**（残余为侧栏 UI 深色干扰）；倾角 55° leaves 120→205，全部有纹理；88km 高空 leaves 42~48 不膨胀（300m 相对公里级视锥可忽略）；连续平移 leaves 33~89、none=0。回退：阈值改回 0。
+
+### 4. 根因三：缩放锚点只交椭球不含地形（T9 修复）
+- `Navigator::screenToGeo3DUnlocked` 的射线只与椭球面（海拔 0）求交；山区带倾角时射线穿过前景山脊后落在山后远处椭球点，`zoomBy` 按此错误锚点逐帧滑动中心 → 双指展开视角下移、收缩上移、不绕双指中心；小级别眼高数千公里可忽略，故仅大比例尺复现。
+- 修复（Navigator.h/cpp + Renderer.cpp，实验/可回退）：
+  1. Renderer 在 GL 线程按当前视口 footprint（与安全高同口径、1.8× 余量）采 9×9 地形高度网格（`Navigator::TerrainAnchorGrid`），经独立 mutex 发布；terrainCache_ 仍只允许 GL 线程访问，手势线程只读快照、无数据竞争。
+  2. Navigator 新增双线性插值 `sampleAnchorHeightMeters`；`screenToGeo3DUnlocked` 以椭球交点为初值，逐次与“当前经纬点地形高处切平面”求交并更新经纬，最多 3 次、0.5m 收敛；网格外/无 DEM 返回 0，立即退出并与旧行为逐位等价。
+  3. 开关 `setTerrainAnchorEnabled(bool)`（默认开）；关闭即恢复纯椭球求交。
+- 影响面：该函数同时服务长按逆地理拾取与 P2 射线平移，修正后落点同样贴合地表（正向收益）；公开 API 无签名破坏（仅新增接口）。真机人工验证：带倾角/垂直双指缩放、平地/山区、长按拾取全部通过。
+
+### 5. 根因四：native 触摸桥捏合降单指基准陈旧（T9-fix2，2026-11-13 定稿，构建号 v0.1.5-20261113-gesture-final）
+
+- 现象：T9 锚点修复后真机仍反馈带倾角连续双指收缩，随机在第 3~35 下出现整视野向手指漂移方向（多为右下）窜动一下，zoom 本身正常。
+- 关键通路勘误：SURFACE 型 XComponent 的真机触摸**只经 native `XComponentBridge::handleTouch`（物理像素 px）投递，ArkTS `MapGestures.ets` 仅为不触发的 .onTouch 兜底**（见 XComponentBridge.cpp 顶部注释）。早期一轮加在 MapGestures.ets 的 grace/fling 门控对真机无效，结论以 native 桥为准，ets 侧同类加固保留作兜底通路防御。
+- 诊断方法（DIAGT9 统一毫秒时间线，定稿已移除）：在 Navigator 的 zoom/pan/tilt/地形高度四处埋点。3.15 万事件统计：5554 次 zoom 中锚点钳制 0 次、异常 factor 0 次、锚点网格连续无跳变；而漏网 pan 共 17 笔（40~123px），**全部紧跟 zoom 后 1~11ms 且孤立出现**，方向与手指漂移一致；另 18 笔 500~800px 大 pan 被 Navigator 既有 200px 硬防线拦截。
+- 根因：双指捏合期间单指平移基准 `gLastX_/gLastY_` 不更新，停在捏合前位置；抬一指降为单指时 UP 分支只置 `gPinching_=false`，未重建基准；随后首个单指 MOVE 以“当前位置−捏合前陈旧位置”计算增量，产生横跨整个捏合过程的大平移。位移大小随机，故表现为间歇性窜动；fling 门控（gHadMulti_）原本就有效，问题不在惯性。
+- 修复（XComponentBridge.h/.cpp，实验/可回退，注释 @Jin）：
+  1. 新增 `gLastNumPoints_` 跟踪上一事件手指数，MOVE 中直接识别双指→单指转换（兼容 UP 晚于 MOVE 的机型时序），转换首帧以当前触点重建基准、本帧不平移；
+  2. UP 降单指（n==1）时以**剩余手指** `touchPoints[0]`（非 ev.x/ev.y 那根抬起的手指）重建基准；
+  3. 随后 6 帧 grace（约 100ms，`kPostPinchGraceFrames`）内单步超 120px（`kPostPinchGraceStepPx`，物理像素）的残余滑移直接丢弃，基准钉到当前点，下一帧恢复；
+  4. 新 DOWN 复位全部状态。
+- 真机验证（t9fix2 日志 5279 zoom/114 pan）：58 次双指→单指转换全部被基准重建捕获；>200px 被拒 pan 18→**0**、>35px 漏网 pan 17→**0**；正常单指拖动 114 笔全部保留。人工连续收缩 35+ 次无窜动。
+
+### 6. 回退索引（新增）
+
+- T5：删除 Renderer::maxTerrainHeightForBounds 中 `if (maxHeight <= 0.0 && !terrainCache_.empty())` 兜底块。
+- T8：GeographicQuadtree.cpp 侧平面阈值改回 `if (v < 0.0)`（删除 kSideFrustumCullSlackM/cullThreshold）。
+- T9：`setTerrainAnchorEnabled(false)` 整体回退；彻底移除需删除 TerrainAnchorGrid 全套与 Renderer 网格发布块。
+- T9-fix2：删除 XComponentBridge 中 `gLastNumPoints_`/`gPostPinchGraceFrames_` 成员、MOVE 转换重建块与 grace 拦截块、UP 的 n==1 基准重建，即恢复“降单指沿用陈旧 gLastX_/gLastY_”的旧行为（不建议）。

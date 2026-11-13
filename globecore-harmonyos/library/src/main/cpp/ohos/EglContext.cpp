@@ -118,7 +118,7 @@ inline int64_t steadyNowNs() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
                std::chrono::steady_clock::now().time_since_epoch()).count();
 }
-constexpr double kFlingStopVpPerSec = 20.0; // 低于此速度停止（vp/s）
+constexpr double kFlingStopPxPerSec = 20.0; // @Jin 低于此速度停止（px/s，物理像素；旧名/注释误标 vp/s，2026-11 勘误）
 constexpr double kFlingDecayPerSec = 6.0;   // 指数衰减时间常数≈167ms，0.7s 内收敛到停止阈值
 // 活动兜底帧窗口：任一 requestRender（手势/fling/尺寸/点击长按/引擎异步就绪）刷新截止时刻，
 // 渲染线程在窗口内以 ~60fps 连续出帧，确保「晚就绪的标注/测点」被画出并呈现（对齐 GLSurfaceView
@@ -169,11 +169,11 @@ void MapRenderHost::setSurfaceSize(int32_t width, int32_t height) {
     cv_.notify_all();
 }
 
-void MapRenderHost::startFling(double vxVpPerSec, double vyVpPerSec) {
+void MapRenderHost::startFling(double vxPxPerSec, double vyPxPerSec) { // @Jin 参数旧名 *VpPerSec 勘误为 px/s
     {
         std::lock_guard<std::mutex> lock(mtx_);
-        flingVx_ = vxVpPerSec;
-        flingVy_ = vyVpPerSec;
+        flingVx_ = vxPxPerSec;
+        flingVy_ = vyPxPerSec;
         lastFlingNs_ = 0;
     }
     requestRender();
@@ -186,11 +186,11 @@ void MapRenderHost::cancelFling() {
     lastFlingNs_ = 0;
 }
 
-void MapRenderHost::postPendingTap(float xVp, float yVp, int64_t deadlineNs) {
+void MapRenderHost::postPendingTap(float xPx, float yPx, int64_t deadlineNs) { // @Jin 参数旧名 xVp/yVp 勘误为 px
     std::lock_guard<std::mutex> lock(mtx_);
     pendingTap_ = true;
-    pendingTapX_ = xVp;
-    pendingTapY_ = yVp;
+    pendingTapX_ = xPx;
+    pendingTapY_ = yPx;
     pendingTapDeadlineNs_ = deadlineNs;
     cv_.notify_all(); // 唤醒休眠中的循环以装载定时唤醒
 }
@@ -200,11 +200,11 @@ void MapRenderHost::cancelPendingTap() {
     pendingTap_ = false;
 }
 
-void MapRenderHost::postPendingLongPress(float xVp, float yVp, int64_t deadlineNs) {
+void MapRenderHost::postPendingLongPress(float xPx, float yPx, int64_t deadlineNs) { // @Jin 参数旧名 xVp/yVp 勘误为 px
     std::lock_guard<std::mutex> lock(mtx_);
     pendingLongPress_ = true;
-    pendingLongPressX_ = xVp;
-    pendingLongPressY_ = yVp;
+    pendingLongPressX_ = xPx;
+    pendingLongPressY_ = yPx;
     pendingLongPressDeadlineNs_ = deadlineNs;
     cv_.notify_all(); // 唤醒休眠中的循环以装载定时唤醒
 }
@@ -230,7 +230,7 @@ bool MapRenderHost::advanceFling(int64_t nowNs) {
         const double k = std::exp(-dtS * kFlingDecayPerSec);
         flingVx_ *= k;
         flingVy_ *= k;
-        active = std::hypot(flingVx_, flingVy_) >= kFlingStopVpPerSec;
+        active = std::hypot(flingVx_, flingVy_) >= kFlingStopPxPerSec;
         if (!active) {
             flingVx_ = flingVy_ = 0.0;
             lastFlingNs_ = 0;

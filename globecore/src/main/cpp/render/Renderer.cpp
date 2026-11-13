@@ -28,7 +28,7 @@ namespace globecore {
 // 每次准备重建 HAR 前，把 GLOBECORE_BUILD_ID 改成一个全新的唯一串（例如末尾序号 +1，或带上你自定义的标记）。
 // 装机日志出现该串 = 跑的确实是你这次改过、并重新构建 + 重新链接的 HAR；
 // 未出现 / 仍是旧串 = app 还在用旧 HAR（引擎源码根本没进设备）。改完务必：重建 HAR → app Sync/ohpm 重新链接 → 卸载重装。
-#define GLOBECORE_BUILD_ID "v0.1.3-20261111-per-layer-lod1" // @Jin 构建核对：单图层 serviceZoomOffset（LOD 偏移逐层可调） // @Jin 构建核对：3DTiles 纹理解码修复版（补 main 入口、GLES2 NPOT 回退 LINEAR） // @Jin [诊断-临时] 3DTiles 8 相位诊断构建，定位后回退 // @Jin 构建核对：快捷定位 POI 与文字拆层、显式加载 Harmony 中文字体，并放大山顶文字。
+#define GLOBECORE_BUILD_ID "v0.1.5-20261113-gesture-final" // @Jin T9 定稿：捏合降单指基准重建+grace 防窜动，诊断日志已全部移除。
 
 // 祖先链请求深度帽：叶子只向上请求 4 级。更深的祖先拉伸 >16× 已无兜底价值，而链条请求数是
 // 数量倍增器；尤其无金字塔栅格源，低级别粗瓦源窗口≈整幅（单块秒级～十几秒），砍深度直接减掉
@@ -44,8 +44,8 @@ constexpr double kRemoteDrapeMaxCameraAltMeters = 500000.0; // @Jin drape23 高�
 // @Jin 单帧上传上限按“张数 + RGBA 字节”双约束，所有瓦片层共用，而不是每层各自 32 张。
 constexpr int kInteractiveTextureUploadTiles = 4; // @Jin exp1 真机复测：6 张/帧仍有 26~29ms，降到 4 张优先保证手势帧率。
 constexpr size_t kInteractiveTextureUploadBytes = 1ull * 1024 * 1024; // @Jin 交互期约 4 张 256 瓦片，限制在约 1MiB RGBA 上传量。
-constexpr int kIdleTextureUploadTiles = 4; // @Jin exp1b 真机复测：8 张/帧仍有 54.5ms 长帧，空闲期也压到 4 张。
-constexpr size_t kIdleTextureUploadBytes = 1ull * 1024 * 1024; // @Jin 空闲期限制约 1MiB，优先保证加载期画面稳定。
+constexpr int kIdleTextureUploadTiles = 6; // @Jin T3k：网格开销经 T3g~T3j 优化后，空闲期 4→6 张/帧，加快放大波峰期纹理补齐。回退：改回 4。
+constexpr size_t kIdleTextureUploadBytes = 1536ull * 1024; // @Jin T3k：空闲期字节预算 1MiB→1.5MiB，配合 6 张/帧。回退：改回 1MiB。
 // @Jin DEM 到达时仅允许少量瓦片当帧重建网格，其余保持上一版几何并在后续帧平滑升级。
 constexpr int kInteractiveMeshRebuildsPerFrame = 2;
 constexpr int kIdleMeshRebuildsPerFrame = 4; // @Jin DEM 首批到达时降低 24x24 地形网格重建峰值。
@@ -1503,6 +1503,7 @@ void Renderer::discardRemovedLayerTextures() {
 
 bool Renderer::onDrawFrame() {
     // @Jin 帧首重置共享上传与地形网格预算；手势活动窗口内压低预算，抬手后恢复较高补齐速度。
+    tileTerrainHeightFrameCache_.clear(); // @Jin T3i：逐瓦片地形查询仅本帧有效
     frameStartedAt_ = std::chrono::steady_clock::now();
     frameTextureUploads_ = 0;
     frameTextureUploadBytes_ = 0;
@@ -1511,6 +1512,11 @@ bool Renderer::onDrawFrame() {
     frameTextureUploadLimit_ = interacting ? kInteractiveTextureUploadTiles : kIdleTextureUploadTiles;
     frameTextureUploadByteLimit_ = interacting ? kInteractiveTextureUploadBytes : kIdleTextureUploadBytes;
     globeMeshRebuildBudget_ = interacting ? kInteractiveMeshRebuildsPerFrame : kIdleMeshRebuildsPerFrame;
+    // @Jin T3h（实验/可回退）：DEM 注入波峰期把全精度(24x24)网格重建压到 1 个/帧。真机实测波峰期 28 个/帧
+    // 重建把帧耗推到 220~860ms，纹理上传被长期饿在 4 张/帧，占位块成片滞留（用户感知为 z14+ 黑块）。
+    // 积压期先用 8x8 兜底网格快速出形（acquireTileGlobeMesh 的 fallback 通路），队列清空后再按常规预算补全精度。
+    // 回退：删除本 if 即恢复固定 4 个/帧（空闲）。
+    if (terrainDeferred_ > 0) globeMeshRebuildBudget_ = std::min(globeMeshRebuildBudget_, 1);
     globeMeshRebuildDeferred_ = false; // @Jin 每帧重新累计待补网格，避免上一帧标记让设备持续空转。
 
     // @Jin 2D/3D 矢量 VBO 的顶点布局不同，模式切换必须先在 GL 线程清理，否则新旧 chunk 会残留到另一通路。
@@ -1667,7 +1673,8 @@ void Renderer::logTilePipelineStats() {
                         dAncestor > 0 || dLeaf > 0 || dFallbackMesh > 0 || maxFrameDrawMs_ >= 24.0;
     if (active) {
         // @Jin 字段覆盖纹理上传、任务状态、网络复用、地形应用和网格重建，真机 hilog 可直接横向对比版本。
-        LOGI("TILEPIPE interact=%d uploads=%d uploadBytes=%zu frameMaxMs=%.2f processed=%llu cache=%llu network=%llu fail=%llu pending=%zu inflight=%zu ready=%zu httpReq=%llu reused=%llu newConn=%llu http2=%llu terrainApplied=%llu terrainDeferred=%zu meshRebuilds=%llu placeholder=%llu ancestor=%llu leaf=%llu fallbackMesh=%llu",
+        // @Jin T3b：日志尾部追加 cullMargin（四叉树剔除用的地形余量，米），用于核对视口感知后平原低空不再被全局高山余量误剔。
+LOGI("TILEPIPE interact=%d uploads=%d uploadBytes=%zu frameMaxMs=%.2f processed=%llu cache=%llu network=%llu fail=%llu pending=%zu inflight=%zu ready=%zu httpReq=%llu reused=%llu newConn=%llu http2=%llu terrainApplied=%llu terrainDeferred=%zu meshRebuilds=%llu placeholder=%llu ancestor=%llu leaf=%llu fallbackMesh=%llu cullMargin=%.0f",
              nav_.isInteracting() ? 1 : 0, maxFrameTextureUploads_, maxFrameTextureUploadBytes_, maxFrameDrawMs_,
              static_cast<unsigned long long>(dProcessed), static_cast<unsigned long long>(dCache),
              static_cast<unsigned long long>(dNetwork), static_cast<unsigned long long>(dFailures),
@@ -1676,7 +1683,7 @@ void Renderer::logTilePipelineStats() {
              static_cast<unsigned long long>(dHttp2), static_cast<unsigned long long>(dTerrainApplied),
              terrainDeferred_, static_cast<unsigned long long>(dMeshRebuilds),
              static_cast<unsigned long long>(dPlaceholder), static_cast<unsigned long long>(dAncestor),
-             static_cast<unsigned long long>(dLeaf), static_cast<unsigned long long>(dFallbackMesh));
+             static_cast<unsigned long long>(dLeaf), static_cast<unsigned long long>(dFallbackMesh), terrainCullMarginM());
     }
     lastPipeProcessed_ = processed;
     lastPipeCacheHits_ = cacheHits;
@@ -2164,11 +2171,12 @@ bool Renderer::renderGlobeLayer3D(size_t layerIndex, const Navigator::Camera3D &
     // #11 用带帧间一致性的地理四叉树替代 Tessellator 全量重建：
     // 相机微动时复用上帧叶集（零递归），极冠外推覆盖 85°~90° 空洞。
     // @Jin exp1h：四叉树原先只按椭球面做地平线/视锥剔除，太白山近景大倾角时山脊会被整块误删。
-    const double terrainCullMargin = terrainCullMarginM();
+    // @Jin T3g：统一余量局部变量移除，剔除高程改由 ITileTerrainQuery 逐瓦片查询；terrainCullMarginM() 仅保留给 TILEPIPE 日志。
+    // @Jin T3g：末参 this 启用逐瓦片真实高程 AABB；terrainCullMargin 位置改传缓存修订号，
+    // DEM 注入（修订号 +1）即触发叶集重建。回退：末参改 nullptr 并把上一参恢复为 terrainCullMargin。
     geoQuadtree_.buildVisibleTiles(tc, quadtreeLevel, layer.maxLevel, tanHalf, viewportHeight_,
                                    sseDetailFactor, Wgs84Globe::instance(), globeTilesScratch_,
-                                   terrainCullMargin);
-
+                                   static_cast<double>(terrainCacheRevision_), this);
     // @Jin 3D 可见叶可远超纹理容量；交互期只请求 96 块、空闲期 192 块，避免远景请求风暴触发限流。
     const size_t kGlobeLeafRequestBudget = interacting ? 96U : 192U;
     double focusLon = 0.0, focusLat = 0.0, focusAlt = 0.0;
@@ -2222,8 +2230,10 @@ bool Renderer::renderGlobeLayer3D(size_t layerIndex, const Navigator::Camera3D &
                                               ? globeTilesScratch_.size()
                                               : leafBudget;
     for (int k = kAncestorChainDepth; k >= 1; --k) {
-        // @Jin 只对最粗祖先做全可见覆盖；z-1 仍受近景预算约束，避免每帧产生大量高清请求。
-        const size_t ancestorBudget = (k == kAncestorChainDepth) ? coverageAncestorBudget : leafBudget;
+        // @Jin T3a（实验/可回退）：z-1 祖先也做全可见覆盖（对齐 2D 通路），叶子纹理缺失/被 LRU 淘汰时
+        // 总有粗瓦兜底，黑块改为“先低清后高清”。getTexture 自带在途去重，粗瓦数量仅为叶集 1/4，请求增量可控。
+        // 回退：本行恢复 (k == kAncestorChainDepth) ? coverageAncestorBudget : leafBudget。
+        const size_t ancestorBudget = coverageAncestorBudget;
         for (size_t i = 0; i < ancestorBudget; ++i) {
             const GlobeTile &t = globeTilesScratch_[i];
             const int ancestorLevel = t.z - k;
@@ -2507,6 +2517,8 @@ void Renderer::clearTerrain() {
         terrainPendingKeys_.clear();
         terrainPending_.push_back(std::move(pt));
     }
+    // @Jin T2b：不在此复位 viewportSafetySmoothed_——本函数可能由 NAPI 线程调用，而平滑成员只允许 GL 线程读写；
+    // 缓存清空后 raw 自然为 0，平滑值在帧循环内衰减归零，重新开地形时上升分支立即采纳，无需显式复位。
 }
 
 void Renderer::setSunDirection(const Vec3 &dir) {
@@ -2518,30 +2530,172 @@ void Renderer::setSunDirection(const Vec3 &dir) {
 }
 
 double Renderer::terrainCullMarginM() const {
-    float maxHeight = 0.0f;
+    // @Jin T3b（实验/可回退）：剔除余量由“全局 aboveMax”改为视口感知（复用 viewportTerrainSafetyHeight，
+    // 其 1.8 倍视口半径已覆盖邻接 DEM）。真机根因：飞过高山区后全局余量≈3700m，平原低空时四叉树把瓦片
+    // AABB 整体抬高到相机近裁面之外，z16+ 小瓦片被视锥裁光（TILEPIPE leaf=0、整屏黑）。
+    // 视口化后平原只按本地 DEM 抬升，山区仍保留本地山脊余量防误剔。回退：恢复下方注释中的旧全局实现。
+    // ── 旧实现（回退用）：
+    // float maxHeight = 0.0f;
+    // for (const auto &entry : terrainCache_) { if (entry.second.aboveMax > maxHeight) maxHeight = entry.second.aboveMax; }
+    // if (!(maxHeight > 0.0f)) return 0.0;
+    // return std::min(static_cast<double>(maxHeight) + 300.0, 9000.0);
+    if (terrainCache_.empty()) return 0.0;
+    return viewportTerrainSafetyHeight(nav_.camera());
+}
+
+// @Jin T2（实验/可回退）：视口感知的地形安全高。
+// 旧实现对 terrainCache_ 全量取 aboveMax 最大值：飞过高山区（如太白山 aboveMax≈3700m）后，
+// 全局任何区域的相机低空斜距都被这顶“安全帽”顶开，表现为 39° 倾角下无法接近山体/地面。
+// 这里按相机高度、fov、aspect、tilt 估算视口在地面的保守覆盖半径，只统计与该区域相交的 DEM：
+//   - 俯视半径 ≈ altitude·tan(fov/2)·max(1, aspect)
+//   - 倾视远点 ≈ altitude·tan(tilt+fov/2)（平面近似，低空足够保守）
+//   - 统一乘 1.8 倍余量覆盖邻接 DEM、惯性滑动与 aboveMax 边界；半径封顶 6000km，
+//     全球视角下覆盖全部缓存 DEM，行为与旧全量统计等价。
+//   - @Jin T2c：固定余量由旧全局时代的 300m 降到 50m——视口感知已覆盖邻接 DEM，
+//     余量只需兜住 24x24 栅格化误差；旧值 300m 叠加 clearance(默认150m) 会在平原形成
+//     ~450m 相对高度地板，倾角低空放大被“锁住”。回退：常量改回 300.0。
+// 回退方式：updateNavigatorTerrainFrame 中把 safetyHeight 改回遍历全量 terrainCache_ 的旧写法即可。
+double Renderer::viewportTerrainSafetyHeight(const Camera &camera) const {
+    constexpr double kPiLocal = 3.14159265358979323846;
+    // @Jin T2c（实验/可回退）：视口感知后的安全余量，旧全局统计口径为 300m。
+    constexpr double kViewportSafetyMarginM = 50.0;
+    if (terrainCache_.empty() || camera.altitude <= 0.0) return 0.0; // 无地形/异常相机：与旧逻辑空缓存结果一致
+    const double fovRad = camera.fieldOfView * kPiLocal / 180.0;
+    const double aspect = viewportHeight_ > 0
+                              ? static_cast<double>(viewportWidth_) / static_cast<double>(viewportHeight_)
+                              : 1.0;
+    const double tiltRad = std::fabs(camera.tilt) * kPiLocal / 180.0;
+    const double tanHalfFov = std::tan(fovRad * 0.5);
+    double radiusM = camera.altitude * tanHalfFov * std::max(1.0, aspect); // 俯视半屏地面半径（取宽边）
+    // 倾视时视线远点的地面距离；角度钳到接近 90° 防 tan 爆炸（超低空掠地本就看不到更远）
+    const double farAngle = std::min(tiltRad + fovRad * 0.5, kPiLocal * 0.5 - 0.02);
+    radiusM = std::max(radiusM, camera.altitude * std::tan(farAngle));
+    radiusM *= 1.8;                                  // @Jin 保守余量：邻接瓦片 + 拖拽惯性 + 头部 aboveMax 误差
+    radiusM = std::min(radiusM, 6000000.0);          // @Jin 封顶后全球视角等价于旧的全局统计
+    const double dLat = radiusM / 111320.0;
+    double cosLat = std::cos(camera.latitude * kPiLocal / 180.0);
+    if (cosLat < 0.15) cosLat = 0.15;                // 高纬经度收敛保护
+    const double dLon = radiusM / (111320.0 * cosLat);
+    const double lon0 = camera.longitude - dLon, lon1 = camera.longitude + dLon;
+    const double lat0 = camera.latitude - dLat, lat1 = camera.latitude + dLat;
+    double safetyHeight = 0.0;
     for (const auto &entry : terrainCache_) {
-        if (entry.second.aboveMax > maxHeight) maxHeight = entry.second.aboveMax;
+        const QuantizedMeshData &dem = entry.second;
+        // bbox 相交测试（国内场景不处理 ±180 跨界，DEM bbox 均在境内）
+        if (lon1 < dem.lonMin || lon0 > dem.lonMax || lat1 < dem.latMin || lat0 > dem.latMax) continue;
+        // @Jin T2c：50m 余量（原 300m），山脊真实高度已由 aboveMax 本身保证。
+        safetyHeight = std::max(safetyHeight, static_cast<double>(dem.aboveMax) + kViewportSafetyMarginM);
     }
-    if (!(maxHeight > 0.0f)) return 0.0;
-    // @Jin 300m 余量覆盖栅格化误差、邻接瓦片和山脊边界；9000m 是实验阶段的全球安全帽。
-    return std::min(static_cast<double>(maxHeight) + 300.0, 9000.0);
+    return std::min(safetyHeight, 9000.0); // 9000m 全球安全帽沿用旧口径
+}
+
+// @Jin T3g（实验/可回退）：逐瓦片最大地形高程。只统计与 bbox 相交的 DEM，取 aboveMax 峰值；
+// 四叉树另加 50m 逐瓦片余量。回退：buildVisibleTiles 末参传 nullptr 即恢复统一 terrainCullMarginM 路径。
+double Renderer::maxTerrainHeightForBounds(double lonMin, double latMin,
+                                           double lonMax, double latMax) const {
+    // @Jin T3i：同一 bbox 在两个图层的四叉树递归中被反复查询，按 (lonMin,latMin) 量化键做帧内记忆化。
+    const int64_t key1 = static_cast<int64_t>(std::llround(lonMin * 1.0e6));
+    const int64_t key2 = static_cast<int64_t>(std::llround(latMin * 1.0e6));
+    auto &inner = tileTerrainHeightFrameCache_[key1];
+    auto found = inner.find(key2);
+    if (found != inner.end()) return found->second;
+    double maxHeight = 0.0;
+    for (const auto &entry : terrainCache_) {
+        const QuantizedMeshData &dem = entry.second;
+        if (lonMax < dem.lonMin || lonMin > dem.lonMax ||
+            latMax < dem.latMin || latMin > dem.latMax) {
+            continue;
+        }
+        if (dem.aboveMax > maxHeight) maxHeight = static_cast<double>(dem.aboveMax);
+    }
+    // @Jin T5（实验/可回退）：bbox 无任何已缓存 DEM 相交时（视口外围/首批数据未到），旧逻辑返回 0，
+    // AABB 只剩 +50m 余量，山区真实山脊（太白山相对高差可达千米级）远高于该 AABB，侧视锥平面把环周
+    // 瓦片整支误剔 → 屏幕周边黑块；而地形请求又由叶集驱动，被剔瓦片永远拿不到 DEM，形成死锁
+    // （表现为必须手动刷新地形才出图）。兜底取视口感知安全高（含 1.8× 半径与 +50m 余量），让外围
+    // 瓦片先以保守高度通过剔除进入叶集，DEM 到达后下次重建自动换成精确 aboveMax。
+    // 无地形图层时 terrainCache_ 为空、安全高返回 0，与旧行为逐位等价。
+    // 回退：删除本 if 块即恢复“无 DEM 即 0”的旧口径。
+    if (maxHeight <= 0.0 && !terrainCache_.empty()) {
+        maxHeight = viewportTerrainSafetyHeight(nav_.camera());
+    }
+    inner[key2] = maxHeight;
+    return maxHeight;
 }
 
 void Renderer::updateNavigatorTerrainFrame() {
     const Camera camera = nav_.camera();
     double targetHeight = 0.0;
-    double safetyHeight = 0.0;
     for (const auto &entry : terrainCache_) {
         const QuantizedMeshData &dem = entry.second;
-        safetyHeight = std::max(safetyHeight, static_cast<double>(dem.aboveMax) + 300.0);
         if (camera.longitude >= dem.lonMin && camera.longitude <= dem.lonMax &&
             camera.latitude >= dem.latMin && camera.latitude <= dem.latMax) {
             // @Jin 目标点高度必须取真实插值，安全高才使用 DEM 头部的区域最大值。
             targetHeight = std::max(targetHeight, dem.sampleHeight(camera.longitude, camera.latitude));
         }
     }
-    safetyHeight = std::min(safetyHeight, 9000.0);
-    nav_.setTerrainSurfaceHeights(targetHeight, std::max(targetHeight, safetyHeight));
+    // @Jin T2d（实验/可回退）：targetHeight 双向低通（每帧逼近 15%，约 100ms 时间常数）。
+    // 跨 DEM 瓦片边界时原始采样值阶跃，直接采用会让 eye/center 高度同步跳变（平移/缩放抖动）；
+    // 防穿山不受影响——safety 通道上升立即采纳，且斜距取 max(altitude, safety-target+clearance)。
+    if (viewportTargetSmoothed_ < 0.0) {
+        viewportTargetSmoothed_ = targetHeight;
+    } else {
+        viewportTargetSmoothed_ += (targetHeight - viewportTargetSmoothed_) * 0.15;
+        if (std::fabs(viewportTargetSmoothed_ - targetHeight) < 0.5) viewportTargetSmoothed_ = targetHeight;
+    }
+    targetHeight = viewportTargetSmoothed_;
+    // @Jin T2：安全高由“全局 aboveMax”改为“视口感知区域 aboveMax”，修复跨区域污染导致山区无法低空接近。
+    const double rawSafety = viewportTerrainSafetyHeight(camera);
+    // @Jin T2b（实验/可回退）：非对称时间平滑，消除平移时 DEM 进出视口导致的安全高阶跃（单指平移抖动）。
+    // 上升立即采纳（宁高勿低，防穿山）；下降每帧只逼近 8%，约 200ms 时间常数，肉眼无感且能跟上平移。
+    if (viewportSafetySmoothed_ < 0.0 || rawSafety >= viewportSafetySmoothed_) {
+        viewportSafetySmoothed_ = rawSafety;
+    } else {
+        viewportSafetySmoothed_ += (rawSafety - viewportSafetySmoothed_) * 0.08;
+        if (std::fabs(viewportSafetySmoothed_ - rawSafety) < 1.0) viewportSafetySmoothed_ = rawSafety; // 收敛后归零误差
+    }
+    nav_.setTerrainSurfaceHeights(targetHeight, std::max(targetHeight, viewportSafetySmoothed_));
+
+    // @Jin T9（实验性/可回退）：GL 线程按当前视口 footprint 采 9×9 地形高度网格，线程安全发布给 Navigator，
+    // 供手势线程做 3D 缩放/拾取锚点的射线-地形迭代求交（修复带倾角双指缩放焦点漂移）。
+    // footprint 半径口径与 viewportTerrainSafetyHeight 一致（1.8× 保守余量），保证手势焦点落在网格内。
+    // 无地形时发布 invalid 网格，Navigator 采样返回 0、回退纯椭球求交。回退：删除本块即恢复旧行为。
+    {
+        Navigator::TerrainAnchorGrid grid;
+        if (terrainCache_.empty()) {
+            grid.valid = false;
+        } else {
+            constexpr double kPiLocal = 3.14159265358979323846; // @Jin T9：本函数局部 π 常量，口径同 viewportTerrainSafetyHeight。
+            const double fovRad = camera.fieldOfView * kPiLocal / 180.0;
+            const double aspect = viewportHeight_ > 0
+                                      ? static_cast<double>(viewportWidth_) / static_cast<double>(viewportHeight_)
+                                      : 1.0;
+            const double tiltRad = std::fabs(camera.tilt) * kPiLocal / 180.0;
+            const double tanHalfFov = std::tan(fovRad * 0.5);
+            double radiusM = camera.altitude * tanHalfFov * std::max(1.0, aspect);
+            const double farAngle = std::min(tiltRad + fovRad * 0.5, kPiLocal * 0.5 - 0.02);
+            radiusM = std::max(radiusM, camera.altitude * std::tan(farAngle));
+            radiusM *= 1.8;
+            radiusM = std::min(radiusM, 6000000.0);
+            const double dLat = radiusM / 111320.0;
+            double cosLat = std::cos(camera.latitude * kPiLocal / 180.0);
+            if (cosLat < 0.15) cosLat = 0.15;
+            const double dLon = radiusM / (111320.0 * cosLat);
+            grid.lon0 = camera.longitude - dLon;
+            grid.lon1 = camera.longitude + dLon;
+            grid.lat0 = camera.latitude - dLat;
+            grid.lat1 = camera.latitude + dLat;
+            for (int iy = 0; iy < Navigator::TerrainAnchorGrid::N; ++iy) {
+                const double lat = grid.lat0 + (grid.lat1 - grid.lat0) * iy / (Navigator::TerrainAnchorGrid::N - 1);
+                for (int ix = 0; ix < Navigator::TerrainAnchorGrid::N; ++ix) {
+                    const double lon = grid.lon0 + (grid.lon1 - grid.lon0) * ix / (Navigator::TerrainAnchorGrid::N - 1);
+                    grid.heights[iy * Navigator::TerrainAnchorGrid::N + ix] = sampleTerrainHeightLonLat(lon, lat);
+                }
+            }
+            grid.valid = true;
+            grid.revision = terrainCacheRevision_;
+        }
+        nav_.setTerrainAnchorGrid(grid);
+    }
 }
 
 double Renderer::sampleTerrainHeight(const GlobeTile &tile, double lon, double lat) const {
@@ -2563,6 +2717,13 @@ double Renderer::sampleTerrainHeightLonLat(double lon, double lat) const {
 }
 
 uint64_t Renderer::terrainSignatureForTile(const GlobeTile &tile) const {
+    // @Jin T3i：签名只依赖瓦片 bbox 与当前 DEM 集合；同修订号内直接复用，DEM 波峰期避免每帧全表重算。
+    const uint64_t tKey = tileKey(tile.z, tile.x, tile.y);
+    auto memoIt = terrainSignatureMemo_.find(tKey);
+    if (memoIt != terrainSignatureMemo_.end() && memoIt->second.first == terrainCacheRevision_) {
+        return memoIt->second.second;
+    }
+
     // @Jin 只哈希与该渲染瓦片外扩范围相交的服务 DEM key；无关区域到达新地形时不会触发全场景网格重建。
     const double padLon = (tile.lonMax - tile.lonMin) * 0.0075;
     const double padLat = (tile.latMax - tile.latMin) * 0.0075;
@@ -2585,6 +2746,7 @@ uint64_t Renderer::terrainSignatureForTile(const GlobeTile &tile) const {
         hash ^= key;
         hash *= 1099511628211ull;
     }
+    terrainSignatureMemo_[tKey] = std::make_pair(terrainCacheRevision_, hash); // @Jin T3i
     return hash;
 }
 

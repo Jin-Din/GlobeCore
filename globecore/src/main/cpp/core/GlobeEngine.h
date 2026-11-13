@@ -295,6 +295,17 @@ public:
     /// 作为 LOD 细分判据的 densityFactor 传入 [Navigator]。由 Kotlin 侧 displayMetrics.density 传入。
     void setDisplayDensity(double density);
 
+    // @Jin P1（实验性/可回退）：3D 低空操作限制参数化，透传 Navigator；不调用即保持 38.2m/150m 默认行为。
+    /// 设置相机离地高度地板（米，钳 1~100000），调小后大比例尺可继续放大。
+    void setMinCameraAltitudeMeters(double meters);
+    /// 设置地形安全净空（米，钳 0~10000），山区调小后低空缩放不再被地形安全壳强制抬升。
+    void setTerrainClearanceMeters(double meters);
+
+    // @Jin P2（实验性/可回退）：3D 射线投影平移会话，透传 Navigator；T2e 起默认关闭（真机抖动结论），setRaycastPanEnabled(true) 显式启用。
+    void beginPanGesture(double sxPx, double syPx);
+    void endPanGesture();
+    void setRaycastPanEnabled(bool enabled);
+
     /// 设置「需重绘」回调（由 JNI 层注入，内部调用 Kotlin GLSurfaceView.requestRender）。
     /// RENDERMODE_WHEN_DIRTY 下，native 在瓦片异步加载/解码完成、需再画一帧时回调它触发重绘
     /// （对齐 参考实现 资源到位触发重绘）。回调可能在 GL 线程被调用，实现须线程安全（requestRender 是）。

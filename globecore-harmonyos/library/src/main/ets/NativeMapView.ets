@@ -20,6 +20,8 @@ import { VectorStyle } from './VectorStyle';
 import { VectorExtent } from './VectorExtent';
 import { FeatureGeometry, PickResult } from './FeatureGeometry';
 import { MapGestures, GestureSink } from './MapGestures';
+// @Jin layer-init-options：初始化选项接口下沉至 NativeLib 定义，此处再导出以保持 HAR 根出口不变。
+export type { TileLayerInitOptions, Tileset3DInitOptions };
 
 // @Jin layer-init-options：初始化选项接口下沉至 NativeLib 定义，此处再导出以保持 HAR 根出口不变。
 export type { TileLayerInitOptions, Tileset3DInitOptions };
@@ -124,7 +126,7 @@ export struct NativeMapView {
     return this.nativeHandle;
   }
 
-  /** 视图高（vp）只读取器（GestureSink 换算 tilt 灵敏度用；宿主勿调） */
+  /** @Jin 视图高（vp，来自 onAreaChange；仅 ArkTS 兜底通路 MapGestures 的 tilt 换算用；native 手势俯仰用 viewportHeight() 物理像素 px，二者勿混用。宿主勿调） */
   getViewHeightVp(): number {
     return this.viewHeight;
   }
@@ -636,6 +638,23 @@ export struct NativeMapView {
   /** 请求一帧重绘（surface 未就绪时 native 忽略；对齐 Kotlin requestRender WHEN_DIRTY 语义） */
   requestRender(): void {
     NativeLib.nativeRequestRender(this.nativeHandle);
+  }
+
+  // @Jin P1（实验性/可回退）：3D 低空操作限制参数化门面；默认值与旧硬编码一致，不调用即旧行为，回退无需改 native。
+  /** 相机离地高度地板（米，native 钳 1~100000），调小后大比例尺可继续放大。 */
+  setMinCameraAltitudeMeters(meters: number): void {
+    NativeLib.nativeSetMinCameraAltitude(this.nativeHandle, meters);
+  }
+
+  /** 地形安全净空（米，native 钳 0~10000），山区调小后低空缩放不再被安全壳强制抬升。 */
+  setTerrainClearanceMeters(meters: number): void {
+    NativeLib.nativeSetTerrainClearance(this.nativeHandle, meters);
+  }
+
+  // @Jin P2（实验性/可回退）：射线投影平移开关；native 手势 DOWN/UP 已自动维护会话，宿主仅需切换开关。
+  /** 3D 平移是否使用屏幕射线投影（默认开）；关闭后回退 mPerPx 线性近似，用于效果对比/回退。 */
+  setRaycastPanEnabled(enabled: boolean): void {
+    NativeLib.nativeSetRaycastPanEnabled(this.nativeHandle, enabled);
   }
 
   // ── 组件生命周期与渲染接线 ──

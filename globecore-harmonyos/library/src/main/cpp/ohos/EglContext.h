@@ -77,20 +77,20 @@ public:
     /// XComponent surface 尺寸变化：记录视口 + 请求一帧重绘（引擎内部幂等处理重复尺寸）。
     void setSurfaceSize(int32_t width, int32_t height);
 
-    /// 惯性滑动：以初速度（vp/s，屏幕坐标系，右/下为正）启动自驱动平移帧序列，
+    /// @Jin 惯性滑动：以初速度（px/s 物理像素，屏幕坐标系，右/下为正；旧注释误标 vp/s，2026-11 勘误）启动自驱动平移帧序列，
     /// 渲染线程逐帧按 dt 平移相机并指数衰减，低于阈值自动停止（任意线程可调，重复调覆盖）。
-    void startFling(double vxVpPerSec, double vyVpPerSec);
+    void startFling(double vxPxPerSec, double vyPxPerSec); // @Jin 参数旧名 *VpPerSec 勘误为 px/s
     /// 中止惯性滑动（新一次触摸按下时调用，任意线程）。
     void cancelFling();
 
-    /// 单击确认：触摸层在 UP 时投递候选点（vp 坐标 + 截止时刻 steady_clock ns），
+    /// @Jin 单击确认：触摸层在 UP 时投递候选点（px 物理像素坐标 + 截止时刻 steady_clock ns；旧注释误标 vp），
     /// 渲染线程到点触发 singleTap 回调（截止传当前时刻即下一帧立即确认）。
-    void postPendingTap(float xVp, float yVp, int64_t deadlineNs);
+    void postPendingTap(float xPx, float yPx, int64_t deadlineNs); // @Jin 参数旧名 xVp/yVp 勘误为 px
     void cancelPendingTap();
 
-    /// 长按候选：触摸层在 DOWN 时投递（vp 坐标 + 截止时刻 steady_clock ns），渲染线程到点
+    /// @Jin 长按候选：触摸层在 DOWN 时投递（px 物理像素坐标 + 截止时刻 steady_clock ns；旧注释误标 vp），渲染线程到点
     /// 且未被取消（手指未移动/未抬离）则触发 longPress 回调；移动越 slop 或 UP/CANCEL 时取消。
-    void postPendingLongPress(float xVp, float yVp, int64_t deadlineNs);
+    void postPendingLongPress(float xPx, float yPx, int64_t deadlineNs); // @Jin 参数旧名 xVp/yVp 勘误为 px
     void cancelPendingLongPress();
 
     /// 单击确认后的回调（在渲染线程触发；接线方负责转投 ArkTS 主线程）。
@@ -131,7 +131,7 @@ private:
     // 的续帧兜底；到点且无其它帧源时回到 WHEN_DIRTY 无限休眠（静止零重绘）。不经 mtx_，故用 atomic。
     std::atomic<int64_t> activeUntilNs_{0};
 
-    // 惯性滑动状态（mtx_ 保护）：速度单位 vp/s；lastFlingNs_ 为上一推进时刻（steady_clock ns）
+    // @Jin 惯性滑动状态（mtx_ 保护）：速度单位 px/s（物理像素；旧注释误标 vp/s，2026-11 勘误）；lastFlingNs_ 为上一推进时刻（steady_clock ns）
     double flingVx_ = 0.0;
     double flingVy_ = 0.0;
     int64_t lastFlingNs_ = 0;

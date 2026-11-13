@@ -50,6 +50,23 @@ class NativeMapView @JvmOverloads constructor(
         requestRender()
     }
 
+    // @Jin P1（实验性/可回退）：3D 低空操作限制参数化门面，默认 38.2m/150m 与旧硬编码一致；不调用即旧行为。
+    /** 相机离地高度地板（米，钳 1~100000），调小后大比例尺可继续放大。 */
+    fun setMinCameraAltitudeMeters(meters: Double) {
+        if (nativeHandle != 0L) NativeLib.nativeSetMinCameraAltitude(nativeHandle, meters)
+    }
+
+    /** 地形安全净空（米，钳 0~10000），山区调小后低空缩放不再被安全壳强制抬升。 */
+    fun setTerrainClearanceMeters(meters: Double) {
+        if (nativeHandle != 0L) NativeLib.nativeSetTerrainClearance(nativeHandle, meters)
+    }
+
+    // @Jin P2（实验性/可回退）：射线投影平移开关，false 回退 mPerPx 线性近似。
+    /** 3D 平移是否使用屏幕射线投影（默认开）。 */
+    fun setRaycastPanEnabled(enabled: Boolean) {
+        if (nativeHandle != 0L) NativeLib.nativeSetRaycastPanEnabled(nativeHandle, enabled)
+    }
+
 
     /**
      * 手势识别器：识别结果经 [GestureSink] 落到 native 相机（句柄守卫集中在此）。
@@ -110,6 +127,13 @@ class NativeMapView @JvmOverloads constructor(
      */
     override fun onTouchEvent(event: MotionEvent): Boolean {
         if (nativeHandle == 0L) return false
+        // @Jin P2（实验性/可回退）：按下建立射线平移锚点、抬手/取消结束；2D 或开关关闭时 native 内部自动忽略。
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN ->
+                NativeLib.nativeBeginPanGesture(nativeHandle, event.x.toDouble(), event.y.toDouble())
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL ->
+                NativeLib.nativeEndPanGesture(nativeHandle)
+        }
         return gestures.onTouchEvent(event)
     }
 

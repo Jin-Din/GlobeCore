@@ -163,6 +163,9 @@ override fun onDestroy() { map.destroy() }</code></pre></section>
 fun getViewMode(): NativeMapView.ViewMode
 enum class ViewMode { TWO_D, THREE_D }</code></pre><p>切换 2D 平面墨卡托正交视图或 3D 球体透视视图。</p></div>
 <div class="api"><h4>cameraZoomLevel</h4><pre><code>fun cameraZoomLevel(): Int</code></pre><p>返回当前相机对应的地图缩放级别，可用于调试 LOD 或界面显示。</p></div>
+<div class="api"><h4>setMinCameraAltitudeMeters / setTerrainClearanceMeters <span style="color:#b45309">@Jin 新增·实验·可回退</span></h4><pre><code>fun setMinCameraAltitudeMeters(meters: Double): Unit
+fun setTerrainClearanceMeters(meters: Double): Unit</code></pre><p>3D 低空操作限制参数化（2026-11，fix/3d-gesture-low-altitude）。高度地板 native 钳 1~100000m、默认 38.2m；地形净空钳 0~10000m、默认 150m。默认值等同旧硬编码，不调用即旧行为，参数仅内存态。山区低空缩放被安全壳抬升时调小即可继续放大。</p></div>
+<div class="api"><h4>setRaycastPanEnabled <span style="color:#b45309">@Jin 新增·实验·可回退</span></h4><pre><code>fun setRaycastPanEnabled(enabled: Boolean): Unit</code></pre><p>3D 平移算法开关，默认 true：手势平移按屏幕射线逐帧求交、以 ENU 差分移动中心，带倾角低空不再“拖不动/发飘”，射线失败自动回退线性近似；传 false 整体回退旧 mPerPx 路径。手势会话由 NativeMapView.onTouchEvent 自动维护。</p></div>
 
 <h3 id="api-gesture">10.3 手势与点击回调</h3>
 <div class="api"><h4>setOnTapListener</h4><pre><code>fun setOnTapListener(listener: ((x: Float, y: Float) -> Unit)?): Unit</code></pre><p>注册单击回调，坐标为视图像素。通常配合 <code>screenToGeo</code> 或 <code>pickVector</code> 使用。</p></div>

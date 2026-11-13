@@ -793,6 +793,43 @@ Java_com_zys_globecore_NativeLib_nativeSetDisplayDensity(JNIEnv * /*env*/, jobje
     toGlobeEngine(handle)->setDisplayDensity(density);
 }
 
+// @Jin P1（实验性/可回退）：相机高度地板（米），默认 38.2；不调用即旧行为。
+JNIEXPORT void JNICALL
+Java_com_zys_globecore_NativeLib_nativeSetMinCameraAltitude(JNIEnv * /*env*/, jobject /*thiz*/, jlong handle,
+                                                            jdouble meters) {
+    if (handle == 0) return;
+    toGlobeEngine(handle)->setMinCameraAltitudeMeters(meters);
+}
+
+// @Jin P1（实验性/可回退）：地形安全净空（米），默认 150；山区调小换取低空操作空间。
+JNIEXPORT void JNICALL
+Java_com_zys_globecore_NativeLib_nativeSetTerrainClearance(JNIEnv * /*env*/, jobject /*thiz*/, jlong handle,
+                                                           jdouble meters) {
+    if (handle == 0) return;
+    toGlobeEngine(handle)->setTerrainClearanceMeters(meters);
+}
+
+// @Jin P2（实验性/可回退）：射线投影平移会话与开关。
+JNIEXPORT void JNICALL
+Java_com_zys_globecore_NativeLib_nativeBeginPanGesture(JNIEnv * /*env*/, jobject /*thiz*/, jlong handle,
+                                                       jdouble sxPx, jdouble syPx) {
+    if (handle == 0) return;
+    toGlobeEngine(handle)->beginPanGesture(sxPx, syPx);
+}
+
+JNIEXPORT void JNICALL
+Java_com_zys_globecore_NativeLib_nativeEndPanGesture(JNIEnv * /*env*/, jobject /*thiz*/, jlong handle) {
+    if (handle == 0) return;
+    toGlobeEngine(handle)->endPanGesture();
+}
+
+JNIEXPORT void JNICALL
+Java_com_zys_globecore_NativeLib_nativeSetRaycastPanEnabled(JNIEnv * /*env*/, jobject /*thiz*/, jlong handle,
+                                                            jboolean enabled) {
+    if (handle == 0) return;
+    toGlobeEngine(handle)->setRaycastPanEnabled(enabled == JNI_TRUE);
+}
+
 // @Jin 配置 C++ 地形 Provider；headers 由 Kotlin 侧展平为 [name0, value0, name1, value1, ...]。
 // @Jin 奇数长度视为无效输入并丢弃末项，避免把不完整键值对传入下载线程。
 JNIEXPORT jboolean JNICALL
