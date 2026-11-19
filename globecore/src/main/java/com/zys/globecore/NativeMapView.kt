@@ -469,6 +469,43 @@ class NativeMapView @JvmOverloads constructor(
     }
 
     /**
+     * @Jin 专用 GeoJSON 图层入口（实验性）。[url] 为本地 .geojson/.json 绝对路径或 http(s) 在线地址，
+     * [data] 为 GeoJSON 结构字符串；二者互斥，必须且只能传一个非空串，同空或同非空返回 -1。
+     * 样式、图标、extent、maxFeatures 语义与 [addVectorLayer] 完全一致，图层 index 空间与拾取/显隐 API 共用。
+     * URL 下载到 filesDir/globecore/vector-cache/url/，字符串原子落盘到 inline/ 子目录，同内容哈希去重。
+     */
+    fun addGeoJSONLayer(
+        url: String,
+        data: String,
+        style: VectorStyle,
+        iconArgb: IntArray? = null,
+        iconW: Int = 0,
+        iconH: Int = 0,
+        extent: VectorExtent? = null,
+        maxFeatures: Int = 0
+    ): Int {
+        // @Jin Kotlin 侧先做互斥门控，非法入参不进 JNI，与引擎层校验保持同一失败口径（-1）。
+        if ((url.isEmpty() && data.isEmpty()) || (url.isNotEmpty() && data.isNotEmpty())) return -1
+        val h = nativeHandle
+        // @Jin 与 addVectorLayer 共用应用私有缓存目录；URL 落 url/、字符串落 inline/。
+        val vectorCacheDir = File(File(context.filesDir, "globecore"), "vector-cache").absolutePath
+        val index = if (h != 0L) NativeLib.nativeAddGeoJSONLayer(
+            h, url, data, style.fillColor, style.outlineColor, style.outlineWidth,
+            style.lineColor, style.lineWidth, style.pointColor, style.pointRadiusDp,
+            style.fillExplicit, style.lineExplicit,
+            style.labelField, style.labelColor, style.labelSize, style.labelOutline, style.labelOutlineColor,
+            style.featureStyleOverride,
+            iconArgb, iconW, iconH,
+            extent != null,
+            extent?.minLon ?: 0.0, extent?.minLat ?: 0.0,
+            extent?.maxLon ?: 0.0, extent?.maxLat ?: 0.0, maxFeatures,
+            vectorCacheDir
+        ) else -1
+        requestRender()
+        return index
+    }
+
+    /**
      * 按新屏幕范围重载指定矢量层（[index] 为 [addVectorLayer] 加入次序）。native 后台按新范围重读建新几何，
      * 就绪后由 GL 线程同帧替换旧几何（Swap-on-ready：停下即有数据、重载期间无空窗）。
      * [extent] 为空时走整文件全量；[maxFeatures]≤0 取硬上限。仅更新 native 状态，内部触发一帧重绘。

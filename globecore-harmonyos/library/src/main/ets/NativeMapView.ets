@@ -460,6 +460,39 @@ export struct NativeMapView {
     return index;
   }
 
+  /**
+   * @Jin 专用 GeoJSON 图层入口（实验性）。[url] 为本地 .geojson/.json 绝对路径或 http(s) 在线地址，
+   * [data] 为 GeoJSON 结构字符串；二者互斥，必须且只能传一个非空串，同空或同非空返回 -1。
+   * 样式、图标、extent、maxFeatures 语义与 [addVectorLayer] 完全一致，图层 index 空间与拾取/显隐 API 共用。
+   * URL 下载到组件 vectorCacheDir 的 url/ 子目录，字符串原子落盘到 inline/ 子目录，同内容哈希去重。
+   */
+  addGeoJSONLayer(url: string, data: string, style: VectorStyle,
+    iconArgb: number[] | undefined = undefined, iconW: number = 0, iconH: number = 0,
+    extent: VectorExtent | undefined = undefined, maxFeatures: number = 0): number {
+    // @Jin ArkTS 侧先做互斥门控，非法入参不进 NAPI，与引擎层校验保持同一失败口径（-1）。
+    const urlEmpty: boolean = url === undefined || url === null || url.length === 0;
+    const dataEmpty: boolean = data === undefined || data === null || data.length === 0;
+    if (urlEmpty === dataEmpty) {
+      return -1;
+    }
+    const index = NativeLib.nativeAddGeoJSONLayer(this.nativeHandle, url, data,
+      style.fillColor, style.outlineColor, style.outlineWidth,
+      style.lineColor, style.lineWidth, style.pointColor, style.pointRadiusDp,
+      style.fillExplicit, style.lineExplicit,
+      style.labelField, style.labelColor, style.labelSize,
+      style.labelOutline, style.labelOutlineColor,
+      style.featureStyleOverride,
+      iconArgb, iconW, iconH,
+      extent !== undefined && extent !== null,
+      extent !== undefined && extent !== null ? extent.minLon : 0.0,
+      extent !== undefined && extent !== null ? extent.minLat : 0.0,
+      extent !== undefined && extent !== null ? extent.maxLon : 0.0,
+      extent !== undefined && extent !== null ? extent.maxLat : 0.0,
+      maxFeatures, this.vectorCacheDir);
+    this.requestRender();
+    return index;
+  }
+
   /** 按新屏幕范围重载指定矢量层（Swap-on-ready 无空窗）；extent 空走整文件全量 */
   updateVectorExtent(index: number, extent: VectorExtent | undefined, maxFeatures: number = 0): void {
     const has: boolean = extent !== undefined && extent !== null;

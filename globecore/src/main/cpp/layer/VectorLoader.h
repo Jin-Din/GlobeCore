@@ -8,6 +8,7 @@
 
 #include "vector/VectorGeometry.h"
 #include "vector/VectorReader.h"
+#include "vector/VectorSourceResolver.h"
 
 namespace globecore {
 
@@ -27,6 +28,13 @@ public:
     /// [hasExtent]+[minLon,minLat,maxLon,maxLat] 给出初始屏幕过滤范围（false=整文件全量，小数据直显）；
     /// [maxFeatures] 为单次加载要素预算（≤0 取读取器硬上限，防密集数据 OOM）。
     VectorLoader(std::string path, VectorStyle style,
+                 bool hasExtent = false, double minLon = 0.0, double minLat = 0.0,
+                 double maxLon = 0.0, double maxLat = 0.0, int maxFeatures = 0,
+                 std::string vectorCacheDir = std::string());
+
+    // @Jin addGeoJSONLayer 专用构造：显式 SourceKind（File/Url/Data）+ 来源值；Data 时 inlineData 携带
+    // GeoJSON 字符串（source 仅作日志/缓存键输入），Url/File 时 inlineData 留空。其余参数语义同旧构造。
+    VectorLoader(SourceKind kind, std::string source, std::string inlineData, VectorStyle style,
                  bool hasExtent = false, double minLon = 0.0, double minLat = 0.0,
                  double maxLon = 0.0, double maxLat = 0.0, int maxFeatures = 0,
                  std::string vectorCacheDir = std::string());
@@ -75,8 +83,10 @@ private:
     void ensureWorkerLocked();
 
     std::string path_;
-    // @Jin 以下四项描述在线 URL → 本地缓存文件的 Source 解析结果；本地文件路径保持零改动。
-    bool remoteSource_ = false;
+    // @Jin 数据源种类替代原 bool remoteSource_：File 直通本地路径，Url 下载缓存，Data 字符串落 inline 缓存。
+    SourceKind sourceKind_ = SourceKind::File;
+    // @Jin Data 来源的 GeoJSON 字符串原文；File/Url 时为空。
+    std::string inlineData_;
     std::string cachePath_;
     std::string effectivePath_;
     std::string sourceLogName_;

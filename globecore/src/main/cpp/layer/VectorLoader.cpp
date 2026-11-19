@@ -20,12 +20,30 @@ VectorLoader::VectorLoader(std::string path, VectorStyle style,
       vectorCacheDir_(std::move(vectorCacheDir)),
       hasExtent_(hasExtent), minLon_(minLon), minLat_(minLat), maxLon_(maxLon), maxLat_(maxLat),
       maxFeatures_(maxFeatures) {
-    // @Jin 在后台线程启动前完成 URL 识别；http/https 走下载缓存，本地路径沿用旧 GDALOpenEx 行为。
+    // @Jin 旧 addVectorLayer 通路：维持 P0 的 http 前缀隐式映射（双参 resolve 内部转 Url/File）。
     ResolvedVectorSource resolved = VectorSourceResolver::resolve(path, vectorCacheDir_);
-    remoteSource_ = resolved.remote;
+    sourceKind_ = resolved.kind;
     path_ = std::move(resolved.originalSource);
     cachePath_ = resolved.cachePath;
-    effectivePath_ = remoteSource_ ? std::string() : path_;
+    effectivePath_ = sourceKind_ == SourceKind::File ? path_ : std::string();
+    sourceLogName_ = resolved.safeLogName;
+}
+
+// @Jin addGeoJSONLayer 显式来源构造：kind 由引擎层 url/data 互斥校验后确定，构造期完成缓存路径解析。
+VectorLoader::VectorLoader(SourceKind kind, std::string source, std::string inlineData, VectorStyle style,
+                           bool hasExtent, double minLon, double minLat,
+                           double maxLon, double maxLat, int maxFeatures,
+                           std::string vectorCacheDir)
+    : style_(style),
+      vectorCacheDir_(std::move(vectorCacheDir)),
+      hasExtent_(hasExtent), minLon_(minLon), minLat_(minLat), maxLon_(maxLon), maxLat_(maxLat),
+      maxFeatures_(maxFeatures) {
+    ResolvedVectorSource resolved = VectorSourceResolver::resolve(kind, source, vectorCacheDir_);
+    sourceKind_ = resolved.kind;
+    inlineData_ = std::move(inlineData);
+    path_ = std::move(resolved.originalSource);
+    cachePath_ = resolved.cachePath;
+    effectivePath_ = sourceKind_ == SourceKind::File ? path_ : std::string();
     sourceLogName_ = resolved.safeLogName;
 }
 
@@ -113,15 +131,18 @@ void VectorLoader::run() {
             cap = maxFeatures_;
             rerunRequested_ = false;
             stale_.store(false); // 本轮开始清抢占标志（上一轮 reload 触发的置真随旧结果一并作废）
-            state_ = remoteSource_ ? State::Downloading : State::Reading;
+            // @Jin File 直接进读取；Url 下载、Data 字符串落盘都属于"数据源准备"阶段。
+            state_ = sourceKind_ == SourceKind::File ? State::Reading : State::Downloading;
         }
         const auto t0 = std::chrono::steady_clock::now();
 
         std::string readPath = path_;
-        if (remoteSource_) {
+        if (sourceKind_ != SourceKind::File) {
             if (cachePath_.empty() || vectorCacheDir_.empty()) {
                 std::lock_guard<std::mutex> lk(mtx_);
-                error_ = "在线 GeoJSON 缓存目录未配置";
+                // @Jin Url 与 Data 都依赖宿主私有缓存目录；文案区分来源便于宿主定位配置问题。
+                error_ = sourceKind_ == SourceKind::Url ? "在线 GeoJSON 缓存目录未配置"
+                                                         : "GeoJSON 字符串缓存目录未配置";
                 state_ = State::Failed;
                 workerRunning_ = false;
                 return;
@@ -129,9 +150,11 @@ void VectorLoader::run() {
             if (effectivePath_.empty() || !std::filesystem::exists(effectivePath_)) {
                 RemoteVectorFetchOptions fetchOptions;
                 fetchOptions.cacheDir = vectorCacheDir_;
-                // @Jin P0 只支持公开 URL；headers/ETag/refresh 等列入后续阶段。
-                const RemoteVectorFetchResult fetched = RemoteVectorCache::prepareGeoJson(
-                    path_, cachePath_, fetchOptions, abort_);
+                // @Jin Url 走下载缓存（P0 仅公开 URL）；Data 走字符串校验+inline 落盘，二者之后统一读本地缓存。
+                const RemoteVectorFetchResult fetched =
+                    sourceKind_ == SourceKind::Url
+                        ? RemoteVectorCache::prepareGeoJson(path_, cachePath_, fetchOptions, abort_)
+                        : RemoteVectorCache::prepareInlineGeoJson(inlineData_, cachePath_, fetchOptions, abort_);
                 if (abort_.load()) {
                     std::lock_guard<std::mutex> lk(mtx_);
                     workerRunning_ = false;
@@ -147,7 +170,7 @@ void VectorLoader::run() {
                 }
                 effectivePath_ = fetched.localPath;
             }
-            // @Jin extent 变化只让 GDAL 重读本地缓存，不取消/重启 URL 下载，不产生重复网络请求。
+            // @Jin extent 变化只让读取器重读本地缓存，不取消/重启 URL 下载或字符串落盘，不产生重复 IO。
             if (stale_.load()) continue;
             readPath = effectivePath_;
         }

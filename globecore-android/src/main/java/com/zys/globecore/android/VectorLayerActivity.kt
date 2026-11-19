@@ -8,7 +8,8 @@ import com.zys.globecore.VectorStyle
 
 /**
  * 演示 03 · 矢量图层与拾取（对应 tutorials/03「矢量图层与拾取」）：
- *  - @Jin [NativeMapView.addVectorLayer]：直接传入在线省级 GeoJSON URL，native 下载缓存后复用 OGR 管线；
+ *  - @Jin [NativeMapView.addGeoJSONLayer]：专用 GeoJSON 入口，url 传在线省级地址（native 下载缓存后复用读取管线）；
+ *  - @Jin 同接口 data 传 GeoJSON 字符串：native 校验后落 inline 缓存再建层，无需宿主写文件；
  *  - @Jin [VectorStyle] 承载面填充/描边/标注样式，异步读取 + 三角剖分，就绪自动重绘；
  *  - @Jin [NativeMapView.pickVector]：屏幕点命中 → [layerIndex, fid]；
  *  - @Jin [NativeMapView.featureGeometry] + 叠加层：选中要素高亮（noPick 退出拾取竞争）。
@@ -18,6 +19,7 @@ class VectorLayerActivity : BaseMapActivity() {
     override val demoTitle get() = getString(R.string.demo_vector_title)
 
     private var vectorIdx = -1
+    private var inlineIdx = -1
     private var highlightIdx = -1
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -29,6 +31,8 @@ class VectorLayerActivity : BaseMapActivity() {
         addBasemap(Camera(latitude = 35.2, longitude = 105.5, altitude = 9_000_000.0))
 
         addDemoAction(getString(R.string.action_add_vector)) { addVector() }
+        // @Jin 新增内联 GeoJSON 字符串入口：验证 addGeoJSONLayer 的 data 通路（落 inline 缓存、同内容去重）。
+        addDemoAction("内联GeoJSON") { addInlineGeoJson() }
         addDemoAction("放大") { zoomIn() }
         addDemoAction("缩小") { zoomOut() }
     }
@@ -38,10 +42,11 @@ class VectorLayerActivity : BaseMapActivity() {
             toast("矢量层已加载（index=$vectorIdx）")
             return
         }
-        // @Jin 不再由 demo 预先下载/拷贝文件，直接把 210 服务上的 province.json 交给 SDK 验证在线 GeoJSON P0。
+        // @Jin URL 数据源走 addGeoJSONLayer 专用入口（data 传空串）；旧 addVectorLayer 的 URL 用法已弃用。
         // @Jin labelField="name"：逐要素取 name 属性作文字标注（native 自动探测系统 CJK 字体）
-        vectorIdx = map.addVectorLayer(
-            PROVINCE_GEOJSON_URL,
+        vectorIdx = map.addGeoJSONLayer(
+            url = PROVINCE_GEOJSON_URL,
+            data = "",
             VectorStyle(
                 fillColor = 0x664A8FE3.toInt(),
                 outlineColor = 0xFFFFFFFF.toInt(),
@@ -69,6 +74,35 @@ class VectorLayerActivity : BaseMapActivity() {
                 }
             }
         }
+    }
+
+    // @Jin data 通路：宿主直接给 FeatureCollection 字符串，native 在 filesDir/globecore/vector-cache/inline 落盘后建层。
+    private fun addInlineGeoJson() {
+        if (inlineIdx >= 0) {
+            toast("内联 GeoJSON 层已加载（index=$inlineIdx）")
+            return
+        }
+        val geoJsonText = """
+            {"type":"FeatureCollection","features":[
+              {"type":"Feature","properties":{"name":"内联点"},"geometry":{"type":"Point","coordinates":[116.40,39.90]}},
+              {"type":"Feature","properties":{"name":"内联三角面"},"geometry":{"type":"Polygon","coordinates":[[
+                [115.90,39.40],[116.90,39.40],[116.40,40.10],[115.90,39.40]]]}}
+            ]}
+        """.trimIndent()
+        inlineIdx = map.addGeoJSONLayer(
+            url = "",
+            data = geoJsonText,
+            VectorStyle(
+                fillColor = 0x66FF8800.toInt(),
+                outlineColor = 0xFFFF8800.toInt(),
+                lineColor = 0xFFFF8800.toInt(),
+                pointColor = 0xFFFF8800.toInt(),
+                labelField = "name",
+                labelOutline = true,
+            ),
+        )
+        map.setCamera(Camera(latitude = 39.75, longitude = 116.40, altitude = 700_000.0))
+        toast("内联 GeoJSON 已加入 index=$inlineIdx（data 通路）")
     }
 
     private fun FeatureGeometry.typeDesc() = when (type) {

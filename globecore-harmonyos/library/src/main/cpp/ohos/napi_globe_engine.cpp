@@ -881,6 +881,77 @@ napi_value NativeAddVectorLayer(napi_env env, napi_callback_info info) {
     return gcohos::NapiMakeInt32(env, index);
 }
 
+// @Jin 专用 GeoJSON 图层入口：url（本地路径/http(s)）与 data（GeoJSON 字符串）互斥；样式/图标/extent
+// 参数族与 NativeAddVectorLayer 同构，仅参数索引整体后移一位（path 一参拆为 url+data 两参，共 28 参）。
+napi_value NativeAddGeoJSONLayer(napi_env env, napi_callback_info info) {
+    napi_value args[28];
+    gcohos::NapiGetArgs(env, info, 28, args);
+    int64_t handle = 0;
+    if (!gcohos::NapiGetInt64(env, args[0], handle) || handle == 0) return gcohos::NapiMakeInt32(env, -1);
+    // @Jin 互斥校验在引擎层兜底；这里只做空串归一，同空/同非空均由 addGeoJSONLayer 返回 -1。
+    const std::string url = gcohos::NapiGetString(env, args[1]);
+    const std::string data = gcohos::NapiGetString(env, args[2]);
+
+    int32_t fillColor = 0, outlineColor = 0, lineColor = 0, pointColor = 0;
+    int32_t labelColor = 0, labelOutlineColor = 0;
+    double outlineWidth = 0, lineWidth = 0, pointRadiusDp = 0, labelSize = 0;
+    bool fillExplicit = false, lineExplicit = false, labelOutline = false;
+    gcohos::NapiGetInt32(env, args[3], fillColor);
+    gcohos::NapiGetInt32(env, args[4], outlineColor);
+    gcohos::NapiGetDouble(env, args[5], outlineWidth);
+    gcohos::NapiGetInt32(env, args[6], lineColor);
+    gcohos::NapiGetDouble(env, args[7], lineWidth);
+    gcohos::NapiGetInt32(env, args[8], pointColor);
+    gcohos::NapiGetDouble(env, args[9], pointRadiusDp);
+    gcohos::NapiGetBool(env, args[10], fillExplicit);
+    gcohos::NapiGetBool(env, args[11], lineExplicit);
+    const std::string labelField = gcohos::NapiGetString(env, args[12]);
+    gcohos::NapiGetInt32(env, args[13], labelColor);
+    gcohos::NapiGetDouble(env, args[14], labelSize);
+    gcohos::NapiGetBool(env, args[15], labelOutline);
+    gcohos::NapiGetInt32(env, args[16], labelOutlineColor);
+    const std::string featureStyleOverride = gcohos::NapiGetString(env, args[17]);
+    const std::vector<int32_t> iconArgb = gcohos::NapiGetInt32Array(env, args[18]);
+    int32_t iconW = 0, iconH = 0;
+    gcohos::NapiGetInt32(env, args[19], iconW);
+    gcohos::NapiGetInt32(env, args[20], iconH);
+    bool hasExtent = false;
+    gcohos::NapiGetBool(env, args[21], hasExtent);
+    double minLon = 0, minLat = 0, maxLon = 0, maxLat = 0;
+    gcohos::NapiGetDouble(env, args[22], minLon);
+    gcohos::NapiGetDouble(env, args[23], minLat);
+    gcohos::NapiGetDouble(env, args[24], maxLon);
+    gcohos::NapiGetDouble(env, args[25], maxLat);
+    int32_t maxFeatures = 0;
+    if (args[26] != nullptr) gcohos::NapiGetInt32(env, args[26], maxFeatures);
+    // @Jin 第 28 个参数：URL 下载落 url/、字符串落 inline/，均在宿主私有缓存目录之下。
+    const std::string vectorCacheDir = gcohos::NapiGetString(env, args[27]);
+
+    globecore::VectorStyle style;
+    unpackArgb(fillColor, style.fillR, style.fillG, style.fillB, style.fillA);
+    unpackArgb(outlineColor, style.outlineR, style.outlineG, style.outlineB, style.outlineA);
+    style.outlineWidth = static_cast<float>(outlineWidth);
+    unpackArgb(lineColor, style.lineR, style.lineG, style.lineB, style.lineA);
+    style.lineWidth = static_cast<float>(lineWidth);
+    unpackArgb(pointColor, style.pointR, style.pointG, style.pointB, style.pointA);
+    style.pointRadiusDp = static_cast<float>(pointRadiusDp);
+    style.hasFillColor = fillExplicit;
+    style.hasLineColor = lineExplicit;
+    style.labelField = labelField;
+    unpackArgb(labelColor, style.labelR, style.labelG, style.labelB, style.labelA);
+    style.labelSize = static_cast<float>(labelSize);
+    style.labelOutline = labelOutline;
+    unpackArgb(labelOutlineColor, style.labelOutlineR, style.labelOutlineG, style.labelOutlineB,
+               style.labelOutlineA);
+    style.featureOverrides = parseFeatureOverrides(featureStyleOverride);
+
+    std::vector<uint8_t> iconRgba = iconArgbToRgba(iconArgb, iconW, iconH);
+    const int index = toGlobeEngine(handle)->addGeoJSONLayer(
+            url, data, style, std::move(iconRgba), iconW, iconH,
+            hasExtent, minLon, minLat, maxLon, maxLat, maxFeatures, vectorCacheDir);
+    return gcohos::NapiMakeInt32(env, index);
+}
+
 napi_value NativeUpdateVectorExtent(napi_env env, napi_callback_info info) {
     napi_value args[8];
     gcohos::NapiGetArgs(env, info, 8, args);
@@ -1521,6 +1592,8 @@ napi_value RegisterGlobeEngine(napi_env env, napi_value exports) {
         {"nativeHasRasterLoading", nullptr, NativeHasRasterLoading, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeGetRasterImageError", nullptr, NativeGetRasterImageError, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeAddVectorLayer", nullptr, NativeAddVectorLayer, nullptr, nullptr, nullptr, napi_default, nullptr},
+        // @Jin 专用 GeoJSON 入口（url/data 互斥），与 nativeAddVectorLayer 共享图层 index 与渲染管线。
+        {"nativeAddGeoJSONLayer", nullptr, NativeAddGeoJSONLayer, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeUpdateVectorExtent", nullptr, NativeUpdateVectorExtent, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeHasVectorLoading", nullptr, NativeHasVectorLoading, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"nativeSetVectorLayerVisible", nullptr, NativeSetVectorLayerVisible, nullptr, nullptr, nullptr, napi_default, nullptr},

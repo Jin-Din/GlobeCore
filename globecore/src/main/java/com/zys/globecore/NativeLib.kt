@@ -162,6 +162,26 @@ internal object NativeLib {
     ): Int
 
     /**
+     * @Jin 专用 GeoJSON 图层入口（实验性）。[url] 为本地文件绝对路径或 http(s) GeoJSON 地址，
+     * [data] 为 GeoJSON 结构字符串；二者互斥，必须且只能传一个非空串，同空或同非空 native 返回 -1。
+     * 其余样式/图标/extent 参数语义与 [nativeAddVectorLayer] 完全一致，图层 index 空间共用。
+     * [vectorCacheDir] 为宿主私有缓存目录：URL 下载落 url/ 子目录、字符串落 inline/ 子目录。
+     */
+    external fun nativeAddGeoJSONLayer(
+        handle: Long, url: String, data: String,
+        fillColor: Int, outlineColor: Int, outlineWidth: Float,
+        lineColor: Int, lineWidth: Float,
+        pointColor: Int, pointRadiusDp: Float,
+        fillExplicit: Boolean, lineExplicit: Boolean,
+        labelField: String, labelColor: Int, labelSize: Float,
+        labelOutline: Boolean, labelOutlineColor: Int,
+        featureStyleOverride: String,
+        iconArgb: IntArray?, iconW: Int, iconH: Int,
+        hasExtent: Boolean, minLon: Double, minLat: Double, maxLon: Double, maxLat: Double, maxFeatures: Int,
+        vectorCacheDir: String
+    ): Int
+
+    /**
      * 按新屏幕范围重载指定矢量层（Swap-on-ready，无空窗）：index 为 [nativeAddVectorLayer] 加入次序。
      * hasExtent=false 走整文件全量；maxFeatures≤0 取硬上限。越界/非文件层忽略。
      */

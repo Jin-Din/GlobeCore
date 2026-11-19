@@ -532,3 +532,30 @@ NativeMapView({
 - 真机验证（设备 5KLBB25911200313，2026-11-13）：BUILD ID `v0.1.5-20261113-zoomoffset1` 入日志；切「放大 s=z-1」后日志 `addTileLayer ... crs=EPSG:4326 geo=1 zoomOffset=-1`、TileLoader `srcLevelBias=-1 vComp=1.00`、缓存目录 `tianditu-c4326-v2-zo-1-cia(-geo-raw)`；标准档全程 zoomOffset=0；应用启动、图源切换、地形加载正常。
 - 影响面与回退：默认 0 时选瓦/选源与改造前完全一致；全局 `setTileLodOffset/setTileLodAlignDisplay` 原样保留（整 App 省流/对齐显示实验不受影响）；Android JNI 未暴露 options，零影响。回退方式：整体 revert 本提交即恢复双参数形态。
 - 文档：Harmony/Android API 指南同步（字段表、示例、故障对照、移除说明、规划中段落）；历史设计文档（layer-init-options-proposal、epsg-4490 design、har-packaging-plan）保留原文作存档，不回改。
+
+## 十二、专用 GeoJSON 图层接口 addGeoJSONLayer（feature/geojson-layer-api，2026-11-18~19，真机回归通过）
+
+- @Jin 背景：`addVectorLayer` 同时承载本地 OGR 文件与 P0 在线 GeoJSON URL，数据源职责混杂、上游同步冲突面大，且无法接收 GeoJSON 字符串。拆分后 `addVectorLayer` 回归上游原生语义，GeoJSON 三种来源收敛到专用入口。设计文档：`docs/design/geojson-layer-api-proposal.md`。
+- @Jin 新接口（Android Kotlin 与 Harmony ArkTS 同构）：`addGeoJSONLayer(url, data, style, iconArgb?, iconW?, iconH?, extent?, maxFeatures?): Int/number`。
+  - `url`：本地 `.geojson/.json` 绝对路径或公开 http(s) 地址；`data`：GeoJSON 结构字符串。二者互斥，同空或同非空 native 返回 -1（ArkTS/Kotlin 门面提前拦截，引擎层兜底并打 LOGW）。
+  - 样式/图标/extent/maxFeatures 语义与 `addVectorLayer` 完全一致；图层 index、拾取、显隐、`updateVectorExtent`、3D 贴地全部共用，无独立渲染体系。
+- @Jin C++ 改造（注释均带 @Jin）：
+  - `vector/VectorSourceResolver.h/.cpp`：新增 `enum class SourceKind{File,Url,Data}` 与显式 `resolve(kind, value, cacheDir)`；旧双参 `resolve` 保留并委托（http 前缀隐式映射，供弃用期旧通路使用）。Data 缓存键为内容 FNV-1a 哈希，落 `vector-cache/inline/`，日志名 `inline:<hash>` 不打印正文。
+  - `vector/RemoteVectorCache.h/.cpp`：新增守卫 `kExperimentalGeoJsonLayerApi`（默认 ON）与 `prepareInlineGeoJson()`（缓存命中/80MB 上限/GeoJSON 嗅探/原子写）；抽出 `atomicWriteCacheFile()` 供 URL 下载与 inline 两条通路共用。
+  - `layer/VectorLoader.h/.cpp`：`bool remoteSource_` 升级为 `SourceKind sourceKind_`，新增 `inlineData_` 与显式来源构造；`run()` 按 File 直通 / Url 下载 / Data 落盘分发，状态机、reload 抢占、abort 行为不变。
+  - `layer/VectorLayer.h`：新增带 SourceKind 的构造；Data 时 `sourcePath` 只存 `inline:<hash>` 短标识，不持有整段 JSON。
+  - `core/GlobeEngine.h/.cpp`：新增 `addGeoJSONLayer`，互斥校验后映射 SourceKind，仅 Url 标记 `remoteVectorSource` 走远程 draped 通路；旧 `addVectorLayer` 收到 URL 时打一次弃用 LOGW（保留一个版本周期）。
+  - JNI `GlobeEngineJni.cpp` + NAPI `napi_globe_engine.cpp`：新增 `nativeAddGeoJSONLayer`（NAPI 28 参，path 拆为 url/data），注册入模块表；`NativeLib.kt/.ets`、`index.d.ts`、两端 `NativeMapView` 门面同步。
+- @Jin LITE 边界不变：`lite_gdal_stubs.cpp` 后缀路由与 `readLiteGeoJsonFile` 保持，非 GeoJSON 本地文件仍返回中文错误不崩溃；full 构建下 `addVectorLayer` 恢复 shp/kml/dwg/gpkg 多格式。
+- @Jin Demo：Android `VectorLayerActivity` 省级 URL 切到新接口并新增「内联GeoJSON」动作（点+三角面 FeatureCollection）；Harmony `MapDemoPage` 新增「在线GeoJSON」「内联GeoJSON」两按钮。
+- @Jin 编译验证（真机前）：OHOS NDK clang `-fsyntax-only` 通过引擎 4 个翻译单元、NAPI、lite 桩/reader；Android NDK r28 clang JNI 单元通过；hvigor `globecore:assembleHar` 与 `entry:assembleHap` 构建成功（ArkTS 零新增告警）；Gradle `compileDebugKotlin` 通过（`externalNativeBuildDebug` 因环境缺预构建 `jniLibs/*/libcurl.a` 未链接，属既有环境缺件）。
+- @Jin 出包符号核对（HAR stripped 5,106,656 字节）：`readelf` 为 ELF64/AArch64；未 strip 产物含 `NativeAddGeoJSONLayer`、`GlobeEngine::addGeoJSONLayer`、`RemoteVectorCache::prepareInlineGeoJson`、`readLiteGeoJsonFile`；GDAL/OGR/PROJ 真动态符号数为 0；stripped 内含注册名 `nativeAddGeoJSONLayer` 与 `[InlineGeoJson]` 日志串。
+- @Jin 回退：`RemoteVectorCache::kExperimentalGeoJsonLayerApi=false` 后新通路直接返回中文错误；旧 `addVectorLayer` 全通路保留，整体 revert 分支提交即可回到 P0 形态。
+- @Jin 真机回归（2026-11-19，设备 `5KLBB25911200313`，签名 HAP 经 `demo/GlobeCoreDemo` 出包安装，LITE 构建）：
+  - 过程中发现并修复 1 个真机 bug：`VectorLayer` 带 SourceKind 的构造函数初始化列表先把 `source` `std::move` 进 `sourcePath`，再把已移动的空串传给 `VectorLoader`，导致 URL 通路 `prepareGeoJson` 收到空地址报「在线矢量地址协议不支持」（语法检查无法发现，属移动语义问题）。修复为 `sourcePath` 对 source 只拷贝、保留原值 move 给 loader。
+  - URL 在线（kind=1，省级 province.json）：首次下载 669,489 字节、耗时 2621ms，LITE reader 解析 4 个 MultiPolygon（陕西外环 2434 点、3 洞、洞点 51），read=2798ms build=9ms total=2808ms；force-stop 重启后再次加载命中 `[RemoteGeoJson] cache hit elapsed=0ms`，total 179ms、零网络请求。
+  - DATA 字符串（kind=2）：互斥负例（url/data 同空）返回 -1 符合预期；正常调用 319 字节 FeatureCollection 落 `vector-cache/inline/geojson-083a3b4457c04239.geojson`，解析 2 要素（点+三角面），total 4ms；3D 倾斜视角截图确认橙色三角面与「内联点/内联三角面」标注贴地显示正常。
+  - 本地文件（kind=0，shaanxi_boundary_lines.geojson MultiLineString）：1 要素、53884 线顶点，read=109ms build=38ms total=148ms。
+  - 显隐开关、图层 index 分配（0/1/2 与 overlay 共享空间）正常；引擎 TAG（`globecore`）全程零 E/W，hilog 中其余报错均为系统框架噪声。
+- @Jin 封存专项（用户 2026-11-19 拍板，本期不解决）：3D 地形加载场景下面状要素（Polygon/MultiPolygon 大面）贴地遮挡问题仍存在，与 README ⑱ 既有遗留合并为后续独立专项；本期纯线通路（`603d531`）与小面显示不受影响。
+- @Jin 未覆盖项（逻辑与 addVectorLayer 共用、代码零差异，列入后续）：extent 重载真机、拾取高亮、setVectorMinLevel、断网/404/HTML/超 80MB 错误文案；T15 Android full 构建 OGR 多格式回归（本机缺预构建 jniLibs/libcurl.a，无法链接，Kotlin/JNI 已过编译检查）。

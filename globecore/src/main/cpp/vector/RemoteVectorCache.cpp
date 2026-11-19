@@ -119,6 +119,45 @@ bool RemoteVectorCache::validateGeoJsonBytes(const std::vector<uint8_t> &bytes, 
     return true;
 }
 
+// @Jin 原子落盘助手：下载 URL 与 inline 字符串两条通路共用，失败时清理 tmp/半成品并回传中文错误。
+bool RemoteVectorCache::atomicWriteCacheFile(const std::vector<uint8_t> &bytes,
+                                             const std::string &cachePath, std::string &error) {
+    std::error_code ec;
+    std::filesystem::create_directories(std::filesystem::path(cachePath).parent_path(), ec);
+    if (ec) {
+        error = "GeoJSON 缓存目录创建失败";
+        return false;
+    }
+
+    const std::string tmpPath = cachePath + ".tmp." + std::to_string(static_cast<long long>(
+        std::hash<std::thread::id>{}(std::this_thread::get_id())));
+    {
+        std::ofstream out(tmpPath, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            error = "GeoJSON 缓存写入失败";
+            return false;
+        }
+        out.write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+        out.flush();
+        if (!out.good()) {
+            error = "GeoJSON 缓存写入失败";
+            std::filesystem::remove(tmpPath, ec);
+            return false;
+        }
+    }
+    std::filesystem::rename(tmpPath, cachePath, ec);
+    if (ec) {
+        // @Jin Android/Linux 上 rename 通常可原子覆盖；失败再尝试 remove+rename，失败则拒绝读取半成品。
+        std::filesystem::remove(cachePath, ec);
+        std::filesystem::rename(tmpPath, cachePath, ec);
+        if (ec) {
+            error = "GeoJSON 缓存写入失败";
+            return false;
+        }
+    }
+    return true;
+}
+
 RemoteVectorFetchResult RemoteVectorCache::prepareGeoJson(
     const std::string &url,
     const std::string &cachePath,
@@ -187,45 +226,73 @@ RemoteVectorFetchResult RemoteVectorCache::prepareGeoJson(
     }
     if (!validateGeoJsonBytes(bytes, result.error)) return result;
 
-    std::error_code ec;
-    std::filesystem::create_directories(std::filesystem::path(cachePath).parent_path(), ec);
-    if (ec) {
-        result.error = "在线 GeoJSON 缓存目录创建失败";
-        return result;
-    }
-
-    const std::string tmpPath = cachePath + ".tmp." + std::to_string(static_cast<long long>(
-        std::hash<std::thread::id>{}(std::this_thread::get_id())));
-    {
-        std::ofstream out(tmpPath, std::ios::binary | std::ios::trunc);
-        if (!out) {
-            result.error = "在线 GeoJSON 缓存写入失败";
-            return result;
-        }
-        out.write(reinterpret_cast<const char *>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
-        out.flush();
-        if (!out.good()) {
-            result.error = "在线 GeoJSON 缓存写入失败";
-            std::filesystem::remove(tmpPath, ec);
-            return result;
-        }
-    }
-    std::filesystem::rename(tmpPath, cachePath, ec);
-    if (ec) {
-        // @Jin Android/Linux 上 rename 通常可原子覆盖；失败再尝试 remove+rename，失败则拒绝读取半成品。
-        std::filesystem::remove(cachePath, ec);
-        std::filesystem::rename(tmpPath, cachePath, ec);
-        if (ec) {
-            result.error = "在线 GeoJSON 缓存写入失败";
-            return result;
-        }
-    }
+    // @Jin 原子落盘逻辑与 inline 字符串通路共用 atomicWriteCacheFile。
+    if (!atomicWriteCacheFile(bytes, cachePath, result.error)) return result;
 
     result.ok = true;
     result.localPath = cachePath;
     result.elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
     LOGI("[RemoteGeoJson] downloaded source=%s bytes=%zu elapsed=%lldms cache=%s",
          safeUrl.c_str(), result.bytes, static_cast<long long>(result.elapsedMs), cachePath.c_str());
+    return result;
+}
+
+// @Jin addGeoJSONLayer 的 data 字符串通路：校验 → inline 缓存（同内容哈希去重）→ 复用本地读取管线。
+RemoteVectorFetchResult RemoteVectorCache::prepareInlineGeoJson(
+    const std::string &geoJsonText,
+    const std::string &cachePath,
+    const RemoteVectorFetchOptions &options,
+    const std::atomic<bool> &abortFlag) {
+    const auto started = std::chrono::steady_clock::now();
+    RemoteVectorFetchResult result;
+    result.localPath = cachePath;
+
+    if (!kExperimentalGeoJsonLayerApi) {
+        result.error = "GeoJSON 专用接口实验能力已关闭";
+        return result;
+    }
+    if (geoJsonText.empty()) {
+        result.error = "GeoJSON 字符串内容为空";
+        return result;
+    }
+    if (cachePath.empty() || options.cacheDir.empty()) {
+        result.error = "GeoJSON 缓存目录未配置";
+        return result;
+    }
+
+    // @Jin 同内容字符串只落盘一次；extent 重载直接命中缓存，无额外 IO。
+    size_t cachedBytes = 0;
+    std::string cacheError;
+    if (std::filesystem::exists(cachePath) && validateCachedFile(cachePath, cachedBytes, cacheError)) {
+        result.ok = true;
+        result.cacheHit = true;
+        result.bytes = cachedBytes;
+        result.elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started).count();
+        LOGI("[InlineGeoJson] cache hit bytes=%zu elapsed=%lldms", result.bytes,
+             static_cast<long long>(result.elapsedMs));
+        return result;
+    }
+    if (abortFlag.load()) {
+        result.error = "GeoJSON 加载已取消";
+        return result;
+    }
+
+    std::vector<uint8_t> bytes(geoJsonText.begin(), geoJsonText.end());
+    result.bytes = bytes.size();
+    if (result.bytes > options.maxBytes) {
+        result.error = "GeoJSON 内容超过大小限制";
+        return result;
+    }
+    if (!validateGeoJsonBytes(bytes, result.error)) return result;
+    if (!atomicWriteCacheFile(bytes, cachePath, result.error)) return result;
+
+    result.ok = true;
+    result.localPath = cachePath;
+    result.elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - started).count();
+    LOGI("[InlineGeoJson] written bytes=%zu elapsed=%lldms cache=%s",
+         result.bytes, static_cast<long long>(result.elapsedMs), cachePath.c_str());
     return result;
 }
 

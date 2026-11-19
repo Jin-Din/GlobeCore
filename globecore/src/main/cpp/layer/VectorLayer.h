@@ -169,6 +169,21 @@ struct VectorLayer {
                                                 maxLon, maxLat, maxFeatures, std::move(vectorCacheDir));
     }
 
+    // @Jin addGeoJSONLayer 专用构造：显式 SourceKind（File/Url/Data）；Data 时 inlineData 携带 GeoJSON 字符串。
+    VectorLayer(SourceKind kind, std::string source, std::string inlineData, VectorStyle style_,
+                bool hasExtent = false, double minLon = 0.0, double minLat = 0.0,
+                double maxLon = 0.0, double maxLat = 0.0, int maxFeatures = 0,
+                std::string vectorCacheDir = std::string())
+        : sourcePath(kind == SourceKind::Data
+                     ? "inline:" + VectorSourceResolver::stableCacheKey(source)
+                     : source), // @Jin 此处只能拷贝：source 还要原样 move 给下方 loader，先 move 会使 loader 收到空串
+          style(style_) {
+        // @Jin loader 仍拿原文 source（Data 时为 JSON 字符串，用于 inline 缓存键与落盘），sourcePath 仅存短标识。
+        loader = std::make_unique<VectorLoader>(kind, std::move(source), std::move(inlineData), style,
+                                                hasExtent, minLon, minLat, maxLon, maxLat,
+                                                maxFeatures, std::move(vectorCacheDir));
+    }
+
     /// 动态叠加层构造（内存数据源）：建内存模式 loader（不读文件、不起后台线程），isOverlay=true。
     /// 几何由宿主经 GlobeEngine::updateOverlay* → loader->setData 推送；sourcePath 留空。
     explicit VectorLayer(VectorStyle style_) : style(style_), isOverlay(true) {

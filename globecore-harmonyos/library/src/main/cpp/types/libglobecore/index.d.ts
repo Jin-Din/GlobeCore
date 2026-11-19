@@ -65,6 +65,23 @@ interface GlobeCore {
     maxFeatures: number,
     /** @Jin 应用私有缓存目录；实验性 http/https GeoJSON URL 下载到其 url/ 子目录。 */
     vectorCacheDir: string): number;
+  /**
+   * @Jin 专用 GeoJSON 图层入口（实验性）。url 为本地文件绝对路径或 http(s) GeoJSON 地址，
+   * data 为 GeoJSON 结构字符串；二者互斥（必须且只能传一个非空串，同空/同非空返回 -1）。
+   * URL 下载落 vectorCacheDir/url/，字符串落 vectorCacheDir/inline/；其余参数语义同 nativeAddVectorLayer。
+   */
+  nativeAddGeoJSONLayer(handle: number, url: string, data: string,
+    fillColor: number, outlineColor: number, outlineWidth: number,
+    lineColor: number, lineWidth: number,
+    pointColor: number, pointRadiusDp: number,
+    fillExplicit: boolean, lineExplicit: boolean,
+    labelField: string, labelColor: number, labelSize: number,
+    labelOutline: boolean, labelOutlineColor: number,
+    featureStyleOverride: string,
+    iconArgb: Int32Array | undefined | null, iconW: number, iconH: number,
+    hasExtent: boolean, minLon: number, minLat: number, maxLon: number, maxLat: number,
+    maxFeatures: number,
+    vectorCacheDir: string): number;
   nativeUpdateVectorExtent(handle: number, index: number, hasExtent: boolean,
     minLon: number, minLat: number, maxLon: number, maxLat: number, maxFeatures: number): void;
   nativeHasVectorLoading(handle: number): boolean;

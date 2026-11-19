@@ -16,6 +16,9 @@ import {
 } from '@zys/globecore';
 
 const DEMO_TAG: string = 'MapDemoPage';
+// @Jin 在线 GeoJSON 真机验证地址（与 Android demo 同源）：native 下载到 vector-cache/url 后由 lite reader 解析。
+const PROVINCE_GEOJSON_URL: string =
+  'http://210.74.129.84:8520/app-pub/web-data/geojson/district/province.json';
 
 /** 高德影像瓦片（{rand=1,2,3,4} 为负载子域，native TileLoader 轮询取值） */
 const AMAP_IMAGERY: string =
@@ -43,6 +46,9 @@ struct MapDemoPage {
   @State private measureCount: number = 0;
   private vectorIndex: number = -1;
   private vectorOn: boolean = false;
+  // @Jin addGeoJSONLayer 演示层索引：url 在线来源与 data 字符串来源各一个，与 vectorIndex 共享图层 index 空间。
+  private remoteGeoJsonIndex: number = -1;
+  private inlineGeoJsonIndex: number = -1;
   private rasterIndex: number = -1;
   private rasterOn: boolean = false;
   private highlightIndex: number = -1;
@@ -237,6 +243,48 @@ struct MapDemoPage {
     this.vectorIndex = map.addVectorLayer(path, new VectorStyle());
     this.vectorOn = this.vectorIndex >= 0;
     this.statusText = this.vectorOn ? `矢量层已加载：${path}` : '矢量层加载失败（格式不支持？）';
+  }
+
+  // @Jin 在线 GeoJSON：addGeoJSONLayer 的 url 通路（data 传空串），native 下载落 vector-cache/url 后建层。
+  private toggleRemoteGeoJson(): void {
+    const map = this.mapView;
+    if (map === undefined) {
+      return;
+    }
+    if (this.remoteGeoJsonIndex >= 0) {
+      this.toast('在线 GeoJSON 层已加载（index=' + this.remoteGeoJsonIndex + '）');
+      return;
+    }
+    const style = new VectorStyle(0x664A8FE3, 0xFFFFFFFF, 1.0, 0xFFE56B33, 2.0,
+      0xFFE56B33, 5.0, 'name', 0xFFFFFFFF, 1.0, true, 0xFF000000);
+    this.remoteGeoJsonIndex = map.addGeoJSONLayer(PROVINCE_GEOJSON_URL, '', style);
+    this.statusText = this.remoteGeoJsonIndex >= 0
+      ? `在线 GeoJSON 已加入 index=${this.remoteGeoJsonIndex}（首次下载，就绪自动显示）`
+      : '在线 GeoJSON 加载失败';
+    this.toast(this.statusText);
+  }
+
+  // @Jin 内联 GeoJSON 字符串：addGeoJSONLayer 的 data 通路（url 传空串），native 校验后落 vector-cache/inline。
+  private addInlineGeoJson(): void {
+    const map = this.mapView;
+    if (map === undefined) {
+      return;
+    }
+    if (this.inlineGeoJsonIndex >= 0) {
+      this.toast('内联 GeoJSON 层已加载（index=' + this.inlineGeoJsonIndex + '）');
+      return;
+    }
+    const geoJsonText: string = '{"type":"FeatureCollection","features":['
+      + '{"type":"Feature","properties":{"name":"内联点"},"geometry":{"type":"Point","coordinates":[116.40,39.90]}},'
+      + '{"type":"Feature","properties":{"name":"内联三角面"},"geometry":{"type":"Polygon","coordinates":[[ '
+      + '[115.90,39.40],[116.90,39.40],[116.40,40.10],[115.90,39.40]]]}}]}';
+    const style = new VectorStyle(0x66FF8800, 0xFFFF8800, 1.5, 0xFFFF8800, 2.0,
+      0xFFFF8800, 5.0, 'name', 0xFFFFFFFF, 1.0, true, 0xFF000000);
+    this.inlineGeoJsonIndex = map.addGeoJSONLayer('', geoJsonText, style);
+    this.statusText = this.inlineGeoJsonIndex >= 0
+      ? `内联 GeoJSON 已加入 index=${this.inlineGeoJsonIndex}（data 通路）`
+      : '内联 GeoJSON 加载失败（url/data 需互斥且非空）';
+    this.toast(this.statusText);
   }
 
   /** 栅格层开关：tif/img 即时切片（首屏较慢属预期，缓存后复用） */
@@ -457,6 +505,9 @@ struct MapDemoPage {
             Button('缩小').onClick(() => this.zoomOut())
           } else if (this.demoIndex === 2) {
             Button('矢量层').onClick(() => this.toggleVector())
+            // @Jin 专用 GeoJSON 接口双来源演示：url 在线地址与 data 内联字符串
+            Button('在线GeoJSON').onClick(() => this.toggleRemoteGeoJson())
+            Button('内联GeoJSON').onClick(() => this.addInlineGeoJson())
             Button('栅格层').onClick(() => this.toggleRaster())
             Button('放大').onClick(() => this.zoomIn())
             Button('缩小').onClick(() => this.zoomOut())

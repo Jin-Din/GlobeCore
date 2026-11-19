@@ -225,6 +225,30 @@ val index = map.addVectorLayer(
     extent = null,
     maxFeatures = 0
 )</code></pre><div class="table-wrap"><table><tbody><tr><td>缓存目录</td><td><code>context.filesDir/globecore/vector-cache/url/&lt;hash&gt;.geojson</code></td></tr><tr><td>重复请求</td><td>同一 URL 首次成功后只读缓存；<code>updateVectorExtent()</code> 不会重复下载。</td></tr><tr><td>响应限制</td><td>P0 默认超时 20 秒、最大 80MB；空响应、HTML 错误页、缺少 <code>type</code> 的非 GeoJSON 会失败。</td></tr><tr><td>鉴权能力</td><td>P0 仅支持公开 URL；headers、token、ETag、强制刷新、进度回调列入后续版本。</td></tr><tr><td>回退</td><td>将 native 常量 <code>RemoteVectorCache::kExperimentalRemoteGeoJsonSource</code> 改为 <code>false</code>。</td></tr></tbody></table></div></div>
+<div class="api"><h4>@Jin addGeoJSONLayer（实验性，GeoJSON 专用入口）</h4><pre><code>fun addGeoJSONLayer(
+    url: String,
+    data: String,
+    style: VectorStyle,
+    iconArgb: IntArray? = null,
+    iconW: Int = 0,
+    iconH: Int = 0,
+    extent: VectorExtent? = null,
+    maxFeatures: Int = 0
+): Int</code></pre><p>GeoJSON 三种来源的统一入口，底层与 addVectorLayer 共用图层容器、VBO/拾取/贴地管线和图层 index 空间。</p>
+<div class="table-wrap"><table><tbody>
+<tr><td>url</td><td>本地 .geojson/.json 绝对路径，或公开 http/https GeoJSON 地址（下载落 <code>vector-cache/url/</code>，80MB/20s 限制）</td></tr>
+<tr><td>data</td><td>GeoJSON 结构字符串（Feature/FeatureCollection/Geometry），校验后原子落盘到 <code>vector-cache/inline/geojson-&lt;内容哈希&gt;.geojson</code>，同内容去重</td></tr>
+<tr><td>互斥规则</td><td><b>url 与 data 必须且只能传一个非空串</b>；同空或同非空返回 -1，不做内容嗅探</td></tr>
+<tr><td>缓存目录</td><td>自动使用 <code>context.filesDir/globecore/vector-cache</code>，宿主无需配置</td></tr>
+<tr><td>回退</td><td>native 常量 <code>RemoteVectorCache::kExperimentalGeoJsonLayerApi=false</code> 关闭新通路</td></tr>
+</tbody></table></div>
+<pre><code>// 在线 URL
+map.addGeoJSONLayer(url = provinceUrl, data = "", style = VectorStyle(labelField = "name"))
+// 内联字符串
+map.addGeoJSONLayer(url = "", data = """{"type":"FeatureCollection","features":[...]}""", style = VectorStyle())
+// 本地文件
+map.addGeoJSONLayer(url = File(filesDir, "sample.geojson").absolutePath, data = "", style = VectorStyle())</code></pre>
+<p><b>弃用说明：</b>addVectorLayer 接收 http(s) URL 的用法已 @deprecated（保留一个版本周期并打迁移警告），新代码的在线/字符串/本地 GeoJSON 统一走本接口；shp/kml 等 OGR 多格式仍用 addVectorLayer。</p></div>
 <div class="api"><h4>updateVectorExtent</h4><pre><code>fun updateVectorExtent(index: Int, extent: VectorExtent?, maxFeatures: Int = 0): Unit</code></pre><p>相机移动后按新的 WGS84 范围重新加载矢量。传 null 恢复整文件。</p></div><div class="api"><h4>状态、字体、可见性与移除</h4><pre><code>fun hasVectorLoading(): Boolean
 fun setFontPath(path: String): Unit
 fun setVectorLayerVisible(index: Int, visible: Boolean): Unit

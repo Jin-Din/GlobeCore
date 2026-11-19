@@ -21,6 +21,7 @@ OpenGL ES 2.0 绘制全部在 native 完成，并内联编译了 GDAL/OGR、PROJ
 **新增能力**
 
 - @Jin 在线 GeoJSON URL 图层（Android/Harmony 实验，LITE 内置无 GDAL 原生 reader，下载落缓存、二次打开不重复下载，可回退）
+- @Jin 专用 GeoJSON 入口 `addGeoJSONLayer(url, data, style, ...)`（实验/可回退，分支 `feature/geojson-layer-api`）：url 接本地文件与 http(s) 地址、data 接 GeoJSON 字符串（落 `vector-cache/inline/` 内容哈希缓存），二者互斥；旧 `addVectorLayer` 的 URL 用法进入弃用周期，shp/kml 等 OGR 多格式仍走旧入口
 - @Jin EPSG:4326/4490 地理切片瓦片（天地图 img_c/cia_c）：图层级相交重投影适配，引擎选瓦四叉树不动，可回退
 - @Jin 三维地形 CesiumTerrainProvider 下沉 C++：quantized-mesh 视口调度/磁盘缓存/重试去重，Android/Harmony/Qt 统一生命周期事件
 - @Jin 地形相机自动跟随（`setTerrainProviderAutoFollow`，实验默认关）；C++ `flyToCamera` 平滑飞行（Harmony/Android 双门面）
@@ -567,7 +568,8 @@ struct MapPage {
 
 ### @Jin 实验性在线 GeoJSON（HarmonyOS NEXT）
 
-- @Jin LITE HAR 的 `addVectorLayer` 支持公开 GeoJSON URL（宿主须注入 `vectorCacheDir`）：native 后台下载落缓存 → LITE 原生 reader 解析 → 普通矢量 VBO 管线；同一 URL 二次打开或视口重载只读本地缓存，不重复下载。回退开关：`RemoteVectorCache::kExperimentalRemoteGeoJsonSource = false`。
+- @Jin 专用入口 `addGeoJSONLayer(url, data, style, ...)`（实验/可回退，Android 与 Harmony 双端同构）：`url` 接本地 `.geojson/.json` 路径或公开 http(s) 地址（下载落 `vector-cache/url/`），`data` 接 GeoJSON 结构字符串（校验后原子落 `vector-cache/inline/geojson-<内容哈希>.geojson`，同内容去重）；二者互斥，同空或同非空返回 -1。样式/图标/extent/拾取/显隐/3D 贴地与 `addVectorLayer` 完全共用。回退开关：`RemoteVectorCache::kExperimentalGeoJsonLayerApi = false`。
+- @Jin 弃用过渡：`addVectorLayer` 的 http(s) URL 用法保留一个版本周期（调用时打迁移警告日志），新代码统一走 `addGeoJSONLayer`；shp/kml 等 OGR 多格式仍只由 `addVectorLayer` 承载（LITE 下返回中文错误不崩溃）。
 - @Jin 完整接入代码示例、P0/LITE 边界、真机日志与限制见 `docs/jin-modification-records.md` 一、1–2 节。
 
 ### 三维地形 C++ Provider（P2-1 阶段 C）

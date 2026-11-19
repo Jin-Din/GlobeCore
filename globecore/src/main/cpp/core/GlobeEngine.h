@@ -160,6 +160,17 @@ public:
                        // @Jin P0 在线 GeoJSON 实验能力：Android 传应用私有缓存目录，本地文件默认空串。
                        const std::string &vectorCacheDir = std::string());
 
+    /// @Jin 专用 GeoJSON 图层入口（实验性，开关 RemoteVectorCache::kExperimentalGeoJsonLayerApi）。
+    /// [url] 为本地文件绝对路径或 http(s) GeoJSON 地址；[data] 为 GeoJSON 结构字符串。二者互斥：
+    /// 必须且只能传一个非空值，同时为空或同时非空返回 -1。样式/图标/extent/maxFeatures 语义同
+    /// [addVectorLayer]；底层复用同一矢量图层容器、VBO/拾取/贴地管线与图层 index 空间。
+    int addGeoJSONLayer(const std::string &url, const std::string &data,
+                        const VectorStyle &style,
+                        std::vector<uint8_t> iconRgba = {}, int iconW = 0, int iconH = 0,
+                        bool hasExtent = false, double minLon = 0.0, double minLat = 0.0,
+                        double maxLon = 0.0, double maxLat = 0.0, int maxFeatures = 0,
+                        const std::string &vectorCacheDir = std::string());
+
     /// 按新屏幕范围重载指定矢量层（index 为 [addVectorLayer] 次序）。转发到 VectorLoader::reload，
     /// 后台按新范围重读建新几何，就绪后由 GL 线程同帧替换旧几何（Swap-on-ready，无空窗）。
     /// index 越界、非文件矢量层（内存叠加层）或已墓碑则忽略；[hasExtent]=false 走整文件全量。

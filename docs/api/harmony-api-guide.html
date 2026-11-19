@@ -451,6 +451,31 @@ const onlineIdx = map.addVectorLayer(
   undefined, 0, 0, undefined, 0,
 );</code></pre></div>
 
+<div class="api"><h4>addGeoJSONLayer <span class="badge b-jin">@Jin 实验性</span> <span class="badge b-lite">LITE 可用</span></h4>
+<div class="sig">addGeoJSONLayer(url: string, data: string, style: VectorStyle, iconArgb?: number[], iconW?: number, iconH?: number,<br>&nbsp;&nbsp;extent?: VectorExtent, maxFeatures?: number): number  // 返回图层 index，失败 -1</div>
+<table>
+<tr><th>参数</th><th>说明</th></tr>
+<tr><td class="param">url</td><td>定位符：本地 .geojson/.json 绝对路径，或公开 http/https GeoJSON 地址（下载落 <code>vector-cache/url/</code>，80MB/20s 限制）</td></tr>
+<tr><td class="param">data</td><td>GeoJSON 结构字符串（Feature/FeatureCollection/Geometry），native 校验后原子落盘到 <code>vector-cache/inline/geojson-&lt;内容哈希&gt;.geojson</code>，同内容去重</td></tr>
+<tr><td class="param">互斥规则</td><td><b>url 与 data 必须且只能传一个非空串</b>；同空或同非空直接返回 -1，不做内容嗅探</td></tr>
+<tr><td class="param">style 等其余参数</td><td>语义与 addVectorLayer 完全一致；图层 index、拾取、显隐、extent 重载、3D 贴地全部共用</td></tr>
+</table>
+<p>@Jin 前置条件：组件属性 <code>vectorCacheDir</code> 必须注入宿主应用私有目录（URL 与 data 两条通路都依赖它）。
+回退：native 常量 <code>RemoteVectorCache::kExperimentalGeoJsonLayerApi=false</code> 即关闭新通路。
+addVectorLayer 的 http(s) 用法已 @deprecated（保留一个版本周期并打迁移警告），新代码统一用本接口。</p>
+<pre><code>// 1) 在线 URL（data 传空串）
+const onlineIdx = map.addGeoJSONLayer(
+  'http://210.74.129.84:8520/app-pub/web-data/geojson/district/province.json',
+  '', new VectorStyle(0x00000000, 0xFFFFFFFF, 2.0));
+
+// 2) GeoJSON 字符串（url 传空串）
+const text = '{"type":"FeatureCollection","features":[' +
+  '{"type":"Feature","properties":{"name":"点"},"geometry":{"type":"Point","coordinates":[116.4,39.9]}}]}';
+const inlineIdx = map.addGeoJSONLayer('', text, new VectorStyle());
+
+// 3) 本地文件
+const fileIdx = map.addGeoJSONLayer(`${this.context.filesDir}/sample.geojson`, '', new VectorStyle());</code></pre></div>
+
 <div class="api"><h4>updateVectorExtent / hasVectorLoading / setVectorLayerVisible / setVectorMinLevel / setFontPath / removeVectorLayer</h4>
 <div class="sig">updateVectorExtent(index: number, extent?: VectorExtent, maxFeatures?: number): void<br>hasVectorLoading(): boolean<br>setVectorLayerVisible(index: number, visible: boolean): void<br>setVectorMinLevel(index: number, minLevel: number): void<br>setFontPath(path: string): void<br>removeVectorLayer(index: number): void</div>
 <p>相机静止后按当前屏幕范围增量重载（Swap-on-ready，重载期无空窗）；<code>setFontPath</code> 指定 CJK 字形图集字体（如 <code>/system/fonts/HarmonyOS_Sans_SC.ttf</code>）。</p>

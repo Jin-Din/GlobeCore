@@ -387,6 +387,11 @@ int GlobeEngine::addVectorLayer(const std::string &path, const VectorStyle &styl
                                                maxFeatures, vectorCacheDir);
     // @Jin 只有实验性在线 GeoJSON 源先接入 DEM 贴地烘焙；本地 shp/kml/GeoJSON 保持旧路径，降低本轮回归面。
     layer->remoteVectorSource = VectorSourceResolver::isHttpUrl(path);
+    // @Jin 弃用提醒（保留一个版本周期）：URL 数据源请改用 addGeoJSONLayer，旧入口后续版本将拒绝 http(s) 入参。
+    if (layer->remoteVectorSource) {
+        LOGW("addVectorLayer 接收 http(s) URL 的用法已弃用，请迁移到 addGeoJSONLayer：%s",
+             VectorSourceResolver::redactUrlForLog(path).c_str());
+    }
     // 点要素图标（可选）：在加入前设定、之后只读，GL 线程懒上传纹理（避开 UI/GL 竞争）。
     if (!iconRgba.empty() && iconW > 0 && iconH > 0) {
         layer->iconRgba = std::move(iconRgba);
@@ -405,6 +410,49 @@ int GlobeEngine::addVectorLayer(const std::string &path, const VectorStyle &styl
          VectorSourceResolver::redactUrlForLog(path).c_str(),
          VectorSourceResolver::isHttpUrl(path) ? 1 : 0);
     // 新层异步加载中，主动请求一帧启动绘制（加载就绪后 drawVectorLayers 会持续请求重绘直到上传）。
+    if (renderCallback_) renderCallback_();
+    return index;
+}
+
+// @Jin 专用 GeoJSON 入口：url（本地路径/http(s)）与 data（GeoJSON 字符串）互斥，显式映射 SourceKind 后复用矢量图层管线。
+int GlobeEngine::addGeoJSONLayer(const std::string &url, const std::string &data,
+                                 const VectorStyle &style,
+                                 std::vector<uint8_t> iconRgba, int iconW, int iconH,
+                                 bool hasExtent, double minLon, double minLat,
+                                 double maxLon, double maxLat, int maxFeatures,
+                                 const std::string &vectorCacheDir) {
+    // @Jin 互斥门控：同时为空或同时非空都拒绝，错误可在日志定位，返回值与既有失败口径一致（-1）。
+    if (url.empty() == data.empty()) {
+        LOGW("GlobeEngine addGeoJSONLayer 拒绝：url 与 data 必须且只能传一个非空值 urlEmpty=%d dataEmpty=%d",
+             url.empty() ? 1 : 0, data.empty() ? 1 : 0);
+        return -1;
+    }
+    const bool useData = !data.empty();
+    const SourceKind kind = useData ? SourceKind::Data
+                                    : (VectorSourceResolver::isHttpUrl(url) ? SourceKind::Url : SourceKind::File);
+    const std::string &source = useData ? data : url;
+    auto layer = std::make_unique<VectorLayer>(kind, source, useData ? data : std::string(), style,
+                                               hasExtent, minLon, minLat, maxLon, maxLat,
+                                               maxFeatures, vectorCacheDir);
+    // @Jin 仅在线 URL 沿用 3D 远程 draped 通路；本地文件与 inline 字符串（已落私有缓存）走本地矢量路径。
+    layer->remoteVectorSource = (kind == SourceKind::Url);
+    // 点要素图标（可选）：与 addVectorLayer 同口径，加入前设定、GL 线程懒上传。
+    if (!iconRgba.empty() && iconW > 0 && iconH > 0) {
+        layer->iconRgba = std::move(iconRgba);
+        layer->iconW = iconW;
+        layer->iconH = iconH;
+    }
+    layer->loader->start(); // 后台线程：Url 下载 / Data 落盘 / File 直通 → 读取 → 重投影 → earcut，就绪后 GL 线程上传
+    int index = -1;
+    {
+        std::lock_guard<std::mutex> lock(layersMtx_);
+        vectorLayers_.push_back(std::move(layer));
+        index = static_cast<int>(vectorLayers_.size()) - 1;
+    }
+    LOGI("GlobeEngine addGeoJSONLayer index=%d kind=%d hasExtent=%d extent=[%.6f,%.6f,%.6f,%.6f] source=%s",
+         index, static_cast<int>(kind), hasExtent ? 1 : 0, minLon, minLat, maxLon, maxLat,
+         useData ? ("inline:" + VectorSourceResolver::stableCacheKey(data)).c_str()
+                 : VectorSourceResolver::redactUrlForLog(url).c_str());
     if (renderCallback_) renderCallback_();
     return index;
 }

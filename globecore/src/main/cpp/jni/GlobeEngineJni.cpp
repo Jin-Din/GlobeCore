@@ -565,6 +565,89 @@ Java_com_zys_globecore_NativeLib_nativeAddVectorLayer(JNIEnv *env, jobject /*thi
     return index;
 }
 
+// @Jin 专用 GeoJSON 图层入口：url（本地路径/http(s)）与 data（GeoJSON 字符串）互斥，样式/图标/extent 参数族与
+// nativeAddVectorLayer 完全同构。互斥非法（同空或同非空）时引擎返回 -1。
+JNIEXPORT jint JNICALL
+Java_com_zys_globecore_NativeLib_nativeAddGeoJSONLayer(JNIEnv *env, jobject /*thiz*/, jlong handle,
+                                                       jstring url, jstring data,
+                                                       jint fillColor, jint outlineColor, jfloat outlineWidth,
+                                                       jint lineColor, jfloat lineWidth,
+                                                       jint pointColor, jfloat pointRadiusDp,
+                                                       jboolean hasFillColor, jboolean hasLineColor,
+                                                       jstring labelField, jint labelColor, jfloat labelSize,
+                                                       jboolean labelOutline, jint labelOutlineColor,
+                                                       jstring featureStyleOverride,
+                                                       jintArray iconArgb, jint iconW, jint iconH,
+                                                       jboolean hasExtent, jdouble minLon, jdouble minLat,
+                                                       jdouble maxLon, jdouble maxLat, jint maxFeatures,
+                                                       jstring vectorCacheDir) {
+    if (handle == 0) return -1;
+
+    globecore::VectorStyle style;
+    unpackArgb(fillColor, style.fillR, style.fillG, style.fillB, style.fillA);
+    unpackArgb(outlineColor, style.outlineR, style.outlineG, style.outlineB, style.outlineA);
+    style.outlineWidth = outlineWidth;
+    unpackArgb(lineColor, style.lineR, style.lineG, style.lineB, style.lineA);
+    style.lineWidth = lineWidth;
+    unpackArgb(pointColor, style.pointR, style.pointG, style.pointB, style.pointA);
+    style.pointRadiusDp = pointRadiusDp;
+    style.hasFillColor = (hasFillColor == JNI_TRUE);
+    style.hasLineColor = (hasLineColor == JNI_TRUE);
+    if (labelField != nullptr) {
+        const char *lfUtf = env->GetStringUTFChars(labelField, nullptr);
+        if (lfUtf != nullptr) {
+            style.labelField = lfUtf;
+            env->ReleaseStringUTFChars(labelField, lfUtf);
+        }
+    }
+    unpackArgb(labelColor, style.labelR, style.labelG, style.labelB, style.labelA);
+    style.labelSize = labelSize;
+    style.labelOutline = (labelOutline == JNI_TRUE);
+    unpackArgb(labelOutlineColor, style.labelOutlineR, style.labelOutlineG, style.labelOutlineB, style.labelOutlineA);
+    if (featureStyleOverride != nullptr) {
+        const char *ovUtf = env->GetStringUTFChars(featureStyleOverride, nullptr);
+        style.featureOverrides = parseFeatureOverrides(ovUtf);
+        if (ovUtf != nullptr) env->ReleaseStringUTFChars(featureStyleOverride, ovUtf);
+    }
+
+    // @Jin 点要素图标：与 nativeAddVectorLayer 同口径，Android ARGB IntArray → RGBA 字节。
+    std::vector<uint8_t> iconRgba;
+    if (iconArgb != nullptr && iconW > 0 && iconH > 0) {
+        const jsize n = env->GetArrayLength(iconArgb);
+        if (n == static_cast<jsize>(iconW) * static_cast<jsize>(iconH)) {
+            jint *px = env->GetIntArrayElements(iconArgb, nullptr);
+            if (px != nullptr) {
+                iconRgba.resize(static_cast<size_t>(n) * 4);
+                for (jsize i = 0; i < n; ++i) {
+                    const uint32_t p = static_cast<uint32_t>(px[i]);
+                    iconRgba[static_cast<size_t>(i) * 4 + 0] = static_cast<uint8_t>((p >> 16) & 0xFF);
+                    iconRgba[static_cast<size_t>(i) * 4 + 1] = static_cast<uint8_t>((p >> 8) & 0xFF);
+                    iconRgba[static_cast<size_t>(i) * 4 + 2] = static_cast<uint8_t>(p & 0xFF);
+                    iconRgba[static_cast<size_t>(i) * 4 + 3] = static_cast<uint8_t>((p >> 24) & 0xFF);
+                }
+                env->ReleaseIntArrayElements(iconArgb, px, JNI_ABORT);
+            }
+        }
+    }
+
+    // @Jin url/data 均允许空串（互斥校验在引擎层）；null jstring 归一为空串。
+    const char *urlUtf = url != nullptr ? env->GetStringUTFChars(url, nullptr) : nullptr;
+    const char *dataUtf = data != nullptr ? env->GetStringUTFChars(data, nullptr) : nullptr;
+    const char *cacheUtf = vectorCacheDir != nullptr ? env->GetStringUTFChars(vectorCacheDir, nullptr) : nullptr;
+    const std::string urlStr = urlUtf != nullptr ? std::string(urlUtf) : std::string();
+    const std::string dataStr = dataUtf != nullptr ? std::string(dataUtf) : std::string();
+    const std::string cacheDir = cacheUtf != nullptr ? std::string(cacheUtf) : std::string();
+
+    const jint index = toGlobeEngine(handle)->addGeoJSONLayer(urlStr, dataStr, style,
+                                                               std::move(iconRgba), iconW, iconH,
+                                                               hasExtent == JNI_TRUE, minLon, minLat,
+                                                               maxLon, maxLat, maxFeatures, cacheDir);
+    if (cacheUtf != nullptr) env->ReleaseStringUTFChars(vectorCacheDir, cacheUtf);
+    if (dataUtf != nullptr) env->ReleaseStringUTFChars(data, dataUtf);
+    if (urlUtf != nullptr) env->ReleaseStringUTFChars(url, urlUtf);
+    return index;
+}
+
 // 按新屏幕范围重载指定矢量层（Swap-on-ready，无空窗）：index 为 nativeAddVectorLayer 加入次序。
 // hasExtent=JNI_FALSE 走整文件全量；maxFeatures≤0 取硬上限。越界/非文件层忽略。
 JNIEXPORT void JNICALL
